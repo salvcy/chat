@@ -1,8 +1,6 @@
-# Dial
+# Chat
 
 *A minimal chat interface for every model, through one key.*
-
-Working title — rename freely, it's a global find-replace.
 
 ## What this is
 
@@ -15,14 +13,14 @@ Stated up front so they can be overturned before any code gets written:
 - **Single user, no auth.** This is a personal tool, not a SaaS. No login, no multi-tenant data model.
 - **Local-first storage.** Conversations live in the browser (IndexedDB), not a server database. No sync service in v1.
 - **Vercel deploy target.** Next.js on Vercel is the default; Cloudflare Pages is a fine alternative if you'd rather keep everything in one hosting ecosystem, but it changes the streaming setup slightly.
-- **Black and white, both themes, no exceptions.** Dark and light mode both ship in v1. Neither has a color accent — the palette is strictly black, white, and neutral gray in both.
+- **Black and white interface, both themes.** Dark and light mode both ship in v1. The application chrome has no color accent; restrained semantic syntax colors are the one functional exception.
 
 ## Tech stack
 
 **Frontend**
 - Next.js 16 (App Router, Turbopack, React 19) + TypeScript
 - Tailwind CSS v4
-- Framer Motion — used sparingly, for the message-entry animation and the tuner-tick (see Design System)
+- Motion — used sparingly, for message entry and control transitions
 - `@ai-sdk/react` (`useChat`) for streaming message state
 
 **Backend**
@@ -122,17 +120,45 @@ A second toggle, same location and treatment as reasoning: off/on, no effort lev
 - Reasoning trace: same opacity-ramp streaming, but at Muted contrast rather than Foreground
 - Respect `prefers-reduced-motion` — the tuner-tick and message animation both degrade to a plain opacity fade
 
-## Core features (v1)
+## Core features (shipped)
 
-- Streaming chat, one message thread at a time
-- Model switcher — live OpenRouter catalog, searchable, shows pricing per model
-- Conversation history — sidebar, stored in IndexedDB, rename/delete
-- Markdown rendering + syntax-highlighted code blocks in assistant messages
-- Copy message, regenerate response, edit-and-resend
-- Per-conversation system prompt
-- Reasoning toggle (off/low/medium/high) with the telemetry-style trace display
-- Real-time search toggle with inline citations
-- Keyboard-first: Cmd+Enter to send, Cmd+K to switch models
+- Streaming chat, one thread at a time, persisted locally
+- **Model switcher** — live catalog, searchable, arrow-key navigable, with
+  pricing, context, and capability chips
+- **Per-message telemetry** — routed provider, time-to-first-token, tok/s,
+  prompt/completion/cached/reasoning token split, and real USD cost pulled
+  from OpenRouter's usage accounting (measured, never estimated)
+- **Capability-aware controls** — the reasoning menu offers exactly the
+  efforts the selected model advertises; search greys out with a reason on
+  models that cannot call the app's web-search tool. The palette's `web`
+  filter finds compatible models directly
+- Conversation history — a resizable (drag the edge), collapsible (⌘B) rail
+  with filter, date grouping, pinning, rename/delete, and per-thread cost
+- Markdown + theme-aware semantic syntax highlighting, with per-block copy
+  and independent show/hide controls
+- Right-edge message navigator with a compact proximity-hover cluster,
+  previews, and click-to-jump navigation (hidden when the chat pane is narrow)
+- Copy message, regenerate, edit-and-resend, branch into a new thread
+- Per-conversation system prompt, with presets
+- Reasoning toggle (`off`/`minimal`/`low`/`medium`/`high`/`xhigh`, per model);
+  the trace and web source count share one "thought for 11.4s · 3 sources"
+  row above the answer; expanding it reveals the trace and a compact
+  `1 · example.com` source list
+- Web search toggle, with one canonical row of compact numbered links under
+  the answer
+- **Image generation tool** — type `@image`, choose the inline tool, and
+  describe the image. OpenRouter's dedicated Images API runs deterministically
+  without an extra LLM turn; generated assets, measured cost, failures, retry,
+  reference images, download, and full-screen preview live in the transcript.
+  A selected model that advertises image output is used directly; vision-only
+  models (image input) use the configured generation fallback
+- Stop mid-stream (button or Esc); mid-stream snapshots survive a refresh
+- Generated conversation titles (cheap model), never overwriting a rename
+- Export as Markdown or JSON
+- Reasoning, search and model persist as session defaults — a new chat starts
+  with the knobs you were last using
+- Keyboard-first: `⏎` send, `⌘K` tune, `>` inside the palette for commands,
+  `⌘⇧K` new chat, `⌘B` toggle the rail, `Esc` stop
 
 ## Stretch (v2+)
 
@@ -159,35 +185,41 @@ Explicitly out of scope until there's a real reason to revisit:
 ```
 /app
   /api/chat/route.ts        → POST, streams from OpenRouter via streamText
+  /api/image/route.ts       → POST, executes the @image tool
   /api/models/route.ts      → GET, cached OpenRouter model catalog
   layout.tsx
   page.tsx                  → main chat view
 /components
   chat/
-    MessageList.tsx
+    ChatView.tsx             → live transcript, persistence, attachments
+    EmptyState.tsx           → compact starter workspace
     MessageBubble.tsx
-    ReasoningPanel.tsx       → collapsible telemetry-style trace
-    Citations.tsx            → hairline footnote block for search sources
-    InputBar.tsx             → send + reasoning/search toggles
+    ThinkingPanel.tsx        → one collapsible trace: reasoning + sources,
+                               headed by how long the model thought
+    Citations.tsx            → numbered chips linking out
+    Composer.tsx             → send + capability-aware reasoning/search
   tuner/
-    TunerStrip.tsx
+    StatusStrip.tsx          → conversation/model/account context
     ThemeToggle.tsx
-    ModelSwitcher.tsx
+    Palette.tsx              → model search, filters, commands
   sidebar/
     ConversationList.tsx
+    RailHandle.tsx           → pointer + keyboard resizing
+    RailToggle.tsx           → persisted collapse state
   ui/                        → restyled primitives (no default shadcn look)
 /lib
   openrouter.ts              → createOpenRouter() wrapper: reasoning param, web_search tool, appName/appUrl
   db.ts                      → Dexie schema: conversations, messages
   types.ts
-/styles
-  globals.css                → design tokens as CSS custom properties
+/app/globals.css             → design tokens as CSS custom properties
 ```
 
 ## Environment variables
 
 ```
 OPENROUTER_API_KEY=
+# optional fallback when the selected model does not generate image output
+OPENROUTER_IMAGE_MODEL=openai/gpt-image-2
 ```
 
 That's the only required one for v1. Nothing else needs a secret.
@@ -202,10 +234,18 @@ pnpm dev
 
 ## Roadmap
 
-- [ ] **Phase 0 — Scaffold.** Next.js project, Tailwind config with the design tokens above as CSS variables (both themes), folder structure.
-- [ ] **Phase 1 — Core loop.** One hardcoded model, streaming end-to-end, no bubble styling yet — prove the plumbing works.
-- [ ] **Phase 2 — Model switcher.** Live OpenRouter catalog, tuner strip UI, model persisted per conversation.
-- [ ] **Phase 3 — Reasoning + search.** Reasoning toggle and telemetry-style trace panel, `openrouter:web_search` tool with inline citations.
-- [ ] **Phase 4 — Persistence.** Dexie schema, conversation sidebar, rename/delete.
-- [ ] **Phase 5 — Design pass.** Glass panels, motion, dark/light theme toggle, the tuner-tick signature interaction, mobile responsiveness.
-- [ ] **Phase 6 — Stretch.** Pick from the list above based on what's actually missing once v1 is lived-in.
+- [x] **Phase 0 — Scaffold.** Next.js project, Tailwind config with the design tokens above as CSS variables (both themes), folder structure.
+- [x] **Phase 1 — Core loop.** One hardcoded model, streaming end-to-end, no bubble styling yet — prove the plumbing works.
+- [x] **Phase 2 — Model switcher.** Live OpenRouter catalog, tuner strip UI, model persisted per conversation.
+- [x] **Phase 3 — Reasoning + search.** Reasoning toggle and telemetry-style trace panel, `openrouter:web_search` tool with inline citations.
+- [x] **Phase 4 — Persistence.** Dexie schema, conversation sidebar, rename/delete.
+- [x] **Phase 5 — Design pass.** Glass panels, motion, dark/light theme toggle, the tuner-tick signature interaction, mobile responsiveness.
+- [x] **Phase 6 — Instrument rework.** Telemetry bus (usage accounting →
+      streamed message metadata), capability-aware catalog and controls,
+      system prompt, edit/regenerate/branch, unified palette, export,
+      semantic syntax highlighting, generated titles, streaming persistence, zod-validated
+      API.
+- [ ] **Phase 7 — Next.** Vision input ✓ (capability-gated images, paste/drop,
+      client + server size limits); image generation ✓ (`@image`, references,
+      local persistence, retry/download/preview); next: sub-agent delegation
+      and per-thread temperature (the request schema already carries it).

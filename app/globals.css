@@ -3,31 +3,66 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
-  --background: #fafafa;
-  --foreground: #0a0a0a;
-  --muted: #8a8a8a;
-  --surface: rgba(0, 0, 0, 0.04);
-  --hairline: rgba(0, 0, 0, 0.1);
-  --invert-fill: #0a0a0a;
-  --invert-text: #fafafa;
+  --chrome: #ececeb;
+  --background: #f8f8f7;
+  --panel: #f3f3f2;
+  --foreground: #111111;
+  --secondary: #505050;
+  --muted: #858585;
+  --surface: rgba(0, 0, 0, 0.035);
+  --surface-strong: rgba(0, 0, 0, 0.065);
+  --hairline: rgba(0, 0, 0, 0.085);
+  --hairline-strong: rgba(0, 0, 0, 0.15);
+  --invert-fill: #111111;
+  --invert-text: #f8f8f7;
+  --shadow: rgba(0, 0, 0, 0.12);
+  --syntax-comment: #70787a;
+  --syntax-keyword: #7540a8;
+  --syntax-string: #23704f;
+  --syntax-number: #a95d13;
+  --syntax-function: #276695;
+  --syntax-type: #9a466c;
+  --syntax-variable: #835d22;
+  --syntax-operator: #626a70;
+  --syntax-deleted: #a44848;
 }
 
 .dark {
-  --background: #0a0a0a;
-  --foreground: #f5f5f5;
-  --muted: #8a8a8a;
-  --surface: rgba(255, 255, 255, 0.06);
-  --hairline: rgba(255, 255, 255, 0.1);
-  --invert-fill: #ffffff;
-  --invert-text: #0a0a0a;
+  --chrome: #080808;
+  --background: #0c0c0c;
+  --panel: #101010;
+  --foreground: #f0f0ef;
+  --secondary: #b4b4b3;
+  --muted: #797978;
+  --surface: rgba(255, 255, 255, 0.045);
+  --surface-strong: rgba(255, 255, 255, 0.075);
+  --hairline: rgba(255, 255, 255, 0.075);
+  --hairline-strong: rgba(255, 255, 255, 0.14);
+  --invert-fill: #f0f0ef;
+  --invert-text: #0c0c0c;
+  --shadow: rgba(0, 0, 0, 0.55);
+  --syntax-comment: #788184;
+  --syntax-keyword: #c3a0e8;
+  --syntax-string: #8bc9a3;
+  --syntax-number: #dfa86f;
+  --syntax-function: #82b4df;
+  --syntax-type: #dfa2c0;
+  --syntax-variable: #d1ba87;
+  --syntax-operator: #9ba4ab;
+  --syntax-deleted: #d88080;
 }
 
 @theme inline {
   --color-background: var(--background);
+  --color-chrome: var(--chrome);
+  --color-panel: var(--panel);
   --color-foreground: var(--foreground);
+  --color-secondary: var(--secondary);
   --color-muted: var(--muted);
   --color-surface: var(--surface);
+  --color-surface-strong: var(--surface-strong);
   --color-hairline: var(--hairline);
+  --color-hairline-strong: var(--hairline-strong);
   --color-invert-fill: var(--invert-fill);
   --color-invert-text: var(--invert-text);
   --font-sans: var(--font-geist-sans);
@@ -35,8 +70,87 @@
 }
 
 body {
-  background: var(--background);
+  background: var(--chrome);
   color: var(--foreground);
+  overflow: hidden;
+}
+
+button,
+a,
+input,
+textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+}
+
+.app-shell {
+  background:
+    radial-gradient(circle at 70% -20%, var(--surface-strong), transparent 42%),
+    var(--chrome);
+}
+
+.app-workspace {
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.025) inset,
+    0 18px 70px var(--shadow);
+}
+
+.composer-surface {
+  background: color-mix(in oklab, var(--panel) 88%, transparent);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 18px 55px var(--shadow);
+}
+
+/* ---- conversation rail geometry ----
+   Width lives in a custom property rather than React state so dragging the
+   resize handle never re-renders the tree, and the boot script can restore
+   it before the first paint. */
+:root {
+  --dial-rail-w: 272px;
+}
+
+.dial-rail {
+  opacity: 1;
+  visibility: visible;
+  transition:
+    width 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 160ms ease,
+    visibility 0s linear 0s;
+}
+
+.dial-rail-collapsed .dial-rail {
+  width: 0 !important;
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
+  transition:
+    width 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 160ms ease,
+    visibility 0s linear 220ms;
+}
+
+/* The transcript minimap only appears when the chat pane itself has enough
+   room. This responds to sidebar resizing, not just the browser viewport. */
+.chat-scroll-region {
+  container-type: inline-size;
+}
+
+.message-navigator {
+  display: none;
+}
+
+@container (min-width: 880px) {
+  .message-navigator {
+    display: block;
+  }
 }
 
 /* ---- shimmer / glow for live telemetry (reasoning, search) ---- */
@@ -79,6 +193,9 @@ body {
   background: var(--hairline);
   border-radius: 3px;
 }
+.dial-scroll:hover::-webkit-scrollbar-thumb {
+  background: var(--hairline-strong);
+}
 .dial-scroll::-webkit-scrollbar-track {
   background: transparent;
 }
@@ -86,6 +203,80 @@ body {
 /* prose-ish rhythm for markdown */
 .dial-md > *:first-child {
   margin-top: 0;
+}
+.dial-md > *:last-child {
+  margin-bottom: 0;
+}
+
+/* Streaming text arrives as an opacity ramp — no caret, no typewriter. */
+@keyframes dial-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Horizontal scrollbars (code blocks, tables, the composer control row). */
+.dial-scroll::-webkit-scrollbar:horizontal {
+  height: 6px;
+}
+
+/* Scrollable, with no visible bar. A 6px track inside a ~240px rail is more
+   noise than affordance, and the rail is meant to recede. */
+.dial-scroll-none {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.dial-scroll-none::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+/* Keyboard focus is a hairline ring, never a colour — and never on text
+   fields: the caret is already the affordance, and a box around a
+   borderless textarea reads as a stray outline inside the glass capsule. */
+:where(button, a):focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--hairline), 0 0 0 3px var(--surface);
+}
+
+:where([role="separator"]):focus-visible {
+  outline: none;
+}
+
+:where(input, textarea):focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+/* Selection stays monochrome — the browser default is a blue accent. */
+::selection {
+  background: var(--invert-fill);
+  color: var(--invert-text);
+}
+
+@media (hover: none), (pointer: coarse) {
+  .message-actions {
+    opacity: 0.72 !important;
+  }
+}
+
+@media (max-width: 767px) {
+  .app-workspace {
+    box-shadow: none;
+  }
+}
+
+/* Keep the blank canvas fully useful on short laptop/browser windows. */
+@media (min-width: 768px) and (max-height: 680px) {
+  .empty-state {
+    min-height: 100%;
+    padding-bottom: 1rem;
+    padding-top: 1.5rem;
+  }
 }
 
 

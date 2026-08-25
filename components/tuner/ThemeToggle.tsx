@@ -1,14 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 const KEY = "dial:theme";
 
 /**
- * Theme toggle — swaps instantly (no cross-fade: a color transition on
- * the control that switches the palette would undercut "no color, ever"
- * everywhere else). Persisted; boot script in layout.tsx applies it
+ * Theme toggle — swaps instantly. No cross-fade: a colour transition on the
+ * one control that switches the palette would undercut "no colour, ever"
+ * everywhere else. Persisted; the boot script in layout.tsx applies it
  * before paint so there's no flash.
+ *
+ * Also listens for `dial:toggle-theme` so the command palette can drive it
+ * without lifting theme state into the shell.
  */
 export default function ThemeToggle() {
   const [dark, setDark] = useState(true);
@@ -19,11 +22,12 @@ export default function ThemeToggle() {
     });
   }, []);
 
-  const toggle = () => {
-    const next = !dark;
-    setDark(next);
+  const toggle = useCallback(() => {
     const root = document.documentElement;
-    // Kill all transitions for one frame so the swap is truly instant.
+    const next = !root.classList.contains("dark");
+    setDark(next);
+
+    // Kill transitions for one frame so the swap is genuinely instant.
     const style = document.createElement("style");
     style.appendChild(
       document.createTextNode(
@@ -32,17 +36,28 @@ export default function ThemeToggle() {
     );
     document.head.appendChild(style);
     root.classList.toggle("dark", next);
-    localStorage.setItem(KEY, next ? "dark" : "light");
+    try {
+      localStorage.setItem(KEY, next ? "dark" : "light");
+    } catch {
+      // Storage disabled — the theme just won't survive a reload.
+    }
     requestAnimationFrame(() => {
       requestAnimationFrame(() => style.remove());
     });
-  };
+  }, []);
+
+  useEffect(() => {
+    const handler = () => toggle();
+    document.addEventListener("dial:toggle-theme", handler);
+    return () => document.removeEventListener("dial:toggle-theme", handler);
+  }, [toggle]);
 
   return (
     <button
-      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted transition-colors hover:bg-background/40 hover:text-foreground"
+      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface-strong hover:text-foreground"
       onClick={toggle}
       aria-label={dark ? "Switch to light theme" : "Switch to dark theme"}
+      title={dark ? "Light theme" : "Dark theme"}
     >
       {dark ? (
         <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">

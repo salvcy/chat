@@ -1,36 +1,52 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import ConversationList from "@/components/sidebar/ConversationList";
-import ThemeToggle from "@/components/tuner/ThemeToggle";
-import ModelSwitcher from "@/components/tuner/ModelSwitcher";
-import { useConversations } from "@/lib/conversations";
-import { DEFAULT_MODEL, type OpenRouterModel } from "@/lib/types";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import ChatView from "@/components/chat/ChatView";
+import ConversationList from "@/components/sidebar/ConversationList";
+import Palette, { type Command } from "@/components/tuner/Palette";
+import RailHandle from "@/components/sidebar/RailHandle";
+import StatusStrip from "@/components/tuner/StatusStrip";
+import { reconcileSettings } from "@/lib/capabilities";
+import { useConversations, type DialMessage } from "@/lib/conversations";
+import { db, settingsOf } from "@/lib/db";
+import { exportConversation } from "@/lib/export";
+import { newConversationSettings, writeDefaults } from "@/lib/preferences";
+import type { ChatSettings, OpenRouterModel } from "@/lib/types";
+
+/** Stable identity so the derived empty view doesn't remount the chat. */
+const EMPTY_MESSAGES: DialMessage[] = [];
 
 /**
- * Shell: owns the conversation list, the live model catalog, the active
- * conversation's settings/messages, and the selected model. The chat renders
- * in a keyed ChatView — remounting per conversation guarantees useChat's
- * session and its in-memory messages reset, so histories never interleave
- * (the "user chat appears after streamed text" bug) and there's no flash of
- * the previous conversation.
+ * The shell. Owns the conversation list, the live catalog, and the active
+ * thread's settings + messages.
+ *
+ * The chat renders in a keyed ChatView: remounting per conversation resets
+ * useChat's session and its in-memory messages, so histories can never
+ * interleave and there's no flash of the previous thread.
  */
 export default function Home() {
   const conv = useConversations();
   const [models, setModels] = useState<OpenRouterModel[]>([]);
-  const [model, setModel] = useState(DEFAULT_MODEL);
-  const [switcherOpen, setSwitcherOpen] = useState(false);
+  // Session defaults (model + reasoning + search) rather than hard defaults:
+  // a new chat inherits the knobs you were last working with.
+  const [settings, setSettings] = useState<ChatSettings>(newConversationSettings);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  /**
+   * The id the chat is currently writing under, minted here rather than in
+   * ChatView. A new thread already has its real id before the first send, so
+   * the moment it becomes "active" doesn't change the chat's key — which is
+   * what previously remounted ChatView mid-save and blanked the transcript.
+   */
+  const [draftId, setDraftId] = useState(() => crypto.randomUUID());
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [initial, setInitial] = useState<{
+  /** Messages for the active thread, once read out of Dexie. */
+  const [loaded, setLoaded] = useState<{
     key: string;
-    reasoning: import("@/lib/types").ReasoningEffort;
-    search: boolean;
-    messages: import("ai").UIMessage[];
+    messages: DialMessage[];
   } | null>(null);
-  const [loadedKey, setLoadedKey] = useState<string | null>(null);
 
-  // Live catalog (cached server-side).
+  /* ------------------------------ catalog ------------------------------ */
+
   useEffect(() => {
     fetch("/api/models")
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
@@ -38,124 +54,275 @@ export default function Home() {
       .catch(() => setModels([]));
   }, []);
 
-  // ⌘K opens the model switcher.
+  /* ------------------------- active conversation ----------------------- */
+
+  useEffect(() => {
+    const id = conv.activeId;
+    // An empty thread needs no read — it is derived below, not stored. Nor
+    // does the draft: ChatView holds its live state and is authoritative,
+    // so re-reading it here would overwrite a streaming thread with Dexie.
+    if (!conv.ready || !id || id === draftId) return;
+    let cancelled = false;
+
+    void Promise.all([conv.getMeta(id), conv.loadMessages(id)]).then(
+      ([meta, messages]) => {
+        if (cancelled) return;
+        setSettings(settingsOf(meta));
+        setLoaded({ key: id, messages });
+      },
+    );
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-resolve when the active thread changes
+  }, [conv.ready, conv.activeId, draftId]);
+
+  /**
+   * What the chat actually renders. The empty state is derived rather than
+   * stored — writing it from an effect would cascade an extra render on
+   * every "new chat", and there is nothing to load.
+   */
+  const view: { key: string; messages: DialMessage[] } | null =
+    conv.activeId === null || conv.activeId === draftId
+      ? conv.ready
+        ? { key: draftId, messages: EMPTY_MESSAGES }
+        : null
+      : loaded?.key === conv.activeId
+        ? loaded
+        : null;
+
+  /**
+   * Settings coerced to what the selected model can actually serve — a
+   * thread saved against a reasoning model must not keep sending an effort
+   * the current model would silently drop. Derived on read so switching
+   * models can't leave stale knobs behind.
+   */
+  const effective = useMemo(
+    () => (models.length > 0 ? reconcileSettings(settings, models) : settings),
+    [settings, models],
+  );
+
+  /* ------------------------------ settings ----------------------------- */
+
+  const changeSettings = useCallback(
+    (patch: Partial<ChatSettings>) => {
+      setSettings((s) => {
+        const merged = { ...s, ...patch };
+        const next =
+          patch.model !== undefined ? reconcileSettings(merged, models) : merged;
+        // Persist against the thread, so reopening it restores its knobs…
+        if (conv.activeId) void conv.updateSettings(conv.activeId, next);
+        // …and as the session default, so the *next* new chat inherits them.
+        writeDefaults(next);
+        return next;
+      });
+    },
+    [models, conv],
+  );
+
+  /* ------------------------------ actions ------------------------------ */
+
+  const selectConversation = (id: string) => {
+    setSidebarOpen(false);
+    // Re-picking the open thread would retire the draft id and force a
+    // pointless reload of a conversation already on screen.
+    if (id === conv.activeId) return;
+    // Retire the draft id so the guard above can't mistake a stored thread
+    // for the live one and skip loading it.
+    setDraftId(crypto.randomUUID());
+    conv.setActiveId(id);
+  };
+
+  const newConversation = useCallback(() => {
+    setDraftId(crypto.randomUUID());
+    conv.setActiveId(null);
+    // Carry model/reasoning/search forward; drop the thread-specific prompt.
+    setSettings(newConversationSettings());
+    setSidebarOpen(false);
+  }, [conv]);
+
+  /** Delete a thread and retire its live ChatView identity when it was open. */
+  const removeConversation = useCallback(
+    async (id: string) => {
+      const wasActive = conv.activeId === id;
+      await conv.remove(id);
+      if (!wasActive) return;
+      // The first saved thread shares the draft id it started with. Minting a
+      // new one forces useChat to unmount, otherwise its in-memory transcript
+      // can remain visible after the IndexedDB rows are gone.
+      setDraftId(crypto.randomUUID());
+      setSettings(newConversationSettings());
+    },
+    [conv],
+  );
+
+  /** Fork a thread into a fresh conversation carrying its history forward. */
+  const branch = useCallback(
+    async (messages: DialMessage[], from: ChatSettings) => {
+      const id = crypto.randomUUID();
+      await conv.saveTurn({ id, settings: from, messages, naming: false });
+      const meta = await conv.getMeta(id);
+      if (meta) await conv.rename(id, `${meta.title} ↳`);
+      setDraftId(crypto.randomUUID());
+      conv.setActiveId(id);
+    },
+    [conv],
+  );
+
+  const exportById = useCallback(
+    async (id: string, format: "md" | "json" = "md") => {
+      const meta = await db.conversations.get(id);
+      if (!meta) return;
+      const messages = await conv.loadMessages(id);
+      exportConversation(meta, messages, format);
+    },
+    [conv],
+  );
+
+  /* ------------------------------ palette ------------------------------ */
+
+  const commands = useMemo<Command[]>(() => {
+    const active = conv.activeId;
+    const list: Command[] = [
+      { id: "new", label: "New conversation", hint: "⌘⇧K", run: newConversation },
+    ];
+    if (active) {
+      const meta = conv.conversations.find((c) => c.id === active);
+      list.push(
+        {
+          id: "export-md",
+          label: "Export conversation as Markdown",
+          run: () => void exportById(active, "md"),
+        },
+        {
+          id: "export-json",
+          label: "Export conversation as JSON",
+          run: () => void exportById(active, "json"),
+        },
+        {
+          id: "pin",
+          label: meta?.pinned ? "Unpin conversation" : "Pin conversation",
+          run: () => void conv.togglePin(active),
+        },
+        {
+          id: "delete",
+          label: "Delete conversation",
+          hint: "no undo",
+          run: () => void removeConversation(active),
+        },
+      );
+    }
+    list.push({
+      id: "theme",
+      label: "Toggle light / dark theme",
+      run: () => document.dispatchEvent(new CustomEvent("dial:toggle-theme")),
+    });
+    return list;
+  }, [conv, newConversation, exportById, removeConversation]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      const meta = e.metaKey || e.ctrlKey;
+      if (!meta) return;
+      if (e.key.toLowerCase() === "k") {
         e.preventDefault();
-        setSwitcherOpen((o) => !o);
+        if (e.shiftKey) newConversation();
+        else setPaletteOpen((o) => !o);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [newConversation]);
 
-  // Resolve the active conversation's settings + messages, THEN render the
-  // keyed ChatView once (no loading flash, no cross-conversation bleed).
   useEffect(() => {
-    if (!conv.ready) return;
-    const id = conv.activeId;
-    let cancelled = false;
-    if (!id) {
-      queueMicrotask(() => {
-        if (cancelled) return;
-        setModel(DEFAULT_MODEL);
-        setInitial({ key: "new", reasoning: "off", search: false, messages: [] });
-        setLoadedKey("new");
-      });
-      return;
-    }
-    Promise.all([conv.getMeta(id), conv.loadMessages(id)]).then(([meta, msgs]) => {
-      if (cancelled) return;
-      setModel(meta?.model ?? DEFAULT_MODEL);
-      setInitial({
-        key: id,
-        reasoning: meta?.reasoning ?? "off",
-        search: meta?.search ?? false,
-        messages: msgs,
-      });
-      setLoadedKey(id);
-    });
-    return () => {
-      cancelled = true;
+    if (!sidebarOpen) return;
+    const closeOnEscape = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      setSidebarOpen(false);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-resolve when the active conversation changes
-  }, [conv.ready, conv.activeId]);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [sidebarOpen]);
 
-  const selectConversation = (id: string) => {
-    conv.setActiveId(id);
-    setSidebarOpen(false);
-  };
+  /* ------------------------------- render ------------------------------ */
 
-  const newConversation = () => {
-    conv.setActiveId(null);
-    setSidebarOpen(false);
-  };
+  const activeMeta = conv.conversations.find((c) => c.id === conv.activeId);
+
+  const sidebar = (
+    <ConversationList
+      conversations={conv.conversations}
+      activeId={conv.activeId}
+      onSelect={selectConversation}
+      onNew={newConversation}
+      onRename={(id, t) => void conv.rename(id, t)}
+      onDelete={(id) => void removeConversation(id)}
+      onTogglePin={(id) => void conv.togglePin(id)}
+      onExport={(id) => void exportById(id, "md")}
+    />
+  );
 
   return (
-    <div className="flex h-full overflow-hidden">
-      {/* Desktop sidebar — fixed rail, does not scroll with chat */}
-      <div className="hidden h-full w-72 shrink-0 md:block">
-        <ConversationList
-          conversations={conv.conversations}
-          activeId={conv.activeId}
-          onSelect={selectConversation}
-          onNew={newConversation}
-          onRename={(id, t) => void conv.rename(id, t)}
-          onDelete={(id) => void conv.remove(id)}
-        />
+    <div className="app-shell flex h-[100dvh] overflow-hidden">
+      {/* Width comes from --dial-rail-w (restored pre-paint by the boot
+          script, updated directly by RailHandle) so dragging never re-renders
+          the tree. `.dial-rail` is what the collapsed class hides. */}
+      <div
+        className="dial-rail relative hidden h-full shrink-0 overflow-hidden md:block"
+        style={{ width: "var(--dial-rail-w)" }}
+      >
+        <div className="h-full p-2 pr-0">{sidebar}</div>
+        <RailHandle />
       </div>
 
-      {/* Mobile sidebar drawer */}
       {sidebarOpen && (
         <div
-          className="fixed inset-0 z-50 bg-background/50 backdrop-blur-sm md:hidden"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Conversations"
+          className="fixed inset-0 z-50 bg-chrome/70 backdrop-blur-md md:hidden"
           onClick={() => setSidebarOpen(false)}
         >
           <div
-            className="h-full w-72 max-w-[82vw] bg-background/80 backdrop-blur-[20px]"
+            className="h-full w-72 max-w-[86vw] p-2"
             onClick={(e) => e.stopPropagation()}
           >
-            <ConversationList
-              conversations={conv.conversations}
-              activeId={conv.activeId}
-              onSelect={selectConversation}
-              onNew={newConversation}
-              onRename={(id, t) => void conv.rename(id, t)}
-              onDelete={(id) => void conv.remove(id)}
-            />
+            {sidebar}
           </div>
+          <button
+            type="button"
+            aria-label="Close conversations"
+            onClick={() => setSidebarOpen(false)}
+            className="absolute right-3 top-3 flex h-9 w-9 items-center justify-center rounded-full border border-hairline bg-panel/80 text-lg text-muted backdrop-blur-xl transition-colors hover:text-foreground"
+          >
+            ×
+          </button>
         </div>
       )}
 
-      <main className="flex h-full min-w-0 flex-1 flex-col">
-        <div className="flex items-center justify-end gap-1 px-4 pt-3">
-          <div className="md:hidden">
-            <button
-              onClick={() => setSidebarOpen(true)}
-              aria-label="Conversations"
-              className="flex h-9 w-9 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface hover:text-foreground"
-            >
-              <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-                <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11" />
-              </svg>
-            </button>
-          </div>
-          <ThemeToggle />
-        </div>
+      <main className="app-workspace relative m-2 flex min-w-0 flex-1 flex-col overflow-hidden rounded-[20px] border border-hairline bg-background max-md:m-0 max-md:rounded-none max-md:border-0">
+        <StatusStrip
+          title={activeMeta?.title}
+          model={effective.model}
+          ready={conv.ready}
+          threadCostUsd={activeMeta?.totalCostUsd}
+          threadTokens={activeMeta?.totalTokens}
+          onOpenPalette={() => setPaletteOpen(true)}
+          onOpenSidebar={() => setSidebarOpen(true)}
+        />
 
-        {initial && loadedKey === (conv.activeId ?? "new") ? (
+        {view ? (
           <ChatView
-            key={initial.key}
-            conversationKey={initial.key}
-            conversationId={conv.activeId}
-            model={model}
-            initialReasoning={initial.reasoning}
-            initialSearch={initial.search}
-            initialMessages={initial.messages}
+            key={view.key}
+            conversationId={view.key}
+            settings={effective}
+            onSettingsChange={changeSettings}
+            initialMessages={view.messages}
             models={models}
-            onOpenSwitcher={() => setSwitcherOpen(true)}
-            persist={conv.persist}
+            onOpenSwitcher={() => setPaletteOpen(true)}
+            onBranch={(messages, from) => void branch(messages, from)}
+            saveTurn={conv.saveTurn}
             setActiveId={conv.setActiveId}
           />
         ) : (
@@ -164,15 +331,16 @@ export default function Home() {
           </div>
         )}
 
-        {switcherOpen && (
-          <ModelSwitcher
+        {paletteOpen && (
+          <Palette
             models={models}
-            current={model}
-            onSelect={(id) => {
-              setModel(id);
-              setSwitcherOpen(false);
+            current={effective.model}
+            commands={commands}
+            onSelect={(model) => {
+              changeSettings({ model });
+              setPaletteOpen(false);
             }}
-            onClose={() => setSwitcherOpen(false)}
+            onClose={() => setPaletteOpen(false)}
           />
         )}
       </main>

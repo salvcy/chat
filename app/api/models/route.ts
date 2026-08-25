@@ -1,49 +1,30 @@
-import type { OpenRouterModel } from "@/lib/types";
+import { CatalogError, fetchCatalog } from "@/lib/catalog";
 
 /**
- * GET /api/models — the live OpenRouter model catalog, trimmed to what the
- * switcher needs. Fetched server-side and cached for 1 hour via the
- * upstream fetch cache; the key never reaches the client.
+ * GET /api/models — the live OpenRouter catalog, normalized.
+ *
+ * This is deliberately richer than "what the switcher renders": it carries
+ * each model's capability surface (vision input / image output / tools /
+ * reasoning efforts) so
+ * the composer can offer exactly the controls a model will honour. Cached
+ * upstream for an hour; the key never reaches the client.
  */
 export async function GET() {
   try {
-    const res = await fetch("https://openrouter.ai/api/v1/models", {
-      headers: {
-        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-      },
-      next: { revalidate: 3600 },
-    });
-
-    if (!res.ok) {
-      return Response.json(
-        { error: `OpenRouter catalog returned ${res.status}` },
-        { status: 502 },
-      );
-    }
-
-    const { data } = (await res.json()) as {
-      data: Array<{
-        id: string;
-        name: string;
-        context_length?: number | null;
-        top_provider?: { context_length?: number | null } | null;
-        pricing?: { prompt?: string; completion?: string } | null;
-      }>;
-    };
-
-    const models: OpenRouterModel[] = data.map((m) => ({
-      id: m.id,
-      name: m.name,
-      contextLength: m.context_length ?? m.top_provider?.context_length ?? null,
-      promptPrice: m.pricing?.prompt ?? null,
-      completionPrice: m.pricing?.completion ?? null,
-    }));
-
-    return Response.json({ models });
-  } catch (err) {
+    const models = await fetchCatalog();
     return Response.json(
-      { error: err instanceof Error ? err.message : "catalog fetch failed" },
-      { status: 502 },
+      { models, fetchedAt: Date.now() },
+      // Let the browser reuse it for the session without re-hitting us.
+      { headers: { "Cache-Control": "private, max-age=300" } },
+    );
+  } catch (err) {
+    const status = err instanceof CatalogError ? err.status : 502;
+    return Response.json(
+      {
+        error:
+          err instanceof Error ? err.message : "model catalog fetch failed",
+      },
+      { status, headers: { "Cache-Control": "no-store" } },
     );
   }
 }
