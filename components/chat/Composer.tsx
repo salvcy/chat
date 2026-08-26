@@ -95,9 +95,11 @@ export default function Composer({
   const entry = modelFor(settings.model, models);
   const efforts = effortOptions(caps);
   const searchReason = unavailableReason("search", caps);
-  const attachReason = unavailableReason("attach", caps);
   const hasSystem = settings.system.trim().length > 0;
-  const canAttach = imageMode || caps.vision;
+  // Always available now: a PDF can go to any model, because OpenRouter
+  // converts it for the ones that cannot read files. Whether *images* are
+  // accepted is enforced per file at intake, not by hiding the control.
+  const canAttach = true;
   const toolMention = imageMode ? null : input.match(/^@([a-z]*)$/i)?.[1];
   const showImageSuggestion =
     toolMention !== null &&
@@ -255,7 +257,7 @@ export default function Composer({
             <input
               ref={fileRef}
               type="file"
-              accept="image/*"
+              accept={caps.vision ? "image/*,application/pdf" : "application/pdf"}
               multiple
               className="hidden"
               onChange={(e) => {
@@ -271,8 +273,8 @@ export default function Composer({
                 imageMode
                   ? "Add reference images"
                   : caps.vision
-                    ? "Attach images"
-                    : (attachReason ?? "Images unavailable")
+                    ? "Attach images or PDFs"
+                    : "Attach PDFs — this model does not accept images"
               }
               aria-label="Attach images"
               className="flex h-8 w-8 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface-strong hover:text-foreground disabled:opacity-30"

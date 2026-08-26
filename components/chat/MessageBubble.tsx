@@ -176,7 +176,7 @@ export default function MessageBubble({
                 }`}
               >
                 {files.map((file, index) =>
-                  file.mediaType.startsWith("image/") ? (
+                  file.mediaType.startsWith("image/") && file.url ? (
                     <Image
                       key={`${file.url.slice(0, 40)}-${index}`}
                       unoptimized
@@ -186,12 +186,19 @@ export default function MessageBubble({
                       height={220}
                       className="max-h-56 w-full rounded-[15px] object-cover"
                     />
-                  ) : (
+                  ) : file.url ? (
                     <div
                       key={`${file.url.slice(0, 40)}-${index}`}
                       className="rounded-xl border border-hairline bg-background/35 px-3 py-2 font-mono text-[10px] text-muted"
                     >
                       {file.filename ?? "attachment"}
+                    </div>
+                  ) : (
+                    <div
+                      key={`missing-${index}`}
+                      className="rounded-xl border border-hairline bg-background/35 px-3 py-2 font-mono text-[10px] text-muted"
+                    >
+                      attachment unavailable on this device
                     </div>
                   ),
                 )}

@@ -83,6 +83,14 @@ export type OpenRouterModel = {
 export type ModelCapabilities = {
   /** Accepts image input — gates the attach control. */
   vision: boolean;
+  /**
+   * Accepts a raw file (PDF) as input, natively.
+   *
+   * False does not mean PDFs are unavailable: OpenRouter's file-parser
+   * plugin converts a document to markdown for any model. It decides which
+   * engine to ask for — see `pdfEngineFor`.
+   */
+  documents: boolean;
   /** Produces image output — allows @image to use the selected model. */
   imageGeneration: boolean;
   /** Accepts a `tools` array — gates web search. */
@@ -115,6 +123,10 @@ export type GeneratedImageAsset = {
   /** Embedded locally so the image survives a reload without a CDN. */
   url: string;
   mediaType: string;
+  /** Opaque R2 object id. Present after the first account sync. */
+  blobId?: string;
+  /** Optional direct R2 custom-domain URL; the bytes there are ciphertext. */
+  blobUrl?: string;
 };
 
 /**

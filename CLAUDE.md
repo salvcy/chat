@@ -209,6 +209,16 @@ invoking a Worker.
   and hiding the system prompt from its own author. The flight recorder
   ports over exactly, `usage: { include: true }` included, so every mono
   readout is still a measured number.
+- **PDFs go through OpenRouter, not through us.** A document is an ordinary
+  `file` part; the provider encodes it as `{type:"file",file:{filename,
+  file_data}}` and OpenRouter reads it. `pdfEngineFor` picks `native` when the
+  catalog advertises `file` input (the model sees real pages, billed as
+  ordinary input tokens) and the free `cloudflare-ai` otherwise. The engine is
+  **always** stated: OpenRouter's own default is `mistral-ocr` at $2 per 1,000
+  pages, and nobody should be billed for OCR they did not ask for.
+  `mistral-ocr` is therefore never selected automatically. Attachments are
+  never gated on `vision` any more — an image needs an image model, a PDF does
+  not — and PDFs ride the existing R2 attachment path for free.
 - `lib/catalog.ts` — the same normalization as before, now client-side.
   `/models` needs no key, which is what lets the model list populate behind
   the connect screen. Cached an hour in `localStorage` (~220KB, written on
@@ -305,6 +315,55 @@ invoking a Worker.
   derived (`open && !disabled`) so a model switch can't strand it.
 
 ### Rules learned the hard way
+
+- **A revision must be allocated by the database, not derived from a read.**
+  `push` computed `state.rev + 1` from a row read earlier in the request, so
+  two devices pushing at once both wrote the same revision — and a third
+  device that pulled between the two writes advanced its cursor past it and
+  never asked for the second batch again. `UPDATE … RETURNING rev` is the fix.
+  Realtime is what turned this from theoretical into routine, because it made
+  two devices online at the same time the normal case.
+- **`PAGE_SIZE` must stay strictly greater than `MAX_PUSH_RECORDS`.** The pull
+  cursor advances to the last row's revision, so every record sharing a
+  revision has to fit in one page or the remainder is skipped permanently.
+- **Never echo a revision to the device that caused it.** The hub fans out to
+  every socket; before the connection-id tag, a device pushing mid-stream woke
+  itself, found the rows its own 1.2s snapshot had just re-dirtied, pushed
+  again, and looped at round-trip speed.
+- **A pull is invisible until something re-reads it.** `applyRecords` writes
+  straight into Dexie, which is not React. The rail refreshed (it reloads when
+  sync settles) and the open transcript did not — which is the whole reason
+  cross-device sync looked broken while it was working perfectly. ChatView now
+  adopts remote changes, but never while busy, never twice for the same
+  version, and never when the stored copy is missing a message it is holding
+  (that means our own save is still in flight). The cost of the last guard is
+  that a *truncation* made elsewhere waits for a thread switch; losing a
+  locally streamed answer would be worse.
+- **`saveTurn` must only rewrite what changed.** It marked the entire thread
+  dirty on every save, so one turn in a fifty-message conversation queued
+  fifty records — and the mid-stream snapshot did it again every 1.2s, about
+  two thousand row writes for a single long answer. Comparing a cheap content
+  key first also preserves the R2 blob references the sync engine writes into
+  those rows, which is what stopped images being re-uploaded forever. The key
+  hashes text in full (a same-length edit must not hide) but reads only the
+  *size* of attachments — hashing megabytes of base64 every 1.2s would cost
+  more than the writes it saves, and reaching into those parts would pick up
+  the very blob ids that must not count as a change.
+- **Local durability and cloud freshness are different clocks.** The snapshot
+  stays at 1.2s because that is what stops a closed tab losing a long answer.
+  Pushing it to D1 at the same rate is a separate question, and the answer is
+  no: `DRAFT_SYNC_MS` throttles streaming pushes to ~5s, which still reads as
+  live on another device for a tenth of the writes.
+- **The 128KB record cap is really ~90KB of text.** `sealRecord` base64s the
+  ciphertext, a 4/3 expansion on top of JSON escaping, so a long reasoning
+  answer overflowed it — and because one rejected batch throws, a single
+  message stopped the whole account's sync. Payloads over 96KB now spill to
+  R2 behind an `@r2:` sentinel. The spilled bytes are the *sealed* payload, so
+  nothing is encrypted twice and the service learns nothing new; the object id
+  shares the record's prefix, so deleting the record erases it.
+- **`body { overflow: hidden }` is for the chat shell and breaks every other
+  page.** The privacy policy is an ordinary document taller than the viewport,
+  so it has to be its own scroll container or it cannot be read past the fold.
 
 - **The shell mints the conversation id, including for unsaved threads.** If
   ChatView minted its own and `onFinish` flipped `activeId` before the save
@@ -438,19 +497,19 @@ invoking a Worker.
   restore, locked/unlock flow, session-authenticated sync, settings panel in
   the rail footer with theme/typeface/size/width/density and the OpenRouter
   key) ·
-  11 next: **image blobs to R2** — `stripBlobs` in `lib/sync.ts` still drops
-  image bytes before upload (records cap at 128KB), so pixels stay on the
-  device that made them and only image *metadata* syncs. Also pending: the
-  Google redirect URI must be registered in the Cloud console and
-  `GOOGLE_CLIENT_SECRET` set, an edge rate limit on the auth endpoints, and a
-  privacy policy — this app now stores names, dates of birth and emails — `stripBlobs` in `lib/sync.ts` currently
-  drops image bytes before upload (records cap at 128KB), so pixels stay on
-  the device that made them and only the image *metadata* syncs. Serve them
-  from an R2 custom domain, not through the Worker: the blobs are ciphertext
-  under random ids, so public-by-URL is safe and costs no invocations. Also
-  pending: an edge rate limit on `POST /v1/account`, the one unauthenticated
-  write · then vision/attachments, sub-agent delegation, per-thread
-  temperature (the wire already carries it).
+  **11 cloud hardening ✓** (image/attachment bytes encrypted in the browser
+  and synchronized through R2; hibernating per-account Durable Object sockets
+  fan out revision-only realtime invalidations; Better Auth rate limits use
+  global D1 counters; account deletion clears R2; static privacy policy;
+  email-OTP UI and plugin activate conditionally when an outbound mail binding
+  exists). Authenticated Worker blob reads are the fallback; the remaining
+  deployment optimisation is an R2 custom domain + CORS +
+  `BLOB_PUBLIC_ORIGIN`, which removes Worker invocations for ciphertext reads.
+  Google intentionally remains a disabled placeholder. ·
+  **12 sync economics + documents ✓** (write amplification removed, oversized
+  payloads spill to R2, PDF input via OpenRouter's file-parser). Next product
+  work: sub-agent delegation and per-thread temperature (the wire already
+  carries it).
 ## Design system (the law)
 
 **Strictly black, white, neutral gray interface chrome — both themes, no

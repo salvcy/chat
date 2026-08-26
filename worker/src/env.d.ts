@@ -10,6 +10,13 @@
  */
 export interface Env {
   DB: D1Database;
+  /** Client-encrypted generated images and vision attachments. */
+  BLOBS: R2Bucket;
+  /** One hibernating invalidation hub per account. */
+  LIVE: DurableObjectNamespace<import("./live").SyncHub>;
+
+  /** Optional public R2 custom domain, e.g. https://blobs.belayet.co. */
+  BLOB_PUBLIC_ORIGIN?: string;
 
   /** Signs session cookies. `wrangler secret put AUTH_SECRET`. */
   AUTH_SECRET: string;
@@ -17,6 +24,10 @@ export interface Env {
   /** Google OAuth. The client id is public; the secret is not. */
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
+
+  /** Optional Cloudflare Email Sending binding. OTP stays off without both. */
+  EMAIL?: SendEmail;
+  EMAIL_FROM?: string;
 
   /**
    * Wraps sensitive per-user fields (notably the OpenRouter key) for accounts

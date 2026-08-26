@@ -1,4 +1,5 @@
 import { betterAuth } from "better-auth";
+import { emailOTP } from "better-auth/plugins";
 import type { Env } from "./env";
 
 /**
@@ -103,6 +104,12 @@ export function isAdult(dateOfBirth: string): boolean {
 }
 
 export function createAuth(env: Env, origin: string) {
+  // Cloudflare's outbound Email Sending product is paid-only. Keeping this
+  // conditional means the free deployment continues to work exactly as it
+  // does today; adding an EMAIL binding and EMAIL_FROM later turns OTP
+  // verification on without another auth migration or frontend release.
+  const emailVerificationEnabled = Boolean(env.EMAIL && env.EMAIL_FROM);
+
   return betterAuth({
     // Better Auth speaks D1 natively, so the binding goes straight in — no
     // Kysely dialect package and nothing extra in the bundle.
@@ -113,10 +120,50 @@ export function createAuth(env: Env, origin: string) {
 
     emailAndPassword: {
       enabled: true,
-      // Nothing is emailed yet, so requiring verification would lock people
-      // out of their own accounts. Turn this on with the mail provider.
-      requireEmailVerification: false,
+      requireEmailVerification: emailVerificationEnabled,
       password: { hash: hashPassword, verify: verifyPassword },
+    },
+
+    emailVerification: {
+      autoSignInAfterVerification: true,
+    },
+
+    plugins: emailVerificationEnabled
+      ? [
+          emailOTP({
+            overrideDefaultEmailVerification: true,
+            expiresIn: 10 * 60,
+            allowedAttempts: 5,
+            storeOTP: "hashed",
+            rateLimit: { window: 60, max: 3 },
+            async sendVerificationOTP({ email, otp, type }) {
+              if (!env.EMAIL || !env.EMAIL_FROM) return;
+              const purpose =
+                type === "email-verification"
+                  ? "verify your email"
+                  : type === "forget-password"
+                    ? "reset your password"
+                    : "sign in";
+              await env.EMAIL.send({
+                from: env.EMAIL_FROM,
+                to: email,
+                subject: `${otp} · ${purpose}`,
+                text: `Your Chat code is ${otp}. It expires in 10 minutes. If you did not request this, you can ignore this email.`,
+                html: `<div style="font-family:ui-sans-serif,system-ui,sans-serif;color:#111"><p style="font-size:14px">Your Chat verification code</p><p style="font-family:ui-monospace,monospace;font-size:28px;letter-spacing:.18em;margin:20px 0">${otp}</p><p style="font-size:12px;color:#666">Expires in 10 minutes. If you did not request this, you can ignore this email.</p></div>`,
+              });
+            },
+          }),
+        ]
+      : [],
+
+    // Better Auth already supplies strict rules for sign-in/sign-up (3 per
+    // 10s) and OTP issuance/verification (3 per minute). D1 storage makes
+    // those counters global across isolates instead of best-effort memory.
+    rateLimit: {
+      enabled: true,
+      storage: "database",
+      window: 60,
+      max: 100,
     },
 
     // Registered only when the secret is actually configured. Passing an
@@ -180,6 +227,11 @@ export function createAuth(env: Env, origin: string) {
     },
 
     advanced: {
+      ipAddress: {
+        // This header is written by Cloudflare at the trusted edge. Using it
+        // avoids rate-limit keys collapsing onto an intermediary proxy.
+        ipAddressHeaders: ["cf-connecting-ip"],
+      },
       // Same origin as the app, so the cookie needs no cross-site relaxation.
       defaultCookieAttributes: {
         sameSite: "lax",

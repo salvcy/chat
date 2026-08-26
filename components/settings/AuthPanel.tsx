@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { motion } from "motion/react";
 import { isAdult } from "@/lib/auth-client";
+import Link from "next/link";
 
 /**
  * Sign in, or create an account.
@@ -17,7 +18,8 @@ import { isAdult } from "@/lib/auth-client";
 export default function AuthPanel({
   onSignIn,
   onSignUp,
-  onGoogle,
+  onVerifyEmail,
+  onResendEmail,
   onClose,
 }: {
   onSignIn: (email: string, password: string) => Promise<void>;
@@ -26,8 +28,9 @@ export default function AuthPanel({
     password: string;
     name: string;
     dateOfBirth: string;
-  }) => Promise<void>;
-  onGoogle: () => Promise<void>;
+  }) => Promise<{ verificationRequired: boolean }>;
+  onVerifyEmail: (email: string, otp: string) => Promise<void>;
+  onResendEmail: (email: string) => Promise<void>;
   onClose: () => void;
 }) {
   const [mode, setMode] = useState<"in" | "up">("in");
@@ -37,6 +40,8 @@ export default function AuthPanel({
   const [dob, setDob] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [verificationFor, setVerificationFor] = useState<string | null>(null);
+  const [otp, setOtp] = useState("");
 
   const creating = mode === "up";
   const dobProblem = creating && dob !== "" && !isAdult(dob);
@@ -51,7 +56,12 @@ export default function AuthPanel({
     setError(null);
     try {
       if (creating) {
-        await onSignUp({ email, password, name, dateOfBirth: dob });
+        const result = await onSignUp({ email, password, name, dateOfBirth: dob });
+        if (result.verificationRequired) {
+          setVerificationFor(email.trim().toLowerCase());
+          setBusy(false);
+          return;
+        }
       } else {
         await onSignIn(email, password);
       }
@@ -64,17 +74,17 @@ export default function AuthPanel({
     }
   };
 
-  const google = async () => {
+  const verify = async () => {
+    if (!verificationFor || otp.length !== 6 || busy) return;
     setBusy(true);
     setError(null);
     try {
-      await onGoogle();
-      // Navigates away on success; reaching here means it did not.
-      setBusy(false);
+      await onVerifyEmail(verificationFor, otp);
+      onClose();
     } catch (err) {
       setBusy(false);
       setError(
-        err instanceof Error ? err.message : "Google sign-in is unavailable",
+        err instanceof Error ? err.message : "that code could not be verified",
       );
     }
   };
@@ -99,7 +109,7 @@ export default function AuthPanel({
       >
         <div className="flex items-baseline justify-between gap-3">
           <p className="font-mono text-[10px] uppercase tracking-wider text-muted">
-            {creating ? "create account" : "sign in"}
+            {verificationFor ? "verify email" : creating ? "create account" : "sign in"}
           </p>
           <button
             onClick={onClose}
@@ -110,17 +120,54 @@ export default function AuthPanel({
         </div>
 
         <h2 className="mt-2 text-[15px] leading-relaxed text-foreground">
-          {creating
+          {verificationFor
+            ? `We sent a six-digit code to ${verificationFor}.`
+            : creating
             ? "Your conversations, on every device."
             : "Welcome back."}
         </h2>
 
+        {verificationFor ? (
+          <>
+            <input
+              value={otp}
+              onChange={(event) =>
+                setOtp(event.target.value.replace(/\D/g, "").slice(0, 6))
+              }
+              onKeyDown={(event) => event.key === "Enter" && void verify()}
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              autoFocus
+              aria-label="Verification code"
+              placeholder="000000"
+              className={`${field} mt-5 text-center font-mono text-[20px] tracking-[0.28em]`}
+            />
+            <button
+              onClick={() => void verify()}
+              disabled={otp.length !== 6 || busy}
+              className="mt-3 w-full rounded-full bg-foreground px-4 py-2.5 text-[13px] font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-30"
+            >
+              {busy ? "verifying…" : "Verify email"}
+            </button>
+            <button
+              onClick={() =>
+                void onResendEmail(verificationFor).catch((err) =>
+                  setError(err instanceof Error ? err.message : "could not resend code"),
+                )
+              }
+              disabled={busy}
+              className="mt-3 w-full text-center font-mono text-[10px] text-muted transition-colors hover:text-foreground disabled:opacity-40"
+            >
+              resend code
+            </button>
+          </>
+        ) : (
+          <>
         <button
-          onClick={() => void google()}
-          disabled={busy}
-          className="mt-5 w-full rounded-full border border-hairline px-4 py-2.5 text-[13px] text-secondary transition-colors hover:border-hairline-strong hover:text-foreground disabled:opacity-40"
+          disabled
+          className="mt-5 w-full cursor-not-allowed rounded-full border border-hairline px-4 py-2.5 text-[13px] text-muted opacity-55"
         >
-          Continue with Google
+          Google · coming soon
         </button>
 
         <div className="mt-5 flex items-center gap-3">
@@ -191,13 +238,16 @@ export default function AuthPanel({
               : "Sign in"}
         </button>
 
+          </>
+        )}
+
         {error && (
           <p className="mt-3.5 font-mono text-[11px] leading-relaxed text-foreground">
             {error}
           </p>
         )}
 
-        <button
+        {!verificationFor && <button
           onClick={() => {
             setMode(creating ? "in" : "up");
             setError(null);
@@ -207,11 +257,22 @@ export default function AuthPanel({
           {creating
             ? "already have an account? sign in"
             : "no account yet? create one"}
-        </button>
+        </button>}
 
         <p className="mt-5 font-mono text-[10px] leading-relaxed text-muted">
-          your password is stretched on this device and never sent · it also
-          derives the key that encrypts your chats
+          {verificationFor
+            ? "the code expires in 10 minutes · five attempts"
+            : "your password is stretched on this device and never sent · it also derives the key that encrypts your chats"}
+        </p>
+        <p className="mt-3 text-center font-mono text-[9px] text-muted">
+          By continuing, you agree to the{" "}
+          <Link
+            href="/privacy"
+            className="underline decoration-hairline underline-offset-2 transition-colors hover:text-foreground"
+          >
+            privacy policy
+          </Link>
+          .
         </p>
       </motion.div>
     </div>

@@ -1,6 +1,12 @@
 "use client";
 
-import { openRecord, sealRecord } from "./crypto";
+import {
+  downloadBlob,
+  downloadPayloadBlob,
+  uploadBlob,
+  uploadPayloadBlob,
+} from "./blob";
+import { openRecord, sealRecord, toBase64Url } from "./crypto";
 import {
   db,
   type ConversationMeta,
@@ -53,37 +59,152 @@ type Envelope =
 /* --------------------------- heavy attachments ------------------------- */
 
 /**
- * Strip image bytes before a message is encrypted.
+ * Move image bytes into R2 before a message is encrypted.
  *
  * A generated PNG is megabytes of base64 sitting inside the message, and
  * records are capped at 128KB upstream — one image would fail the whole
- * push. Until blobs move to R2, the *metadata* of an image syncs (prompt,
- * model, cost, so the turn still reads correctly on another device) and the
- * pixels stay on the device that made them.
+ * push. The encrypted record keeps only a blob id, media type, and optional
+ * custom-domain URL; the R2 object is itself encrypted in the browser.
  *
  * `blobsStripped` marks that this happened, which is what lets `merge` below
  * avoid overwriting a device's real pixels with a stripped copy of itself.
  */
 type StrippedMessage = StoredMessage & { blobsStripped?: true };
 
-function stripBlobs(message: StoredMessage): StrippedMessage {
-  let stripped = false;
+type DialBlobMetadata = {
+  imageReference?: boolean;
+  blobId?: string;
+  blobUrl?: string;
+  [key: string]: unknown;
+};
 
-  const parts = message.parts.map((part) => {
-    if (part.type === "data-image" && part.data.images.length > 0) {
-      stripped = true;
-      return { ...part, data: { ...part.data, images: [] } };
+function dialMetadata(
+  part: Extract<StoredMessage["parts"][number], { type: "file" }>,
+): DialBlobMetadata {
+  const value = part.providerMetadata?.dial;
+  return value && typeof value === "object"
+    ? (value as DialBlobMetadata)
+    : {};
+}
+
+/**
+ * Stable ids make an upload retry idempotent. They also share the message
+ * id as a prefix, which lets the Worker erase every attachment for a deleted
+ * opaque record without decrypting that record or maintaining a second
+ * ownership table.
+ */
+async function safeIdFor(recordId: string): Promise<string> {
+  return /^[A-Za-z0-9_-]{1,96}$/.test(recordId)
+    ? recordId
+    : toBase64Url(
+        await crypto.subtle.digest(
+          "SHA-256",
+          new TextEncoder().encode(recordId),
+        ),
+      );
+}
+
+async function blobIdFor(
+  messageId: string,
+  kind: "generated" | "file",
+  partIndex: number,
+  assetIndex = 0,
+): Promise<string> {
+  const safe = await safeIdFor(messageId);
+  return `${safe}.${kind === "generated" ? "g" : "f"}.${partIndex}.${assetIndex}`;
+}
+
+type PreparedMessage = {
+  remote: StrippedMessage;
+  /** Same pixels as the local row, now carrying their durable R2 ids. */
+  localParts: StoredMessage["parts"];
+};
+
+async function prepareBlobs(
+  message: StoredMessage,
+  key: CryptoKey | null,
+): Promise<PreparedMessage> {
+  let stripped = false;
+  const localParts: StoredMessage["parts"] = [];
+  const remoteParts: StoredMessage["parts"] = [];
+
+  for (let partIndex = 0; partIndex < message.parts.length; partIndex++) {
+    const part = message.parts[partIndex];
+
+    if (part.type === "data-image") {
+      if (part.data.images.some((asset) => asset.blobId)) stripped = true;
+      const pairs = await Promise.all(
+        part.data.images.map(async (asset, assetIndex) => {
+          if (!asset.url.startsWith("data:")) {
+            return { local: asset, remote: asset };
+          }
+          stripped = true;
+          const blobId =
+            asset.blobId ??
+            (await blobIdFor(message.id, "generated", partIndex, assetIndex));
+          // A reference means this exact deterministic object was already
+          // uploaded. saveTurn marks the whole transcript dirty on each turn,
+          // so uploading referenced images again would be needless R2 writes.
+          const uploaded = asset.blobId
+            ? { id: blobId, url: asset.blobUrl ?? null }
+            : await uploadBlob(blobId, asset.url, key);
+          const reference = {
+            ...asset,
+            blobId: uploaded.id,
+            ...(uploaded.url ? { blobUrl: uploaded.url } : {}),
+          };
+          return { local: reference, remote: { ...reference, url: "" } };
+        }),
+      );
+      localParts.push({
+        ...part,
+        data: { ...part.data, images: pairs.map((pair) => pair.local) },
+      });
+      remoteParts.push({
+        ...part,
+        data: { ...part.data, images: pairs.map((pair) => pair.remote) },
+      });
+      continue;
     }
-    // User attachments are data URLs of the same order of size.
+
     if (part.type === "file" && part.url.startsWith("data:")) {
       stripped = true;
-      return { ...part, url: "" };
+      const dial = dialMetadata(part);
+      const blobId =
+        typeof dial.blobId === "string"
+          ? dial.blobId
+          : await blobIdFor(message.id, "file", partIndex);
+      const uploaded =
+        typeof dial.blobId === "string"
+          ? { id: blobId, url: typeof dial.blobUrl === "string" ? dial.blobUrl : null }
+          : await uploadBlob(blobId, part.url, key);
+      const nextDial = {
+        ...dial,
+        blobId: uploaded.id,
+        ...(uploaded.url ? { blobUrl: uploaded.url } : {}),
+      };
+      const referenced = {
+        ...part,
+        providerMetadata: { ...part.providerMetadata, dial: nextDial },
+      };
+      localParts.push(referenced);
+      remoteParts.push({ ...referenced, url: "" });
+      continue;
     }
-    return part;
-  });
 
-  if (!stripped) return message;
-  return { ...message, parts, blobsStripped: true };
+    if (part.type === "file" && typeof dialMetadata(part).blobId === "string") {
+      stripped = true;
+    }
+    localParts.push(part);
+    remoteParts.push(part);
+  }
+
+  return {
+    remote: stripped
+      ? { ...message, parts: remoteParts, blobsStripped: true }
+      : { ...message, parts: remoteParts },
+    localParts,
+  };
 }
 
 /**
@@ -110,15 +231,72 @@ function merge(
     const original = byIndex.get(index);
     if (!original || original.type !== part.type) return part;
     if (part.type === "data-image" && original.type === "data-image") {
-      return original.data.images.length > 0 ? original : part;
+      return {
+        ...part,
+        data: {
+          ...part.data,
+          images: part.data.images.map((asset, assetIndex) => {
+            const localAsset = original.data.images[assetIndex];
+            return localAsset?.url.startsWith("data:")
+              ? { ...asset, url: localAsset.url }
+              : asset;
+          }),
+        },
+      };
     }
     if (part.type === "file" && original.type === "file") {
-      return original.url.startsWith("data:") ? original : part;
+      return original.url.startsWith("data:")
+        ? { ...part, url: original.url }
+        : part;
     }
     return part;
   });
 
   return { ...unstrip(incoming), parts };
+}
+
+/** Fill R2 references that this device has not downloaded yet. */
+async function hydrateBlobs(
+  message: StoredMessage,
+  key: CryptoKey | null,
+): Promise<StoredMessage> {
+  const parts: StoredMessage["parts"] = [];
+
+  for (const part of message.parts) {
+    if (part.type === "data-image") {
+      const images = await Promise.all(
+        part.data.images.map(async (asset) => {
+          if (asset.url.startsWith("data:") || !asset.blobId) return asset;
+          const url = await downloadBlob(
+            asset.blobId,
+            asset.mediaType,
+            key,
+            asset.blobUrl,
+          );
+          return url ? { ...asset, url } : asset;
+        }),
+      );
+      parts.push({ ...part, data: { ...part.data, images } });
+      continue;
+    }
+
+    if (part.type === "file" && !part.url) {
+      const dial = dialMetadata(part);
+      if (typeof dial.blobId === "string") {
+        const url = await downloadBlob(
+          dial.blobId,
+          part.mediaType,
+          key,
+          typeof dial.blobUrl === "string" ? dial.blobUrl : undefined,
+        );
+        parts.push(url ? { ...part, url } : part);
+        continue;
+      }
+    }
+    parts.push(part);
+  }
+
+  return { ...message, parts };
 }
 
 /* -------------------------------- cursor ------------------------------- */
@@ -160,6 +338,23 @@ export function clearCursor(): void {
 }
 
 /* ------------------------------- transport ----------------------------- */
+
+/* --------------------------- live connection --------------------------- */
+
+/**
+ * This device's realtime socket id, when it has one.
+ *
+ * It rides along on every push so the hub can skip the socket that caused
+ * the revision. Module state rather than a `runSync` argument because the
+ * socket's lifetime is owned by `useAccount` and is unrelated to the
+ * lifetime of any one reconciliation — threading it through every call site
+ * would only let the two drift apart.
+ */
+let liveConnectionId: string | null = null;
+
+export function setLiveConnectionId(id: string | null): void {
+  liveConnectionId = id;
+}
 
 export class SyncError extends Error {
   constructor(
@@ -210,15 +405,51 @@ type PulledRecord = {
   payload: string | null;
 };
 
+/* ------------------------- oversized payloads -------------------------- */
+
+/**
+ * Records that do not fit in D1 spill into R2.
+ *
+ * Stripping image bytes was only half the problem. A long answer from a
+ * reasoning model carries its whole trace, and `sealRecord` base64s the
+ * ciphertext — a 4/3 expansion on top of JSON escaping — so the 128KB
+ * server limit is really about 90KB of message text. Past that the push
+ * failed with "a record exceeded the 128KB payload limit", and because one
+ * rejected batch throws, a single long answer stopped the account's entire
+ * sync rather than just its own row.
+ *
+ * The spilled object is the sealed payload verbatim: it is already
+ * ciphertext bound to this record id, so the service learns nothing from
+ * holding it that it did not already hold in D1.
+ */
+const PAYLOAD_SPILL_LIMIT = 96 * 1024;
+
+/**
+ * `@` is outside base64url and is not `{`, so this can never be mistaken for
+ * a sealed record or for the plain JSON a keyless account stores.
+ */
+const SPILL_PREFIX = "@r2:";
+
+/** Shares the record's prefix, so deleting the record erases this too. */
+async function payloadBlobId(recordId: string): Promise<string> {
+  return `${await safeIdFor(recordId)}.p.0.0`;
+}
+
 /** Read a payload, whichever way this account stores them. */
 async function readPayload(
   dek: CryptoKey | null,
   id: string,
   payload: string,
 ): Promise<Envelope | null> {
-  if (dek) return openRecord<Envelope>(dek, id, payload);
+  let raw = payload;
+  if (payload.startsWith(SPILL_PREFIX)) {
+    const spilled = await downloadPayloadBlob(payload.slice(SPILL_PREFIX.length));
+    if (!spilled) return null;
+    raw = spilled;
+  }
+  if (dek) return openRecord<Envelope>(dek, id, raw);
   try {
-    return JSON.parse(payload) as Envelope;
+    return JSON.parse(raw) as Envelope;
   } catch {
     return null;
   }
@@ -230,9 +461,18 @@ async function writePayload(
   id: string,
   envelope: Envelope,
 ): Promise<string> {
-  return dek
-    ? sealRecord(dek, id, envelope)
+  const sealed = dek
+    ? await sealRecord(dek, id, envelope)
     : JSON.stringify(envelope);
+  if (sealed.length <= PAYLOAD_SPILL_LIMIT) return sealed;
+
+  // The object id is derived from the record id, so a retry overwrites the
+  // same key rather than leaking a new one. A record that later shrinks back
+  // under the limit leaves its object behind until the record is deleted,
+  // which clears the whole prefix.
+  const blobId = await payloadBlobId(id);
+  await uploadPayloadBlob(blobId, sealed);
+  return `${SPILL_PREFIX}${blobId}`;
 }
 
 export class LockedError extends Error {
@@ -286,8 +526,9 @@ async function applyRecords(
       });
     } else {
       const local = await db.messages.get(record.id);
+      const merged = merge(envelope.data as StrippedMessage, local);
       await db.messages.put({
-        ...merge(envelope.data as StrippedMessage, local),
+        ...(await hydrateBlobs(merged, dek)),
         id: record.id,
         dirty: 0,
         rev: record.rev,
@@ -411,12 +652,23 @@ export async function runSync({
 
   for (const row of dirtyMessages) {
     const rest = withoutSyncColumns(row);
+    const prepared = await prepareBlobs(rest as StoredMessage, dek);
+    // Persist successful upload references immediately but leave the row
+    // dirty until D1 confirms its encrypted record. If that POST fails, the
+    // retry reuses the same R2 object instead of paying for another PUT.
+    await db.messages
+      .where("id")
+      .equals(row.id)
+      .and((current) => current.stamp === row.stamp)
+      .modify((current) => {
+        current.parts = prepared.localParts;
+      });
     outgoing.push({
       body: {
         id: row.id,
         payload: await writePayload(dek, row.id, {
           kind: "message",
-          data: stripBlobs(rest as StoredMessage),
+          data: prepared.remote,
         } satisfies Envelope),
       },
       commit: async () => {
@@ -424,7 +676,10 @@ export async function runSync({
           .where("id")
           .equals(row.id)
           .and((current) => current.stamp === row.stamp)
-          .modify({ dirty: 0 });
+          .modify((current) => {
+            current.parts = prepared.localParts;
+            current.dirty = 0;
+          });
       },
     });
   }
@@ -443,7 +698,10 @@ export async function runSync({
     const batch = outgoing.slice(i, i + PUSH_BATCH);
     const response = (await call("/sync", {
       method: "POST",
-      body: JSON.stringify({ records: batch.map((item) => item.body) }),
+      body: JSON.stringify({
+        records: batch.map((item) => item.body),
+        client: liveConnectionId,
+      }),
     })) as { rev: number; applied: number };
 
     // Only clear local flags once the server has confirmed the batch.
@@ -479,4 +737,3 @@ export async function markAllDirty(): Promise<void> {
     await db.messages.toCollection().modify({ dirty: 1 });
   });
 }
-

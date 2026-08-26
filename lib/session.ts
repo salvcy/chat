@@ -9,6 +9,8 @@ import {
   signInWithGoogle as apiGoogle,
   signOut as apiSignOut,
   signUp as apiSignUp,
+  resendEmailOTP as apiResendEmailOTP,
+  verifyEmailOTP as apiVerifyEmailOTP,
   type SessionUser,
 } from "./auth-client";
 import { localCredentialStore } from "./credentials";
@@ -21,7 +23,13 @@ import {
   writeLocal,
   type UserSettings,
 } from "./settings";
-import { clearCursor, clearLocalData, deleteAccount, runSync } from "./sync";
+import {
+  clearCursor,
+  clearLocalData,
+  deleteAccount,
+  runSync,
+  setLiveConnectionId,
+} from "./sync";
 import { deriveCredential } from "./auth-client";
 
 /**
@@ -72,6 +80,15 @@ export function useAccount(changeSignal: unknown) {
    * the password instead.
    */
   const [locked, setLocked] = useState(false);
+  /**
+   * Bumped whenever a reconciliation actually applied remote records.
+   *
+   * The shell watches this to re-read the open thread. A pull writes into
+   * Dexie behind React's back, so without a signal the rail refreshed and
+   * the transcript in front of you did not — which is what made cross-device
+   * sync look broken while it was in fact working.
+   */
+  const [pulled, setPulled] = useState(0);
 
   const userRef = useRef<SessionUser | null>(null);
   const kekRef = useRef<CryptoKey | null>(null);
@@ -91,6 +108,9 @@ export function useAccount(changeSignal: unknown) {
   const pushChainRef = useRef<Promise<void>>(Promise.resolve());
   /** Stops two syncs overlapping and pushing the same rows twice. */
   const runningRef = useRef(false);
+  /** A realtime invalidation that arrived while reconciliation was running. */
+  const pendingSyncRef = useRef(false);
+  const syncRef = useRef<() => Promise<void>>(async () => undefined);
 
   useEffect(() => {
     userRef.current = user;
@@ -109,15 +129,20 @@ export function useAccount(changeSignal: unknown) {
 
   const sync = useCallback(async () => {
     const current = userRef.current;
-    if (!current || runningRef.current || lockedRef.current) return;
+    if (!current || lockedRef.current) return;
+    if (runningRef.current) {
+      pendingSyncRef.current = true;
+      return;
+    }
     runningRef.current = true;
     setStatus({ state: "syncing" });
     try {
-      await runSync({
+      const outcome = await runSync({
         userId: current.id,
         dek: kekRef.current,
         encrypted: encryptedRef.current,
       });
+      if (outcome.pulled > 0) setPulled((count) => count + 1);
       setStatus({ state: "idle", at: Date.now() });
     } catch (error) {
       setStatus({
@@ -126,8 +151,16 @@ export function useAccount(changeSignal: unknown) {
       });
     } finally {
       runningRef.current = false;
+      if (pendingSyncRef.current) {
+        pendingSyncRef.current = false;
+        queueMicrotask(() => void syncRef.current());
+      }
     }
   }, []);
+
+  useEffect(() => {
+    syncRef.current = sync;
+  }, [sync]);
 
   /* ------------------------- adopt a signed-in user --------------------- */
 
@@ -233,6 +266,91 @@ export function useAccount(changeSignal: unknown) {
     };
   }, [user, sync]);
 
+  /**
+   * Cross-device realtime sync.
+   *
+   * The socket carries revision numbers only. On each invalidation this
+   * device runs the same authenticated encrypted pull it would run on focus,
+   * so WebSocket delivery is an optimisation rather than a second source of
+   * truth. Cloudflare can hibernate its per-user Durable Object while idle.
+   */
+  useEffect(() => {
+    if (!user || locked) return;
+
+    let stopped = false;
+    let retry = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let socket: WebSocket | null = null;
+
+    const schedule = () => {
+      if (stopped || timer !== null) return;
+      const delay = Math.min(30_000, 750 * 2 ** retry);
+      retry = Math.min(retry + 1, 6);
+      timer = setTimeout(() => {
+        timer = null;
+        connect();
+      }, delay + Math.random() * 300);
+    };
+
+    const connect = () => {
+      if (
+        stopped ||
+        document.visibilityState !== "visible" ||
+        navigator.onLine === false ||
+        socket?.readyState === WebSocket.OPEN ||
+        socket?.readyState === WebSocket.CONNECTING
+      ) {
+        return;
+      }
+
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      // Identifies this socket so the hub can skip it when fanning out a
+      // revision this device just pushed. Minted per connection: a
+      // reconnected socket is a different subscriber to the hub.
+      const connection = crypto.randomUUID().replace(/-/g, "");
+      socket = new WebSocket(
+        `${protocol}//${window.location.host}/v1/live?c=${connection}`,
+      );
+      socket.onopen = () => {
+        retry = 0;
+        setLiveConnectionId(connection);
+      };
+      socket.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(String(event.data)) as { rev?: unknown };
+          if (typeof payload.rev === "number") void sync();
+        } catch {
+          // Forward compatibility: unknown hub messages are ignored.
+        }
+      };
+      socket.onerror = () => socket?.close();
+      socket.onclose = () => {
+        socket = null;
+        setLiveConnectionId(null);
+        schedule();
+      };
+    };
+
+    const reconnect = () => {
+      if (document.visibilityState !== "visible") return;
+      if (!socket || socket.readyState === WebSocket.CLOSED) connect();
+    };
+
+    connect();
+    window.addEventListener("online", reconnect);
+    window.addEventListener("focus", reconnect);
+    document.addEventListener("visibilitychange", reconnect);
+    return () => {
+      stopped = true;
+      setLiveConnectionId(null);
+      if (timer !== null) clearTimeout(timer);
+      window.removeEventListener("online", reconnect);
+      window.removeEventListener("focus", reconnect);
+      document.removeEventListener("visibilitychange", reconnect);
+      socket?.close(1000, "session changed");
+    };
+  }, [user, locked, sync]);
+
   /* -------------------------------- actions ----------------------------- */
 
   const updateSettings = useCallback((patch: Partial<UserSettings>) => {
@@ -335,8 +453,21 @@ export function useAccount(changeSignal: unknown) {
     }) => {
       const credential = await apiSignUp(input);
       const next = await getSession();
-      if (!next) throw new Error("signed up but no session was returned");
+      if (!next) return { verificationRequired: true };
       await adopt(next, credential.kek);
+      return { verificationRequired: false };
+    },
+    [adopt],
+  );
+
+  const verifyEmail = useCallback(
+    async (email: string, otp: string) => {
+      await apiVerifyEmailOTP(email, otp);
+      const next = await getSession();
+      if (!next) throw new Error("verified, but no session was returned");
+      const key = await recallKey();
+      if (!key) throw new Error("verified, but this device lost its vault key");
+      await adopt(next, key);
     },
     [adopt],
   );
@@ -401,7 +532,11 @@ export function useAccount(changeSignal: unknown) {
     locked,
     unlock,
     updateSettings,
+    /** Increments when a sync applied remote records. */
+    pulled,
     signUp,
+    verifyEmail,
+    resendEmail: apiResendEmailOTP,
     signIn,
     signInWithGoogle: apiGoogle,
     signOut,

@@ -10,4 +10,6 @@ CREATE TABLE IF NOT EXISTS "account" ("id" text not null primary key, "issuer" t
 CREATE INDEX IF NOT EXISTS "account_userId_idx" ON "account" ("userId");
 
 CREATE TABLE IF NOT EXISTS "verification" ("id" text not null primary key, "identifier" text not null, "value" text not null, "expiresAt" date not null, "createdAt" date not null, "updatedAt" date not null);
+CREATE INDEX IF NOT EXISTS "verification_identifier_idx" ON "verification" ("identifier");
 
+CREATE TABLE IF NOT EXISTS "rateLimit" ("id" text not null primary key, "key" text not null unique, "count" integer not null, "lastRequest" integer not null);

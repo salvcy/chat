@@ -106,6 +106,7 @@ function capabilitiesOf(m: RawModel): ModelCapabilities {
 
   return {
     vision: inputs.has("image"),
+    documents: inputs.has("file"),
     imageGeneration: outputs.has("image"),
     tools: params.has("tools"),
     reasoning,

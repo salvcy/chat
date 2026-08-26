@@ -31,6 +31,84 @@ export type DialMessage = UIMessage<DialMetadata, DialDataParts>;
  *     so the sidebar is never blank, then a cheap model replaces it once.
  *     The call is fire-and-forget: it can never block or fail a save.
  */
+/**
+ * How long a streaming thread waits between *cloud* pushes.
+ *
+ * The 1.2s snapshot exists for local durability and stays at 1.2s — losing a
+ * long answer to a closed tab is the thing it prevents. Pushing that snapshot
+ * to D1 at the same rate is a different question: another device only needs
+ * the answer to visibly progress, and paying a row write every 1.2s for that
+ * is most of this app's entire server cost. Six seconds still reads as live
+ * on the other device and costs a tenth as much.
+ */
+const DRAFT_SYNC_MS = 5000;
+
+/**
+ * Cheap identity of a message, used to decide whether a row is worth
+ * rewriting. Covers everything that actually moves in this app: text growing
+ * during a stream, a part appearing, the flight recorder being attached at
+ * finish, and a message changing position after an edit.
+ *
+ * Deliberately not a deep compare of the whole row. It runs over the entire
+ * thread on every snapshot, and it must not read fields the sync engine adds
+ * behind React's back — `blobId` and friends live inside `parts`, so
+ * stringifying them here would make every message look changed the moment its
+ * image was uploaded, and the upload would then repeat forever.
+ */
+function mix(hash: number, value: string): number {
+  let h = hash;
+  for (let i = 0; i < value.length; i++) {
+    h = (Math.imul(h, 33) ^ value.charCodeAt(i)) >>> 0;
+  }
+  // A separator, so ["ab","c"] and ["a","bc"] cannot collide.
+  return (Math.imul(h, 33) ^ 0x1f) >>> 0;
+}
+
+function contentKey(
+  message: {
+    id: string;
+    role: string;
+    parts: unknown[];
+    metadata?: unknown;
+  },
+  seq: number,
+): string {
+  let h = mix(mix(mix(5381, message.id), String(seq)), message.role);
+
+  for (const part of message.parts as Record<string, unknown>[]) {
+    h = mix(h, String(part.type));
+
+    // Text and reasoning are where all the movement is, and they are what a
+    // same-length edit would otherwise hide, so they are hashed in full.
+    if (typeof part.text === "string") {
+      h = mix(h, part.text);
+      continue;
+    }
+
+    // Attachments and generated images are written once and never mutated,
+    // so their size stands in for their bytes. Hashing megabytes of base64
+    // every 1.2s would cost more than the writes this is here to save — and
+    // reading into them would pick up the blob ids the sync engine adds,
+    // which is exactly what must not count as a change.
+    if (typeof part.url === "string") {
+      h = mix(mix(h, String(part.mediaType ?? "")), String(part.url.length));
+      continue;
+    }
+    if (part.type === "data-image") {
+      const data = part.data as { images?: { mediaType: string; url: string }[] };
+      for (const image of data?.images ?? []) {
+        h = mix(mix(h, image.mediaType), String(image.url.length));
+      }
+      continue;
+    }
+
+    h = mix(h, JSON.stringify(part));
+  }
+
+  return String(mix(h, JSON.stringify(message.metadata ?? null)));
+}
+
+
 export function useConversations() {
   const [conversations, setConversations] = useState<ConversationMeta[]>([]);
   const [activeId, setActiveIdState] = useState<string | null>(null);
@@ -47,6 +125,8 @@ export function useConversations() {
   const touch = useCallback(() => setLocalWrites((n) => n + 1), []);
   /** Threads already sent for naming this session — one request each. */
   const namingRef = useRef(new Set<string>());
+  /** When a streaming thread last scheduled a cloud push. See DRAFT_SYNC_MS. */
+  const lastDraftPushRef = useRef(0);
 
   const reload = useCallback(async () => {
     const rows = await db.conversations.orderBy("updatedAt").reverse().toArray();
@@ -117,12 +197,15 @@ export function useConversations() {
       settings,
       messages,
       naming = true,
+      draft = false,
     }: {
       id: string;
       settings: ChatSettings;
       messages: DialMessage[];
       /** False while streaming — don't name a half-finished thread. */
       naming?: boolean;
+      /** A mid-stream snapshot: always stored, pushed on a slower clock. */
+      draft?: boolean;
     }) => {
       if (messages.length === 0) return;
 
@@ -149,14 +232,33 @@ export function useConversations() {
         rev: existing?.rev ?? 0,
       };
 
-      const rows: StoredMessage[] = messages.map((m, seq) => ({
-        ...m,
-        conversationId: id,
-        seq,
-        dirty: 1,
-        stamp: stamp(),
-      }));
-      const keep = new Set(rows.map((r) => r.id));
+      /*
+       * Only rewrite the messages that actually changed.
+       *
+       * This used to mark the entire thread dirty on every save, so one turn
+       * in a fifty-message conversation queued fifty records for upload — and
+       * the mid-stream snapshot did it again every 1.2 seconds. A single long
+       * answer could cost a couple of thousand row writes, which is most of a
+       * free tier for one reply. In practice one message changes per save,
+       * and leaving the rest untouched also preserves the R2 blob references
+       * the sync engine wrote into them, so images stop being re-uploaded.
+       */
+      const stored = await db.messages
+        .where("conversationId")
+        .equals(id)
+        .toArray();
+      const priorById = new Map(stored.map((row) => [row.id, row]));
+
+      const rows: StoredMessage[] = [];
+      messages.forEach((m, seq) => {
+        const prior = priorById.get(m.id);
+        if (prior && contentKey(prior, prior.seq) === contentKey(m, seq)) return;
+        rows.push({ ...m, conversationId: id, seq, dirty: 1, stamp: stamp() });
+      });
+
+      // Every message in the turn, not just the rewritten ones — otherwise
+      // the reconcile below would delete the ones we deliberately skipped.
+      const keep = new Set(messages.map((m) => m.id));
 
       await db.transaction(
         "rw",
@@ -179,12 +281,25 @@ export function useConversations() {
               drop.map((key) => ({ id: String(key), deletedAt: now })),
             );
           }
-          await db.messages.bulkPut(rows);
+          if (rows.length > 0) await db.messages.bulkPut(rows);
         },
       );
 
       await reload();
-      touch();
+
+      // A draft schedules a cloud push at most every DRAFT_SYNC_MS. The rows
+      // are already in Dexie either way, so a skipped push costs nothing but
+      // a few seconds of staleness on another device.
+      if (draft) {
+        const now = Date.now();
+        if (now - lastDraftPushRef.current >= DRAFT_SYNC_MS) {
+          lastDraftPushRef.current = now;
+          touch();
+        }
+      } else {
+        lastDraftPushRef.current = 0;
+        touch();
+      }
 
       if (naming && !meta.titleGenerated && messages.length >= 2) {
         void nameThread(id, messages);

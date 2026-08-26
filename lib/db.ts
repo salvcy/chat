@@ -168,6 +168,36 @@ export class DialDB extends Dexie {
             m.rev = 0;
           });
       });
+
+    // v4: R2 blob references. Existing local pixels need one more sync so
+    // they are uploaded instead of remaining stranded on the device that
+    // created them. Rows whose bytes were already stripped elsewhere are
+    // harmlessly included; the sync engine simply has nothing to upload.
+    this.version(4)
+      .stores({
+        conversations: "id, updatedAt, pinned, dirty",
+        messages: "id, conversationId, [conversationId+seq], dirty",
+        tombstones: "id, deletedAt",
+        vault: "id",
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table<StoredMessage>("messages")
+          .toCollection()
+          .modify((message) => {
+            const hasLocalBlob = message.parts.some(
+              (part) =>
+                (part.type === "data-image" &&
+                  part.data.images.some(
+                    (image) => image.url.startsWith("data:") && !image.blobId,
+                  )) ||
+                (part.type === "file" && part.url.startsWith("data:")),
+            );
+            if (!hasLocalBlob) return;
+            message.dirty = 1;
+            message.stamp = stamp();
+          });
+      });
   }
 }
 

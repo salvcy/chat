@@ -413,6 +413,8 @@ export default function Home() {
             onOpenSwitcher={() => setPaletteOpen(true)}
             onBranch={(messages, from) => void branch(messages, from)}
             saveTurn={conv.saveTurn}
+            loadMessages={conv.loadMessages}
+            remoteVersion={account.pulled}
             setActiveId={conv.setActiveId}
           />
         ) : (
@@ -443,7 +445,8 @@ export default function Home() {
           <AuthPanel
             onSignIn={account.signIn}
             onSignUp={account.signUp}
-            onGoogle={account.signInWithGoogle}
+            onVerifyEmail={account.verifyEmail}
+            onResendEmail={account.resendEmail}
             onClose={() => setAuthOpen(false)}
           />
         )}

@@ -58,6 +58,11 @@ for (const [table, def] of Object.entries(getSchema(auth.options))) {
         `CREATE INDEX IF NOT EXISTS "${model}_${col}_idx" ON "${model}" ("${col}");`,
       );
     }
+    if (f.index && !f.unique && !f.references) {
+      indexes.push(
+        `CREATE INDEX IF NOT EXISTS "${model}_${col}_idx" ON "${model}" ("${col}");`,
+      );
+    }
     cols.push(s);
   }
   lines.push(

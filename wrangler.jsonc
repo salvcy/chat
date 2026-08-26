@@ -45,6 +45,31 @@
     }
   ],
 
+  "r2_buckets": [
+    {
+      "binding": "BLOBS",
+      "bucket_name": "chat-blobs"
+    }
+  ],
+
+  // One SQLite-backed object per account, used only to fan out revision
+  // invalidations over hibernating WebSockets. No chat data is stored here.
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "LIVE",
+        "class_name": "SyncHub"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1-live-sync",
+      "new_sqlite_classes": ["SyncHub"]
+    }
+  ],
+
   "observability": {
     "enabled": true
   }

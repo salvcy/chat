@@ -1,251 +1,158 @@
 # Chat
 
-*A minimal chat interface for every model, through one key.*
+A minimal, local-first OpenRouter client with optional encrypted account sync.
 
-## What this is
+The frontend is a static Next.js export. Model inference, catalog requests,
+search, vision, and image generation go directly from the browser to
+OpenRouter using the user’s own key. Cloudflare serves the static files and
+runs the small account/sync surface: Better Auth on D1, encrypted image blobs
+in R2, and realtime revision signals through hibernating Durable Objects.
 
-A personal, single-user web app for chatting with any LLM through OpenRouter's unified API, wrapped in an interface that's quieter and more considered than the default ChatGPT-clone look. One key, every model, no bloat.
+Live: [chat.belayet.co](https://chat.belayet.co)
 
-## Assumptions
+## Product principles
 
-Stated up front so they can be overturned before any code gets written:
-
-- **Single user, no auth.** This is a personal tool, not a SaaS. No login, no multi-tenant data model.
-- **Local-first storage.** Conversations live in the browser (IndexedDB), not a server database. No sync service in v1.
-- **Vercel deploy target.** Next.js on Vercel is the default; Cloudflare Pages is a fine alternative if you'd rather keep everything in one hosting ecosystem, but it changes the streaming setup slightly.
-- **Black and white interface, both themes.** Dark and light mode both ship in v1. The application chrome has no color accent; restrained semantic syntax colors are the one functional exception.
-
-## Tech stack
-
-**Frontend**
-- Next.js 16 (App Router, Turbopack, React 19) + TypeScript
-- Tailwind CSS v4
-- Motion — used sparingly, for message entry and control transitions
-- `@ai-sdk/react` (`useChat`) for streaming message state
-
-**Backend**
-- Next.js Route Handlers as a thin proxy (`app/api/chat`, `app/api/models`) — the OpenRouter key never reaches the client
-- Vercel AI SDK (`ai`, v7) + `@openrouter/ai-sdk-provider` (the official OpenRouter provider) for `streamText`
-- OpenRouter's model catalog (`GET https://openrouter.ai/api/v1/models`) fetched server-side, cached, and used to populate the model switcher — don't hardcode a model list
-- **Reasoning**: OpenRouter's unified `reasoning` param (`{ effort: "low"|"medium"|"high" }` or `{ max_tokens }`, model-dependent). The AI SDK surfaces this as a distinct `reasoning` part alongside `text` parts on the message — don't hand-parse it out of the answer, use the part type
-- **Real-time search**: the `openrouter:web_search` server tool added to the request's `tools` array — this is the current recommended method (the model decides when to search) over the deprecated `:online` model-slug suffix. Sources come back as `url_citation` annotations
-
-**Storage**
-- Dexie.js over IndexedDB for conversations + messages, entirely client-side
-- No Postgres/Supabase/Prisma in v1. Add a real database only when cross-device sync becomes an actual need, not a hypothetical one
-
-**Deploy**
-- Vercel. `OPENROUTER_API_KEY` is a server-only environment variable — never prefixed `NEXT_PUBLIC_*`
-
-Package versions move fast; confirm current major versions at scaffold time rather than trusting this doc verbatim.
-
-## Design system
-
-The organizing idea: this app's whole point is tuning into different models through one interface — so the interface should feel like a precision instrument, not a generic chat template. Glass surfaces (soft, translucent, Apple-adjacent) over an instrument-panel information language (mono readouts for the things a gauge would show: model, tokens/sec, latency).
-
-The palette is strictly black, white, and neutral gray — no hue, warm or cool, in either theme. There is no accent color anywhere. Where a normal design system would reach for color to signal "active" or "enabled," this one reaches for **inversion** instead: a filled, contrast-swapped element is the entire vocabulary for state. That's the one rule everything else below follows.
-
-**Palette — dark**
-
-| Token | Value | Role |
-|---|---|---|
-| Void | `#0A0A0A` | Background |
-| Surface | `rgba(255,255,255,0.06)` + `backdrop-blur(20px)` | Glass panels — tuner strip, input bar, user bubbles |
-| Foreground | `#F5F5F5` | Primary text |
-| Muted | `#8A8A8A` | Secondary text, timestamps, telemetry |
-| Hairline | `rgba(255,255,255,0.10)` | Borders, dividers — 1px, never heavier |
-| Invert | `#FFFFFF` fill / `#0A0A0A` text | The active-state device — send button with content, an enabled toggle, the tuner strip while streaming |
-
-**Palette — light**
-
-| Token | Value | Role |
-|---|---|---|
-| Paper | `#FAFAFA` | Background |
-| Surface | `rgba(0,0,0,0.04)` + `backdrop-blur(20px)` | Glass panels |
-| Foreground | `#0A0A0A` | Primary text |
-| Muted | `#8A8A8A` | Secondary text, timestamps, telemetry — same value both themes |
-| Hairline | `rgba(0,0,0,0.10)` | Borders, dividers |
-| Invert | `#0A0A0A` fill / `#FAFAFA` text | The active-state device |
-
-A theme toggle sits next to the gear icon in the tuner strip. It swaps instantly — no cross-fade, since a color transition on the one control that switches the palette would undercut the "no color, ever" rule everywhere else.
-
-**Type**
-
-Two families, no more:
-- **Geist Sans** (400/500/600) — everything a person wrote or reads: messages, labels, the reasoning-off/on text
-- **Geist Mono** — everything the system measured: model slug, tokens/sec, latency, timestamps, and the reasoning trace itself (see below). If it's a number or a process the model produced, it's mono; if it's authored content, it's Sans.
-
-**Layout**
-
-Centered column, 680px max-width — narrower than the 760–800px most chat UIs default to.
-
-```
-┌───────────────────────────────────────────┐
-│ ≡   anthropic/claude-sonnet · 42 tok/s  ⚙  │  ← tuner strip, glass, sticky top
-├───────────────────────────────────────────┤
-│                                             │
-│   assistant text, no bubble —              │
-│   flows like reading, not chatting         │
-│                                             │
-│                         ╭──────────────╮   │
-│                         │ user message │   │  ← glass pill, right-aligned only
-│                         ╰──────────────╯   │
-│                                             │
-├───────────────────────────────────────────┤
-│   ╭─────────────────────────────────╮  ↑  │  ← floating glass input, margin
-│   ╰─────────────────────────────────╯     │     from viewport edge, not docked
-└───────────────────────────────────────────┘
-```
-
-Assistant messages get no bubble or background — they read like text on a page. User messages are the only bubbles: right-aligned, glass pill, 14px radius. This asymmetry is deliberate, not an oversight.
-
-**Signature interaction: the tuner strip**
-
-The persistent bar at the top isn't a static header — it's the model switcher, styled as a channel/frequency readout rather than a dropdown. Tapping it opens a searchable list of every OpenRouter model; selecting one causes the strip to "settle" with a short, damped motion (~200ms, ease-out, slight overshoot-then-settle) — a filled block sweeping and inverting into place, like a VU meter needle rendered in silhouette rather than a UI panel sliding in. This is the one place motion gets to be a little expressive; everywhere else it stays quiet.
-
-**Reasoning display**
-
-A model's reasoning trace is telemetry, not content, and it's styled that way: Geist Mono, Muted gray, smaller size, in a panel above the final answer with a thin hairline down the left edge — like a margin note or a scan log, not a chat bubble. It streams in live as it arrives and is collapsed by default; the moment the final answer starts streaming, it auto-collapses further if the person had it open, so it never competes with the answer for attention. The answer itself stays Foreground / Geist Sans, full contrast, unchanged from a non-reasoning response. Same mono-for-measured, sans-for-authored split as the tuner strip's tokens/sec readout — the trace is just another gauge.
-
-Reasoning is a three-state control in the input bar, next to send — **off · on · effort**, with effort expanding to low/medium/high when on. It's set as text labels in Mono, not an icon, consistent with the rest of the instrument language, and maps directly to OpenRouter's `reasoning.effort` parameter.
-
-**Real-time search**
-
-A second toggle, same location and treatment as reasoning: off/on, no effort levels. When on, the model decides when to search rather than searching on every turn. Sources the model actually used come back as small superscript Mono numbers inline in the answer, with a hairline-bordered block underneath listing title and domain for each — text only, no favicons, no card grid. Search has its own per-request cost separate from token cost; surface it in the same Mono readout style used for tokens/sec, since that's already how this app talks about cost.
-
-**Motion, everywhere else**
-
-- New messages: fade + 4px slide-up, 150ms ease-out
-- Streaming text: opacity ramp per chunk, no blinking caret, no typewriter sound-alike stutter
-- Reasoning trace: same opacity-ramp streaming, but at Muted contrast rather than Foreground
-- Respect `prefers-reduced-motion` — the tuner-tick and message animation both degrade to a plain opacity fade
-
-## Core features (shipped)
-
-- Streaming chat, one thread at a time, persisted locally
-- **Model switcher** — live catalog, searchable, arrow-key navigable, with
-  pricing, context, and capability chips
-- **Per-message telemetry** — routed provider, time-to-first-token, tok/s,
-  prompt/completion/cached/reasoning token split, and real USD cost pulled
-  from OpenRouter's usage accounting (measured, never estimated)
-- **Capability-aware controls** — the reasoning menu offers exactly the
-  efforts the selected model advertises; search greys out with a reason on
-  models that cannot call the app's web-search tool. The palette's `web`
-  filter finds compatible models directly
-- Conversation history — a resizable (drag the edge), collapsible (⌘B) rail
-  with filter, date grouping, pinning, rename/delete, and per-thread cost
-- Markdown + theme-aware semantic syntax highlighting, with per-block copy
-  and independent show/hide controls
-- Right-edge message navigator with a compact proximity-hover cluster,
-  previews, and click-to-jump navigation (hidden when the chat pane is narrow)
-- Copy message, regenerate, edit-and-resend, branch into a new thread
-- Per-conversation system prompt, with presets
-- Reasoning toggle (`off`/`minimal`/`low`/`medium`/`high`/`xhigh`, per model);
-  the trace and web source count share one "thought for 11.4s · 3 sources"
-  row above the answer; expanding it reveals the trace and a compact
-  `1 · example.com` source list
-- Web search toggle, with one canonical row of compact numbered links under
-  the answer
-- **Image generation tool** — type `@image`, choose the inline tool, and
-  describe the image. OpenRouter's dedicated Images API runs deterministically
-  without an extra LLM turn; generated assets, measured cost, failures, retry,
-  reference images, download, and full-screen preview live in the transcript.
-  A selected model that advertises image output is used directly; vision-only
-  models (image input) use the configured generation fallback
-- Stop mid-stream (button or Esc); mid-stream snapshots survive a refresh
-- Generated conversation titles (cheap model), never overwriting a rename
-- Export as Markdown or JSON
-- Reasoning, search and model persist as session defaults — a new chat starts
-  with the knobs you were last using
-- Keyboard-first: `⏎` send, `⌘K` tune, `>` inside the palette for commands,
-  `⌘⇧K` new chat, `⌘B` toggle the rail, `Esc` stop
-
-## Stretch (v2+)
-
-- **Sub-agent delegation (exploratory).** The primary model hands off a sub-task to a different OpenRouter model via a tool call — e.g. delegate a narrow question to a cheaper/faster model, or to one better suited to it, while the main thread keeps going. The sub-agent's output streams into a nested, labeled block (model slug in Mono) inside the main thread rather than a separate window. This is the least-specified item here and genuinely more complex than everything else on this list — it gets its own design pass once the core product is solid, not a checkbox alongside the rest.
-- Token/cost tracker per conversation, including search cost as its own line item (shown in the mono readout style — fits how you already think about metrics)
-- Command palette (Cmd+K expanded beyond model switching)
-- Export conversation as Markdown/JSON
-- Vision input for multimodal models
-- Prompt templates / saved system-prompt snippets
-- BYOK-per-session (paste a key in-browser, never persisted) as an alternative to the env var, useful if this ever needs to run somewhere you don't control the server
-
-## Non-goals (v1)
-
-Explicitly out of scope until there's a real reason to revisit:
-
-- Multi-user auth or accounts
-- Server-side database / cross-device sync
-- Billing or usage limits
-- Open-ended agentic tool use beyond web search and (exploratory) model delegation — no file access, no code execution, no general browsing
-- Voice input or output
+- Local-first. Dexie/IndexedDB is the working source of truth; cloud sync is
+  an optional replica, and the app remains usable without an account.
+- Bring your own key. The operator never holds or proxies an OpenRouter key.
+- End-to-end encryption for password accounts. The password is stretched in
+  the browser and independently derives the credential sent to Better Auth
+  and the non-extractable AES-GCM key used for records, settings, and images.
+- Minimal infrastructure. Static assets do not invoke the Worker. D1 stores
+  opaque records, R2 stores browser-encrypted blobs, and live sockets carry
+  only integer revision hints.
+- Monochrome interface. State is expressed through inversion rather than an
+  accent color; restrained syntax highlighting is the functional exception.
 
 ## Architecture
 
-```
-/app
-  /api/chat/route.ts        → POST, streams from OpenRouter via streamText
-  /api/image/route.ts       → POST, executes the @image tool
-  /api/models/route.ts      → GET, cached OpenRouter model catalog
-  layout.tsx
-  page.tsx                  → main chat view
-/components
-  chat/
-    ChatView.tsx             → live transcript, persistence, attachments
-    EmptyState.tsx           → compact starter workspace
-    MessageBubble.tsx
-    ThinkingPanel.tsx        → one collapsible trace: reasoning + sources,
-                               headed by how long the model thought
-    Citations.tsx            → numbered chips linking out
-    Composer.tsx             → send + capability-aware reasoning/search
-  tuner/
-    StatusStrip.tsx          → conversation/model/account context
-    ThemeToggle.tsx
-    Palette.tsx              → model search, filters, commands
-  sidebar/
-    ConversationList.tsx
-    RailHandle.tsx           → pointer + keyboard resizing
-    RailToggle.tsx           → persisted collapse state
-  ui/                        → restyled primitives (no default shadcn look)
-/lib
-  openrouter.ts              → createOpenRouter() wrapper: reasoning param, web_search tool, appName/appUrl
-  db.ts                      → Dexie schema: conversations, messages
-  types.ts
-/app/globals.css             → design tokens as CSS custom properties
+```text
+Browser
+  ├─ OpenRouter API ───── chat/search/vision/images (user-owned key)
+  ├─ IndexedDB ───────── local conversations, messages, vault CryptoKey
+  └─ /v1/*
+       └─ Cloudflare Worker
+            ├─ Better Auth + D1 ─ identity, sessions, opaque sync records
+            ├─ R2 ────────────── encrypted generated images/attachments
+            └─ Durable Object ── hibernating per-account revision socket
+
+Cloudflare Assets ─────── static Next.js `out/` (no Worker invocation)
 ```
 
-## Environment variables
+### Trust boundary
 
-```
-OPENROUTER_API_KEY=
-# optional fallback when the selected model does not generate image output
-OPENROUTER_IMAGE_MODEL=openai/gpt-image-2
-```
+For email/password accounts, conversation records, synchronized settings,
+the OpenRouter key, generated images, and attachments are encrypted in the
+browser. The Worker moves or stores opaque bytes and cannot decrypt them.
+Account identity, date of birth, session/security metadata, record ids,
+revisions, and blob sizes are not end-to-end encrypted. OpenRouter and the
+selected model provider see prompts and attachments sent to a model.
 
-That's the only required one for v1. Nothing else needs a secret.
+## Main surfaces
 
-## Getting started
+- `app/page.tsx` — application shell and active conversation.
+- `components/chat/` — streaming transcript, composer, image generation,
+  citations, syntax highlighting, and message navigator.
+- `components/sidebar/` — searchable/resizable/collapsible history rail.
+- `components/settings/` — account, keys, appearance, unlock and auth flows.
+- `lib/transport.ts` — direct browser-to-OpenRouter streaming transport.
+- `lib/db.ts` / `lib/conversations.ts` — local-first Dexie store.
+- `lib/sync.ts` / `lib/blob.ts` — encrypted D1 record and R2 blob sync.
+- `lib/auth-client.ts` / `lib/session.ts` — browser password derivation,
+  sessions, settings, realtime connection, and device locking.
+- `worker/src/index.ts` — authenticated sync, blob, live, state and deletion
+  routes.
+- `worker/src/auth.ts` — Better Auth, age gate, persistent rate limiting, and
+  optional email OTP.
+- `worker/src/live.ts` — content-free Durable Object invalidation hub.
+- `wrangler.jsonc` — Worker, static assets, D1, R2 and Durable Object bindings.
+
+`CLAUDE.md` contains the detailed invariants and design law. Read it before
+changing auth, encryption, streaming persistence, sync cursors, or scroll
+behavior; those areas contain fixes for real data-loss and browser bugs.
+
+## Local development
+
+Requirements: Node 24+ and a recent Wrangler 4 release.
 
 ```bash
-pnpm install
-cp .env.example .env.local   # add OPENROUTER_API_KEY
-pnpm dev
+npm install
+cd worker && npm install && cd ..
+npm run dev
 ```
 
-## Roadmap
+The static frontend can run on its own. Account/sync testing additionally
+needs Wrangler with local D1/R2/DO bindings:
 
-- [x] **Phase 0 — Scaffold.** Next.js project, Tailwind config with the design tokens above as CSS variables (both themes), folder structure.
-- [x] **Phase 1 — Core loop.** One hardcoded model, streaming end-to-end, no bubble styling yet — prove the plumbing works.
-- [x] **Phase 2 — Model switcher.** Live OpenRouter catalog, tuner strip UI, model persisted per conversation.
-- [x] **Phase 3 — Reasoning + search.** Reasoning toggle and telemetry-style trace panel, `openrouter:web_search` tool with inline citations.
-- [x] **Phase 4 — Persistence.** Dexie schema, conversation sidebar, rename/delete.
-- [x] **Phase 5 — Design pass.** Glass panels, motion, dark/light theme toggle, the tuner-tick signature interaction, mobile responsiveness.
-- [x] **Phase 6 — Instrument rework.** Telemetry bus (usage accounting →
-      streamed message metadata), capability-aware catalog and controls,
-      system prompt, edit/regenerate/branch, unified palette, export,
-      semantic syntax highlighting, generated titles, streaming persistence, zod-validated
-      API.
-- [ ] **Phase 7 — Next.** Vision input ✓ (capability-gated images, paste/drop,
-      client + server size limits); image generation ✓ (`@image`, references,
-      local persistence, retry/download/preview); next: sub-agent delegation
-      and per-thread temperature (the request schema already carries it).
+```bash
+npx wrangler dev
+```
+
+OpenRouter keys are entered in the app. There is no frontend `.env` file and
+no server-held model credential.
+
+## Cloudflare setup
+
+The checked-in config expects:
+
+- D1 database: `chat-vault`
+- R2 Standard bucket: `chat-blobs`
+- SQLite-backed Durable Object class: `SyncHub`
+- Worker secret: `AUTH_SECRET`
+
+Create the bucket once, then apply both idempotent schemas:
+
+```bash
+npx wrangler r2 bucket create chat-blobs
+npx wrangler d1 execute chat-vault --remote --file worker/schema-auth.sql
+npx wrangler d1 execute chat-vault --remote --file worker/schema-app.sql
+```
+
+Build and deploy:
+
+```bash
+npm run build
+npx wrangler deploy
+```
+
+### Optional public blob domain
+
+Authenticated Worker downloads are the correctness fallback. To avoid a
+Worker invocation for encrypted blob reads, connect an R2 custom domain such
+as `blobs.belayet.co`, allow CORS GETs from `https://chat.belayet.co`, and set
+`BLOB_PUBLIC_ORIGIN` to that origin in the Worker. Only encrypted accounts are
+given direct URLs; unencrypted-account blobs stay behind authentication.
+
+### Optional email verification
+
+The signup UI and Better Auth OTP flow are implemented but remain disabled
+until both `EMAIL` (Cloudflare Email Sending binding) and `EMAIL_FROM` exist.
+Cloudflare’s general transactional Email Sending product currently requires a
+Workers Paid plan; free Email Routing can send only to pre-verified destination
+addresses and cannot verify arbitrary signups. Without the binding, signup
+continues without email verification rather than locking users out.
+
+Google remains a disabled UI placeholder until its redirect URI and secret
+are intentionally configured.
+
+## Verification
+
+```bash
+npm run lint
+npm run build
+./node_modules/.bin/tsc --noEmit --strict --skipLibCheck \
+  --target es2022 --module esnext --moduleResolution bundler \
+  --types ./worker/node_modules/@cloudflare/workers-types \
+  worker/src/index.ts worker/src/auth.ts worker/src/live.ts worker/src/env.d.ts
+node worker/gen-schema.mjs
+```
+
+The generated auth schema must match `worker/schema-auth.sql` after every
+Better Auth option or version change.
+
+## Privacy and deletion
+
+The static policy is at `/privacy`. Account deletion removes Better Auth
+identity/session rows, D1 state and records through foreign-key cascades, and
+all R2 objects under the account prefix. Verify that
+`privacy@belayet.co` is a working mailbox before treating the policy as final.

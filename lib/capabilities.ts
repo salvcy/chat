@@ -19,6 +19,7 @@ import {
 /** What we assume before the catalog loads: allow everything, block nothing. */
 const OPTIMISTIC: ModelCapabilities = {
   vision: false,
+  documents: false,
   imageGeneration: false,
   tools: true,
   reasoning: true,
@@ -63,8 +64,27 @@ export function unavailableReason(
     case "reasoning":
       return caps.reasoning ? null : "this model has no reasoning mode";
     case "attach":
-      return caps.vision ? null : "this model does not accept images";
+      // Never unavailable outright any more: a PDF can be attached to any
+      // model, because the file-parser plugin converts it first.
+      return caps.vision ? null : "this model accepts PDFs but not images";
   }
+}
+
+/**
+ * Which PDF engine to ask OpenRouter for.
+ *
+ * `native` hands the model the actual document — layout, tables and figures
+ * intact — and is billed as ordinary input tokens, so it costs no more than
+ * the text would have. Models without file input fall back to
+ * `cloudflare-ai`, which converts to markdown for free.
+ *
+ * `mistral-ocr` is deliberately never chosen automatically: it is the best
+ * option for scanned paper, and it is $2 per 1,000 pages charged to whoever
+ * owns the key. That is the user's call to make, not a silent default —
+ * and OpenRouter's own default, which is why the engine is always sent.
+ */
+export function pdfEngineFor(caps: ModelCapabilities): "native" | "cloudflare-ai" {
+  return caps.documents ? "native" : "cloudflare-ai";
 }
 
 /**

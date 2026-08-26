@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { motion } from "motion/react";
+import Link from "next/link";
 import type { SessionUser } from "@/lib/auth-client";
 import { keyFingerprint, looksLikeKey } from "@/lib/credentials";
 import {
@@ -265,12 +266,20 @@ export default function SettingsPanel({
                         </div>
                       </div>
                     ) : (
-                      <button
-                        onClick={() => setConfirmDestroy(true)}
-                        className="font-mono text-[10px] text-muted underline decoration-hairline underline-offset-2 transition-colors hover:text-foreground"
-                      >
-                        delete account
-                      </button>
+                      <div className="flex items-center justify-between gap-3">
+                        <button
+                          onClick={() => setConfirmDestroy(true)}
+                          className="font-mono text-[10px] text-muted underline decoration-hairline underline-offset-2 transition-colors hover:text-foreground"
+                        >
+                          delete account
+                        </button>
+                        <Link
+                          href="/privacy"
+                          className="shrink-0 font-mono text-[10px] text-muted underline decoration-hairline underline-offset-2 transition-colors hover:text-foreground"
+                        >
+                          privacy policy
+                        </Link>
+                      </div>
                     )}
                   </div>
                 </>
@@ -399,6 +408,19 @@ export default function SettingsPanel({
                   labels={{ comfortable: "roomy", compact: "compact" }}
                 />
               </Row>
+            </div>
+          )}
+          {/* Signed in, the link lives beside "delete account". Signed out
+              there is no such row, and dropping the only route to the policy
+              from this panel would be a regression. */}
+          {!user && (
+            <div className="mt-5 border-t border-hairline pt-4">
+              <Link
+                href="/privacy"
+                className="font-mono text-[10px] text-muted underline decoration-hairline underline-offset-2 transition-colors hover:text-foreground"
+              >
+                privacy policy
+              </Link>
             </div>
           )}
         </div>

@@ -50,6 +50,7 @@ const GESTURE_WINDOW_MS = 400;
 /** Chat-pane width at which the transcript minimap earns its space. */
 const NAVIGATOR_MIN_PX = 880;
 const MAX_ATTACHMENTS = 4;
+const PDF_TYPE = "application/pdf";
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES = 16 * 1024 * 1024;
 
@@ -99,6 +100,26 @@ function withRequestStatus(
 }
 
 /**
+ * Cheap identity of a transcript: ids, shape, and how much text each part
+ * holds. Enough to tell "the same thread" from "the thread moved on"
+ * without walking every part twice, and enough to notice a streaming answer
+ * that grew by a token.
+ */
+function fingerprint(messages: DialMessage[]): string {
+  return messages
+    .map((message) => {
+      let size = 0;
+      for (const part of message.parts) {
+        if ("text" in part && typeof part.text === "string") {
+          size += part.text.length;
+        }
+      }
+      return `${message.id}:${message.parts.length}:${size}`;
+    })
+    .join("|");
+}
+
+/**
  * The live chat.
  *
  * Remounted per conversation by the shell, so its useChat session is always
@@ -120,6 +141,8 @@ export default function ChatView({
   onOpenSwitcher,
   onBranch,
   saveTurn,
+  loadMessages,
+  remoteVersion,
   setActiveId,
 }: {
   conversationId: string;
@@ -134,7 +157,11 @@ export default function ChatView({
     settings: ChatSettings;
     messages: DialMessage[];
     naming?: boolean;
+    draft?: boolean;
   }) => Promise<void>;
+  loadMessages: (conversationId: string) => Promise<DialMessage[]>;
+  /** Increments when a sync applied remote records. See the effect below. */
+  remoteVersion: number;
   setActiveId: (id: string) => void;
 }) {
   const [input, setInput] = useState("");
@@ -161,13 +188,22 @@ export default function ChatView({
     settingsRef.current = settings;
   });
 
+  // Resolved here rather than at the point of use so the transport can be
+  // handed the ref at construction. Same contract as settings: read through
+  // a ref inside callbacks, synced after commit, never written during render.
+  const selectedCapabilities = capabilitiesFor(settings.model, models);
+  const capabilitiesRef = useRef(selectedCapabilities);
+  useEffect(() => {
+    capabilitiesRef.current = selectedCapabilities;
+  });
+
   /**
    * Inference runs here, in the browser, against the user's own key. The
    * transport reads settings through the ref rather than capturing them, so
    * a mid-thread model switch takes effect on the very next turn.
    */
   const transport = useMemo(
-    () => new OpenRouterChatTransport(settingsRef),
+    () => new OpenRouterChatTransport(settingsRef, capabilitiesRef),
     [],
   );
 
@@ -207,7 +243,6 @@ export default function ChatView({
 
   const chatBusy = status === "streaming" || status === "submitted";
   const busy = chatBusy || imageBusy;
-  const selectedCapabilities = capabilitiesFor(settings.model, models);
   const canSeeImages = selectedCapabilities.vision;
   const selectedImageModel = selectedCapabilities.imageGeneration
     ? settings.model
@@ -236,10 +271,60 @@ export default function ChatView({
         settings: settingsRef.current,
         messages: snapshot,
         naming: false,
+        draft: true,
       });
     }, STREAM_SAVE_MS);
     return () => clearInterval(timer);
   }, [chatBusy, saveTurn, threadId]);
+
+  /* --------------------------- remote changes --------------------------- */
+
+  /**
+   * Adopt what another device wrote into this thread.
+   *
+   * A realtime invalidation makes `runSync` pull and write into Dexie — but
+   * Dexie is not React, so before this the rail refreshed and the transcript
+   * in front of the reader did not. That is the whole reason cross-device
+   * sync looked broken: the data had already arrived and nothing re-read it.
+   *
+   * Three guards, each protecting against losing local work:
+   *
+   *  - Never while busy. A stream in progress is authoritative here; the
+   *    version is re-checked when it settles, so nothing is dropped.
+   *  - Never twice for the same version, which is what keeps the `busy`
+   *    dependency from re-reading Dexie the instant a stream finishes and
+   *    racing the `onFinish` save that has not landed yet.
+   *  - Never when the stored copy is missing a message we are holding. That
+   *    means our own save is still in flight and the read is stale. The cost
+   *    is that a *truncation* made on another device (an edit or a
+   *    regenerate) waits for the next thread switch rather than applying
+   *    live; losing a locally streamed answer would be far worse.
+   */
+  const appliedRemoteRef = useRef(0);
+  useEffect(() => {
+    if (remoteVersion === 0 || busy) return;
+    if (remoteVersion === appliedRemoteRef.current) return;
+
+    let cancelled = false;
+    void loadMessages(threadId).then((fresh) => {
+      if (cancelled || fresh.length === 0) return;
+
+      const local = latestRef.current;
+      const stored = new Set(fresh.map((message) => message.id));
+      if (local.some((message) => !stored.has(message.id))) return;
+      if (fingerprint(fresh) === fingerprint(local)) {
+        appliedRemoteRef.current = remoteVersion;
+        return;
+      }
+
+      appliedRemoteRef.current = remoteVersion;
+      setMessages(fresh);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [remoteVersion, busy, loadMessages, threadId, setMessages]);
 
   /* ------------------------------ scroll ------------------------------- */
 
@@ -643,7 +728,10 @@ export default function ChatView({
       void runImage(text);
       return;
     }
-    if (attachments.length > 0 && !canSeeImages) {
+    if (
+      !canSeeImages &&
+      attachments.some((file) => file.mediaType.startsWith("image/"))
+    ) {
       setAttachmentError("Choose a model with image input before sending.");
       return;
     }
@@ -662,16 +750,29 @@ export default function ChatView({
   const addAttachments = async (files: FileList) => {
     setAttachmentError(null);
     const incoming = [...files];
-    if (incoming.some((file) => !file.type.startsWith("image/"))) {
-      setAttachmentError("Only images are supported right now.");
+    if (
+      incoming.some(
+        (file) => !file.type.startsWith("image/") && file.type !== PDF_TYPE,
+      )
+    ) {
+      setAttachmentError("Attach images or PDFs.");
+      return;
+    }
+    // A PDF goes to any model — OpenRouter reads it first for models that
+    // cannot. An image only goes to a model that advertises image input.
+    if (
+      !canSeeImages &&
+      incoming.some((file) => file.type.startsWith("image/"))
+    ) {
+      setAttachmentError("This model accepts PDFs but not images.");
       return;
     }
     if (attachments.length + incoming.length > MAX_ATTACHMENTS) {
-      setAttachmentError(`Attach up to ${MAX_ATTACHMENTS} images per turn.`);
+      setAttachmentError(`Attach up to ${MAX_ATTACHMENTS} files per turn.`);
       return;
     }
     if (incoming.some((file) => file.size > MAX_ATTACHMENT_BYTES)) {
-      setAttachmentError("Each image must be smaller than 8 MB.");
+      setAttachmentError("Each file must be smaller than 8 MB.");
       return;
     }
     const incomingBytes = incoming.reduce((sum, file) => sum + file.size, 0);
@@ -682,14 +783,14 @@ export default function ChatView({
     // Data URLs are larger than the raw file; the conservative limit here
     // leaves room for the JSON envelope and the rest of the conversation.
     if (attachedBytes + incomingBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
-      setAttachmentError("Keep the combined image size under 16 MB.");
+      setAttachmentError("Keep the combined attachment size under 16 MB.");
       return;
     }
     try {
       const parts = await convertFileListToFileUIParts(files);
       setAttachments((current) => [...current, ...parts]);
     } catch {
-      setAttachmentError("One of those images could not be read.");
+      setAttachmentError("One of those files could not be read.");
     }
   };
 

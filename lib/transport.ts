@@ -14,7 +14,13 @@ import type { OpenRouterProviderOptions } from "@openrouter/ai-sdk-provider";
 import { currentKey } from "./credentials";
 import { MissingKeyError, providerFor } from "./openrouter-client";
 import { messagesForTextModel } from "./messages";
-import type { ChatSettings, DialDataParts, DialMetadata } from "./types";
+import type {
+  ChatSettings,
+  DialDataParts,
+  DialMetadata,
+  ModelCapabilities,
+} from "./types";
+import { pdfEngineFor } from "./capabilities";
 
 type DialMessage = UIMessage<DialMetadata, DialDataParts>;
 
@@ -84,7 +90,15 @@ export class OpenRouterChatTransport implements ChatTransport<DialMessage> {
    * switch. Taking the ref object (rather than a closure that reads it)
    * also keeps `.current` out of the render path entirely.
    */
-  constructor(private readonly settings: { readonly current: ChatSettings }) {}
+  constructor(
+    private readonly settings: { readonly current: ChatSettings },
+    /**
+     * The selected model's capabilities, by ref for the same reason as
+     * settings — they change with the model, mid-thread. Only the PDF engine
+     * reads them; everything else the transport sends is a per-thread knob.
+     */
+    private readonly capabilities: { readonly current: ModelCapabilities },
+  ) {}
 
   async sendMessages({
     messages,
@@ -110,6 +124,37 @@ export class OpenRouterChatTransport implements ChatTransport<DialMessage> {
         ? {}
         : { reasoning: { enabled: true, effort: reasoning } };
 
+    /*
+     * PDFs.
+     *
+     * OpenRouter accepts a document as an ordinary file part and handles the
+     * reading itself, so there is no parser in this codebase and none of this
+     * touches our own infrastructure — the request still goes from the tab to
+     * openrouter.ai against the user's key.
+     *
+     * The engine is always stated rather than left to default. OpenRouter's
+     * own default is `mistral-ocr` at $2 per 1,000 pages; sending a document
+     * should not quietly bill someone for OCR they did not ask for.
+     */
+    const hasPdf = modelMessages.some(
+      (message) =>
+        Array.isArray(message.content) &&
+        message.content.some(
+          (part) =>
+            part.type === "file" && part.mediaType === "application/pdf",
+        ),
+    );
+    const pdfPlugin = hasPdf
+      ? {
+          plugins: [
+            {
+              id: "file-parser" as const,
+              pdf: { engine: pdfEngineFor(this.capabilities.current) },
+            },
+          ],
+        }
+      : {};
+
     const openrouter = providerFor(key);
 
     const startedAt = Date.now();
@@ -122,7 +167,7 @@ export class OpenRouterChatTransport implements ChatTransport<DialMessage> {
     const result = streamText({
       // `usage.include` turns on OpenRouter usage accounting, which is what
       // makes the real per-message cost available instead of an estimate.
-      model: openrouter(model, { usage: { include: true } }),
+      model: openrouter(model, { usage: { include: true }, ...pdfPlugin }),
       messages: modelMessages,
       ...(system?.trim() ? { system: system.trim() } : {}),
       ...(temperature !== undefined ? { temperature } : {}),

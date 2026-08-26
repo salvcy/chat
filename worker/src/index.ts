@@ -1,14 +1,17 @@
 import { createAuth } from "./auth";
 import type { Env } from "./env";
+export { SyncHub } from "./live";
 
 /**
  * The API.
  *
- * Four surfaces, all under `/v1/` on the same origin as the app:
+ * Six surfaces, all under `/v1/` on the same origin as the app:
  *
  *   /v1/auth/*   Better Auth — email+password, Google, sessions
  *   /v1/sync     conversation records, by cursor
  *   /v1/state    the user's settings blob and encryption mode
+ *   /v1/blobs/*  client-encrypted image objects in R2
+ *   /v1/live     hibernating realtime invalidation socket
  *   /v1/me       delete everything
  *
  * ## The CPU budget is the design constraint
@@ -28,11 +31,28 @@ import type { Env } from "./env";
  * end-to-end-encrypted accounts and server-readable ones with no branching.
  */
 
-const PAGE_SIZE = 100;
+/**
+ * Must stay strictly greater than MAX_PUSH_RECORDS.
+ *
+ * `pull` pages by `rev > since` and the client advances its cursor to the
+ * last row's revision, so every record sharing a revision has to fit in one
+ * page — anything spilling past the limit would be skipped for good. One
+ * push allocates exactly one revision and carries at most MAX_PUSH_RECORDS
+ * records, so that is the size of the largest possible group, and the gap
+ * between the two numbers is the safety margin.
+ */
+const PAGE_SIZE = 250;
 const MAX_PAYLOAD_CHARS = 128 * 1024;
 const MAX_SETTINGS_CHARS = 64 * 1024;
 const MAX_PUSH_RECORDS = 100;
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
+const MAX_BLOB_BYTES = 11 * 1024 * 1024;
+/**
+ * `g` generated image · `f` user attachment · `p` a spilled record payload
+ * that did not fit in D1. All three share the record's id as their prefix,
+ * which is what lets a deletion clear them without reading anything.
+ */
+const BLOB_ID = /^[A-Za-z0-9_-]{1,96}\.(?:g|f|p)\.\d{1,4}\.\d{1,4}$/;
 
 type RecordRow = {
   id: string;
@@ -149,8 +169,12 @@ async function push(
   env: Env,
   userId: string,
   state: StateRow,
+  ctx: ExecutionContext,
 ): Promise<Response> {
-  const body = (await readJson(request)) as { records?: unknown };
+  const body = (await readJson(request)) as {
+    records?: unknown;
+    client?: unknown;
+  };
   if (!Array.isArray(body.records)) return fail("records must be an array", 400);
   if (body.records.length === 0) return json({ rev: state.rev, applied: 0 });
   if (body.records.length > MAX_PUSH_RECORDS) {
@@ -181,11 +205,30 @@ async function push(
     incoming.push({ id: item.id, payload: item.payload, deleted: false });
   }
 
-  const rev = state.rev + 1;
+  /*
+   * Allocate the revision in the database rather than deriving it from the
+   * row read at the top of the request.
+   *
+   * Two devices pushing at once both read the same `state.rev` and both
+   * wrote rev+1 — and that was silent data loss, not just a duplicate
+   * number: a third device pulling between the two writes advanced its
+   * cursor past the shared revision and never asked for the second batch
+   * again. Realtime is what made two devices online at once the normal
+   * case, so this went from theoretical to routine. A single
+   * `UPDATE … RETURNING` is atomic, so concurrent pushes get distinct
+   * revisions and each one's records stay reachable.
+   */
+  const allocated = await env.DB.prepare(
+    `UPDATE user_state SET rev = rev + 1, updated_at = ?
+      WHERE user_id = ?
+      RETURNING rev`,
+  )
+    .bind(Date.now(), userId)
+    .first<{ rev: number }>();
+  if (!allocated) return fail("unauthorized", 401);
+  const rev = allocated.rev;
+
   await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE user_state SET rev = ?, updated_at = ? WHERE user_id = ?`,
-    ).bind(rev, Date.now(), userId),
     ...incoming.map((record) =>
       env.DB.prepare(
         `INSERT INTO record (user_id, id, rev, deleted, payload)
@@ -198,7 +241,176 @@ async function push(
     ),
   ]);
 
+  // A revision is only a wake-up hint. Devices still authenticate and pull
+  // opaque rows through D1, so a dropped socket message cannot lose data.
+  // The pushing device is excluded by its own connection id: it already has
+  // this revision in the response below, and waking it would only make it
+  // push again.
+  ctx.waitUntil(
+    notifyLive(
+      env,
+      userId,
+      rev,
+      typeof body.client === "string" && body.client.length <= 64
+        ? body.client
+        : null,
+    ),
+  );
+
+  const deletedIds = incoming
+    .filter((record) => record.deleted)
+    .map((record) => record.id);
+  if (deletedIds.length > 0) {
+    ctx.waitUntil(
+      Promise.all(
+        deletedIds.map((recordId) =>
+          deleteRecordBlobs(env.BLOBS, userId, recordId),
+        ),
+      ).then(() => undefined),
+    );
+  }
+
   return json({ rev, applied: incoming.length });
+}
+
+/* ----------------------------- R2 blobs ------------------------------- */
+
+function blobKey(userId: string, blobId: string): string {
+  return `${userId}/${blobId}`;
+}
+
+function publicBlobUrl(
+  env: Env,
+  userId: string,
+  blobId: string,
+  encrypted: boolean,
+): string | null {
+  if (!encrypted || !env.BLOB_PUBLIC_ORIGIN) return null;
+  const origin = env.BLOB_PUBLIC_ORIGIN.replace(/\/+$/, "");
+  return `${origin}/${encodeURIComponent(userId)}/${encodeURIComponent(blobId)}`;
+}
+
+async function putBlob(
+  request: Request,
+  env: Env,
+  userId: string,
+  blobId: string,
+  state: StateRow,
+): Promise<Response> {
+  const declared = Number(request.headers.get("content-length") ?? 0);
+  if (declared > MAX_BLOB_BYTES) return fail("image exceeded 11 MB", 413);
+  const bytes = await request.arrayBuffer();
+  if (bytes.byteLength === 0) return fail("image was empty", 400);
+  if (bytes.byteLength > MAX_BLOB_BYTES) {
+    return fail("image exceeded 11 MB", 413);
+  }
+
+  const object = await env.BLOBS.put(blobKey(userId, blobId), bytes, {
+    httpMetadata: {
+      contentType: "application/octet-stream",
+      // A retry can replace a deterministic key, so stale ciphertext must
+      // never be cached under the custom-domain URL.
+      cacheControl: "no-store",
+    },
+  });
+  return json({
+    id: blobId,
+    etag: object.httpEtag,
+    url: publicBlobUrl(env, userId, blobId, state.encryption !== "none"),
+  });
+}
+
+async function getBlob(
+  env: Env,
+  userId: string,
+  blobId: string,
+): Promise<Response> {
+  const object = await env.BLOBS.get(blobKey(userId, blobId));
+  if (!object) return fail("image not found", 404);
+  return new Response(object.body, {
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "Content-Length": String(object.size),
+      ETag: object.httpEtag,
+      "Cache-Control": "private, no-store",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+}
+
+async function deleteBlob(
+  env: Env,
+  userId: string,
+  blobId: string,
+): Promise<Response> {
+  await env.BLOBS.delete(blobKey(userId, blobId));
+  return new Response(null, { status: 204 });
+}
+
+async function deleteBlobPrefix(
+  bucket: R2Bucket,
+  prefix: string,
+): Promise<void> {
+  // Restart at the prefix after each delete. Continuing an opaque cursor
+  // through a collection we just mutated can skip keys on some object stores.
+  for (;;) {
+    const page = await bucket.list({ prefix, limit: 1000 });
+    if (page.objects.length === 0) return;
+    await bucket.delete(page.objects.map((object) => object.key));
+  }
+}
+
+async function deleteRecordBlobs(
+  bucket: R2Bucket,
+  userId: string,
+  recordId: string,
+): Promise<void> {
+  let prefix = recordId;
+  if (!/^[A-Za-z0-9_-]{1,96}$/.test(recordId)) {
+    const digest = new Uint8Array(
+      await crypto.subtle.digest("SHA-256", new TextEncoder().encode(recordId)),
+    );
+    let binary = "";
+    for (const byte of digest) binary += String.fromCharCode(byte);
+    prefix = btoa(binary)
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+  }
+  await deleteBlobPrefix(bucket, `${userId}/${prefix}.`);
+}
+
+async function notifyLive(
+  env: Env,
+  userId: string,
+  rev: number,
+  exclude: string | null,
+): Promise<void> {
+  const stub = env.LIVE.get(env.LIVE.idFromName(userId));
+  await stub.fetch("https://live.internal/notify", {
+    method: "POST",
+    body: JSON.stringify({ rev, exclude }),
+  });
+}
+
+/** Connection ids only ever come back to us as a tag to skip. */
+const CONNECTION_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+function connectLive(
+  request: Request,
+  env: Env,
+  userId: string,
+  rev: number,
+  connection: string | null,
+): Promise<Response> {
+  const stub = env.LIVE.get(env.LIVE.idFromName(userId));
+  const headers = new Headers();
+  const upgrade = request.headers.get("Upgrade");
+  if (upgrade) headers.set("Upgrade", upgrade);
+  const query = connection ? `&c=${connection}` : "";
+  return stub.fetch(`https://live.internal/connect?rev=${rev}${query}`, {
+    headers,
+  });
 }
 
 /** GET /v1/state — settings blob + encryption mode. */
@@ -276,6 +488,9 @@ async function writeState(
  * settings and records together.
  */
 async function deleteMe(env: Env, userId: string): Promise<Response> {
+  // R2 has no foreign keys. Clear the user's prefix before removing the D1
+  // identity so an account deletion leaves no orphaned ciphertext behind.
+  await deleteBlobPrefix(env.BLOBS, `${userId}/`);
   await env.DB.prepare(`DELETE FROM "user" WHERE id = ?`).bind(userId).run();
 
   // Expire this device's cookies in the same response. The signed session
@@ -325,7 +540,11 @@ function getAuth(env: Env, origin: string) {
 }
 
 const handler = {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<Response> {
     const url = new URL(request.url);
     const { pathname } = url;
 
@@ -348,12 +567,48 @@ const handler = {
       // The session outlived the account it belongs to.
       if (!state) return fail("unauthorized", 401);
 
+      if (pathname === "/v1/live") {
+        if (request.method !== "GET") return fail("method not allowed", 405);
+        if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+          return fail("websocket upgrade required", 426);
+        }
+        const connection = url.searchParams.get("c");
+        return await connectLive(
+          request,
+          env,
+          userId,
+          state.rev,
+          connection && CONNECTION_ID.test(connection) ? connection : null,
+        );
+      }
+
+      const blobMatch = pathname.match(/^\/v1\/blobs\/([^/]+)$/);
+      if (blobMatch) {
+        let blobId: string;
+        try {
+          blobId = decodeURIComponent(blobMatch[1]);
+        } catch {
+          return fail("invalid image id", 400);
+        }
+        if (!BLOB_ID.test(blobId)) return fail("invalid image id", 400);
+        if (request.method === "PUT") {
+          return await putBlob(request, env, userId, blobId, state);
+        }
+        if (request.method === "GET") {
+          return await getBlob(env, userId, blobId);
+        }
+        if (request.method === "DELETE") {
+          return await deleteBlob(env, userId, blobId);
+        }
+        return fail("method not allowed", 405);
+      }
+
       if (pathname === "/v1/sync") {
         if (request.method === "GET") {
           return await pull(request, env, userId, state);
         }
         if (request.method === "POST") {
-          return await push(request, env, userId, state);
+          return await push(request, env, userId, state, ctx);
         }
         return fail("method not allowed", 405);
       }

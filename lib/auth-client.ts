@@ -221,6 +221,21 @@ export async function signIn(
   return credential;
 }
 
+/** Complete the optional email-OTP gate and receive the normal session. */
+export async function verifyEmailOTP(email: string, otp: string): Promise<void> {
+  await call("/email-otp/verify-email", {
+    email: email.trim().toLowerCase(),
+    otp: otp.replace(/\D/g, ""),
+  });
+}
+
+export async function resendEmailOTP(email: string): Promise<void> {
+  await call("/email-otp/send-verification-otp", {
+    email: email.trim().toLowerCase(),
+    type: "email-verification",
+  });
+}
+
 /**
  * Hand off to Google. Returns nothing useful — the tab navigates away.
  *

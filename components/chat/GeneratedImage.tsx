@@ -34,6 +34,14 @@ function GeneratedAsset({
     aspectRatio: "1 / 1",
   });
 
+  if (!asset.url) {
+    return (
+      <div className="flex min-h-28 w-full max-w-[560px] items-center justify-center rounded-[18px] border border-hairline px-5 text-center font-mono text-[10px] leading-relaxed text-muted">
+        image pixels are unavailable on this device
+      </div>
+    );
+  }
+
   return (
     <figure
       className="group/image relative max-w-full overflow-hidden rounded-[18px]"
@@ -202,7 +210,7 @@ export default function GeneratedImage({
       )}
 
       <AnimatePresence>
-        {expandedAsset && (
+        {expandedAsset?.url && (
           <motion.div
             role="dialog"
             aria-modal="true"
