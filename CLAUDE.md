@@ -34,9 +34,12 @@ design system — don't deviate without the user explicitly approving it.
   installed** and `node_modules` is npm-managed — don't add dependencies
   there, or you'll end up with a `package-lock.json` fighting
   `pnpm-lock.yaml`.
-- `.gitignore` has `.env*` — `.env.local` carries the key, never commit it.
-- To test the stream without a browser:
-  `curl.exe -sS -N -X POST localhost:PORT/api/chat -H "Content-Type: application/json" --data-binary @file.json`
+- **There are no environment variables.** Not "none required" — none at all;
+  `grep process.env` returns nothing. The OpenRouter key belongs to the user
+  and lives in their browser, and the former `OPENROUTER_*` settings are now
+  constants in `lib/types.ts`. A leftover `.env.local` is inert.
+- There is no server to curl. To exercise the stream, drive the browser —
+  the request goes from the tab to `openrouter.ai` and nowhere else.
 
 ## Architecture
 
@@ -45,40 +48,173 @@ Every assistant message carries a flight recorder, and the model catalog
 carries a capability surface — so the mono readouts have real numbers and
 the controls can't offer something the model won't honour.
 
-### Backend (thin, validated, instrumented)
+The organizing idea after the v3 rework: **nothing we pay for sits in the
+token path.** The user brings their own OpenRouter key and the browser talks
+to OpenRouter directly, so inference costs the operator exactly nothing at
+any volume, a long reasoning answer cannot hit a function timeout, and a
+generated image travels once instead of twice.
 
-- `lib/openrouter.ts` — the only place `createOpenRouter()` is built.
-  Server-only; `appUrl` reads `OPENROUTER_APP_URL`. Per-request concerns
-  (reasoning, web_search, usage accounting) are set at the call site.
-- `lib/catalog.ts` — **server-only**, imported only from route handlers.
-  Fetches `/models`, normalizes it, and derives `ModelCapabilities`
-  (vision / tools / reasoning + `supported_efforts` + `default_effort` +
-  `mandatory`). Anything not positively advertised is treated as
-  unsupported. Cached 1h via the Next fetch cache.
-- `lib/schema.ts` — zod request schemas (this is what `zod` is for; it was
-  a dependency with no importer before). Bad requests get a real 400 with
-  a reason, not silent coercion.
-- `app/api/chat/route.ts` — POST. Validates, strips client system messages,
-  injects the server-held system prompt, forwards `abortSignal: req.signal`
-  so an abandoned stream stops billing. Builds the model with
-  `openrouter(model, { usage: { include: true } })` — that flag is what
-  makes **real USD cost** available instead of an estimate. Streams
-  `DialMetadata` incrementally via `messageMetadata`, which the AI SDK
-  merges client-side:
-    `start` → model/effort/search/startedAt ·
-    first delta → `ttftMs` ·
-    `finish-step` → routed provider + usage accounting (cost, cached,
-    reasoning tokens) ·
-    `finish` → duration, tok/s, finishReason, token split.
-- `app/api/models/route.ts` — GET, the normalized capability-bearing catalog.
-- `app/api/title/route.ts` — POST, names a thread with a cheap model
-  (`OPENROUTER_TITLE_MODEL`). Best-effort: failure keeps the local fallback.
-- `app/api/key/route.ts` — GET, OpenRouter key balance for the strip.
-- `app/api/image/route.ts` — POST, executes the `@image` tool through
-  OpenRouter's dedicated Images API. A selected model whose catalog output
-  modalities include `image` is honored; optional `OPENROUTER_IMAGE_MODEL` is
-  the fallback. Output cost is measured upstream and images return as data URLs
-  for local persistence.
+### Auth (`worker/src/auth.ts`)
+
+Better Auth — email+password, Google, sessions — on D1. Three things are
+unusual and all three follow from **the Workers free tier allowing 10ms CPU
+per request**:
+
+- **The server never receives a password.** The browser runs PBKDF2-SHA256
+  at 600k iterations (OWASP's figure when Argon2id is unavailable — and it is
+  unavailable, because the frontend cannot take a WASM dependency) and sends
+  the derived value. `hashPassword` is therefore a salted SHA-256, which is
+  correct rather than lazy: the input is 256 bits of high-entropy output and
+  there is nothing left to guess. `looksPreStretched` rejects anything that
+  is not exactly 43 base64url characters, so a client that skipped the
+  derivation cannot get a raw password stored under a fast hash.
+- **The same PBKDF2 pass yields the vault key.** `HKDF("auth")` goes to the
+  server; `HKDF("vault")` never leaves. That is why email/password accounts
+  get E2EE with no extra passphrase — and why Google accounts cannot: OAuth
+  proves identity and supplies no key material, so E2EE there needs a
+  separate passphrase the user types per device.
+- **Never hand-write the auth schema.** `node gen-schema.mjs > schema-auth.sql`
+  derives it from the same `createAuth` the Worker runs. The deprecated
+  standalone `@better-auth/cli` resolved to 1.4.21 against a 1.7.1 runtime,
+  omitted `account.issuer`, and every signup 500'd with a SQLITE_ERROR buried
+  in the logs. Regenerate after any auth-option change or version bump.
+
+Measured CPU on the free tier (`wrangler tail`): sync 3–8ms, sign-in ~11ms,
+**signup 30ms median / 55ms peak**. Nothing was throttled across 34 requests,
+but signup is several times the documented limit — watch for 1027s. Caching
+the auth instance per isolate did *not* fix it; the cost is Better Auth's own
+signup work plus two D1 writes, not construction.
+
+### The Worker (`worker/`, deployed from `wrangler.jsonc`)
+
+The only server, and it cannot read anything it stores. `worker/src/index.ts`
+is four endpoints — mint an account from a token verifier, pull records above
+a cursor, push records, delete everything — over D1. Deployed as one Worker
+on **chat.belayet.co** that also serves the static export, so the app and its
+API share an origin: no CORS preflight, no cross-site cookie configuration.
+
+- **Zero dependencies, deliberately.** Workers bill CPU and the free tier
+  allows 10ms; a router and an auth library would spend it on nothing. A
+  request costs one SHA-256 and one indexed lookup. `worker/src/env.d.ts`
+  hand-declares the four D1 methods used rather than pulling in
+  `@cloudflare/workers-types`. The Worker is ~7KB.
+- **Better Auth is in, and `nodejs_compat` is required** (it reaches for
+  `node:crypto` and `AsyncLocalStorage`; without the flag the deploy fails
+  validation). It was correctly *out* while identity was a bare token — no
+  password, no email, no session cookie — and correctly back in once
+  email/password and Google arrived. The bundle went from 7KB to 313KB
+  gzipped; that is the price and it is worth it for flows nobody should
+  hand-roll.
+- **The Google provider is registered only when its secret is set.** Passing
+  an undefined `clientSecret` makes Better Auth throw at construction, which
+  takes email/password down with it — the entire API 500s because one
+  optional provider was half-configured.
+- **Absence of a key is not evidence that an account is unencrypted.** This
+  caused real data loss: a device whose IndexedDB had been cleared still had
+  a valid session cookie, took the "no key" branch, and overwrote the
+  account's encrypted settings with plaintext defaults — after which the
+  correct password could no longer open it, because the blob it was asked to
+  decrypt was no longer ciphertext. `pushRemote` now refuses
+  (`WouldDowngradeError`) and `adopt` bails to `locked` first. The server's
+  `encryption` field is the authority, never the local key.
+- **Never sync an encrypted account without its key.** `runSync` throws
+  `LockedError`. The earlier version pulled ciphertext, failed to read every
+  record, and *still advanced the cursor past all of it* — leaving a
+  signed-in user with an empty history sitting above a revision the device
+  would never ask for again. `unlock` also calls `clearCursor()`, because
+  regaining a key means you do not know what you missed.
+- **The session cookie is httpOnly and outlives local storage.** Clearing
+  site data leaves someone authenticated and keyless. That is the `locked`
+  state, and it needs its own UI — an empty transcript reads as lost data.
+- **A cookie-cached session outlives the account it belongs to.** Sessions
+  are read from a signed cookie for five minutes to save CPU, so a deleted
+  user's cookie stays cryptographically valid. `loadState` returns null when
+  the user row is gone and the router turns that into a 401 — without it the
+  request hit a foreign-key violation and 500'd, which is a deleted account
+  failing *open*.
+- **`payload` is opaque. Never parse, index, or log it.** Wanting to know
+  something about a record's contents means the client should send that fact
+  explicitly, as a decision to leak it; it is never a reason to look inside.
+- `worker/schema.sql` documents exactly what a full database dump reveals:
+  account count, record count, record sizes. There is deliberately no `kind`
+  column, no parent id, no sequence number, no title.
+
+### The account (client)
+
+- `lib/auth-client.ts` — PBKDF2(600k) → HKDF split. Better Auth ships a
+  client SDK but it lives in `worker/node_modules` and the frontend takes no
+  new dependencies, so the endpoints are called with plain `fetch`. **Keep
+  `APP_SALT` and the iteration count identical to the Worker's expectations**
+  — a change here locks every existing account out.
+- `lib/session.ts` — `useAccount()`. Session, settings, sync and the locked
+  state, in that order of dependency.
+- `lib/settings.ts` — one opaque blob (theme, typeface, text size, column
+  width, density, OpenRouter key), encrypted whenever the account has a key.
+  The key is billable, so this blob is never stored in the clear.
+- `components/settings/` — `AuthPanel` (sign in / create / Google),
+  `SettingsPanel` (account · keys · appearance), `UnlockBar`.
+- `components/sidebar/AccountButton.tsx` — the rail footer. `shrink-0`
+  sibling of the scrolling list, same reason as the header.
+
+**Appearance never goes through React state.** Theme, typeface, text scale,
+column width and density are CSS custom properties on `:root`, set by the
+boot script pre-paint and by `applyAppearance` afterwards — the same pattern
+as `--dial-rail-w`, and for the same two reasons: a preference change must
+not re-render the transcript, and a stored value must be readable before
+first paint without a hydration mismatch. `.dial-column` and `.dial-rows`
+are the only places those values are consumed.
+
+### The vault (client)
+
+- `lib/crypto.ts` — one token, three derivations. `HKDF("auth")` → the
+  bearer the server hashes; `HKDF("vault")` → the AES-GCM key that never
+  leaves. **HKDF, not Argon2/PBKDF2**: the token is 240 bits of
+  `getRandomValues`, so there is nothing to guess and stretching would burn
+  a second of the user's CPU for zero security. That same fact is what keeps
+  the Worker inside its CPU budget.
+- `lib/sync.ts` — pull, then push. That order is what makes a local edit
+  win on the device being typed on. Last-writer-wins per record is correct
+  here, not lazy: messages are append-only and there is no concurrent editor.
+- `lib/vault.ts` — session lifecycle. The session lives in Dexie holding a
+  **non-extractable `CryptoKey`**; the token itself is never persisted. So
+  injected script can use the vault but cannot carry it away.
+- `components/settings/VaultPanel.tsx` — the token is shown once and the
+  confirm button stays disabled until the checkbox is ticked. That friction
+  is deliberate and is the only place in this app that should have any.
+
+### No app backend
+
+There is no `app/api`. The five route handlers that used to live there —
+`chat`, `models`, `title`, `key`, `image` — became client modules, because
+OpenRouter serves `Access-Control-Allow-Origin: *` and allow-lists the
+`Authorization`, `HTTP-Referer` and `X-Title` headers on every endpoint this
+app touches. `next.config.ts` is therefore `output: "export"`: the whole
+build is static files, which Cloudflare serves free and unmetered without
+invoking a Worker.
+
+- `lib/credentials.ts` — the user's OpenRouter key, behind a
+  `CredentialStore` interface. Device-local today (`localStorage`, never
+  Dexie — Dexie is what step 2 syncs). The interface exists because the
+  backing store is going to move into the encrypted vault; the doc comment
+  names the three planned identity modes so the seam stays shaped for all
+  of them.
+- `lib/pkce.ts` — OpenRouter OAuth PKCE. The user authorizes on
+  openrouter.ai and returns with a key scoped to this app, revocable on its
+  own. PKCE is what makes this safe with no server: there is no client
+  secret to hide, because possession of the one-time verifier is the proof.
+- `lib/openrouter-client.ts` — the browser provider factory, cached per key.
+- `lib/transport.ts` — a `ChatTransport` running `streamText` in the tab.
+  This is `app/api/chat/route.ts`, same work in the same order, minus the
+  parts that only protected a server: request re-validation, payload caps,
+  and hiding the system prompt from its own author. The flight recorder
+  ports over exactly, `usage: { include: true }` included, so every mono
+  readout is still a measured number.
+- `lib/catalog.ts` — the same normalization as before, now client-side.
+  `/models` needs no key, which is what lets the model list populate behind
+  the connect screen. Cached an hour in `localStorage` (~220KB, written on
+  refetch rather than per load).
+- `lib/title.ts` / `lib/image.ts` / `lib/account.ts` — the other three
+  routes. All best-effort, all direct.
 
 ### Client
 
@@ -108,6 +244,11 @@ the controls can't offer something the model won't honour.
 - `lib/sources.ts` — dedupe/label helpers for web-search sources. Tracking
   parameters, fragments, and trailing slashes are canonicalized so variants
   of the same page cannot become duplicate numbered citations.
+- `components/settings/KeyGate.tsx` — the front door. OAuth first, paste
+  second; the paste path exists because being locked out of your own history
+  by an OAuth hiccup is not acceptable. A pasted key is verified against
+  `/key` before it is stored, so a typo fails there with a reason instead of
+  three screens later as a mystery stream error.
 - `lib/preferences.ts` — things that outlive a conversation: **session
   defaults** (model + reasoning + search, so a new chat inherits the knobs you
   were last using — only the model used to carry over) and **rail geometry**
@@ -170,6 +311,41 @@ the controls can't offer something the model won't honour.
   landed, the chat's key changed mid-write, ChatView remounted, and the shell
   re-read an empty thread out of Dexie — the first exchange vanished a beat
   after it arrived. Save first, announce second, and never let the key change.
+- **Never put `container-type` on an ancestor of a scroll container.** This
+  was the cause of the Safari-only scroll bug, and it took two wrong
+  diagnoses to find. `container-type: inline-size` silently applies
+  `contain: layout style inline-size`; with that on `.chat-scroll-region`,
+  the direct parent of the scroller, WebKit restored the scroll position on
+  every re-layout — so scrolling up jumped to the top and the jump-to-bottom
+  control snapped straight back. Chrome implements containment correctly and
+  never showed it; iPhone Safari never matched the query, so the minimap
+  never rendered and nothing churned. Measure with a ResizeObserver and write
+  an attribute instead (`data-roomy`). The one-line confirmation was
+  `document.querySelector('.chat-scroll-region').style.containerType='normal'`.
+- **`el.scrollTop = el.scrollHeight` is not "scroll to the bottom".** It only
+  behaves like it because browsers clamp the value to
+  `scrollHeight - clientHeight`; when that maximum is momentarily zero the
+  write lands at zero — the top. Fixed alongside the above, but note it was
+  *not* the cause of the Safari symptom: it is a latent bug that was
+  corrected on the way past. Diagnosing a rendering bug by mechanism-that-
+  could-explain-it rather than by bisecting the actual page is how two
+  deploys went out without fixing anything.
+- **Safari reports a fractional `scrollTop`; `clientHeight` is an integer.**
+  A trackpad delivers sub-pixel deltas, so "moved less than 1px" is true for
+  a real, deliberate slow scroll — it is not a safe test for "this scroll
+  event came from a layout change". Credit a scroll to the reader only if a
+  `wheel`/`touchmove`/`keydown` landed within `GESTURE_WINDOW_MS`.
+- **Scrolling up is an instruction, not a measurement.** Deciding purely on
+  distance meant a small scroll up stayed inside the threshold and the next
+  token dragged the reader back down. Release the follow on any reader-driven
+  upward scroll, and re-engage only within a tighter threshold — the
+  hysteresis is what stops Safari's rubber-band bounce, which settles
+  *downward*, from re-engaging the follow the reader just cancelled.
+- **rAF is frozen in a hidden/background pane, and so is Motion.** The
+  ResizeObserver follow path goes through `requestAnimationFrame`, so it
+  cannot be exercised from an automated browser whose pane is hidden. A
+  `requestAnimationFrame` probe that never resolves is the tell; do not read
+  that as a regression in the scroll code.
 - **A rounded container must not also be the scroll container.** The rail's
   `<aside>` owns the 18px radius and border; making it `overflow-y-auto` ran
   the scrollbar track the full height and into the top corners, reading as a
@@ -192,6 +368,10 @@ the controls can't offer something the model won't honour.
 - **An effect that reads `messages` is torn down on every token.** The
   mid-stream snapshot timer must depend only on `busy` and read the latest
   messages from a ref, or its cleanup cancels the pending save forever.
+- **Padding belongs on the wrapper, not on the element holding the text.** A
+  selection highlights whole line boxes, so a padded `<p>` highlights 16px of
+  empty space before the first character and after the last — a message
+  selected by double-click looked like a band of grey around the words.
 - **No focus ring on text fields.** The caret is the affordance; a box around
   the borderless composer textarea reads as a stray outline.
 - **The rail shares the transcript's ground.** Glass is for things that
@@ -201,6 +381,26 @@ the controls can't offer something the model won't honour.
   switcher lists models the route then 400s on. OpenRouter publishes floating
   aliases prefixed with `~` (`~anthropic/claude-sonnet-latest`) — twelve of
   them. If the pattern changes, re-run it over the live catalog.
+- **OpenRouter's 401 does not say 401.** A dead or revoked key comes back as
+  `"User not found."` in the response body. Matching only on `/401|unauthor/`
+  fell through to the generic hint and told people to switch models, which
+  sends them to debug the wrong thing. `describeStreamError` in the transport
+  prefers the upstream body over the SDK's generic message for the same
+  reason — "insufficient credits" is actionable, "Failed after 3 attempts"
+  is not.
+- **Never put the user's key in a field yourself, and never in Dexie.**
+  It is device-local in `localStorage` precisely because Dexie is what gets
+  synced in step 2; a key in a synced table is a key in someone's cloud.
+- **`DirectChatTransport` looks like the answer and isn't.** AI SDK v7 ships
+  one, but its generic is `UIMessage<unknown, never, …>` — the `never` is the
+  data-parts slot, and this app has two (`data-image`, `data-requestStatus`).
+  It also wants a fixed `Agent`, while model/effort/search change per turn.
+  The hand-rolled transport is ~60 lines over `toUIMessageStream`.
+- **The transport takes the settings *ref*, not a closure over it.** It is
+  built once per conversation with `useMemo(…, [])`, so a captured value
+  would send the previous model on the turn right after a switch — and
+  `() => ref.current` created during render trips `react-hooks/refs`. Passing
+  the ref object itself solves both.
 - **Errors from this app must not be labelled "upstream".** The route returns
   `{"error":"…"}`; the provider sends a bare string. ErrorPanel distinguishes
   them, because printing a local 400 as raw JSON under "UPSTREAM ERROR" sends
@@ -225,8 +425,32 @@ the controls can't offer something the model won't honour.
   **6 instrument rework ✓** (telemetry bus, capability-aware controls,
   system prompt, edit/regenerate/branch, unified palette, export,
   semantic syntax highlighting, generated titles, streaming persistence) ·
-  7 next: vision/attachments for `capabilities.vision` models, sub-agent
-  delegation, per-thread temperature (the wire already carries it).
+  **7 client transport ✓** (inference moved into the browser, BYO key via
+  OAuth PKCE, all five API routes deleted, static export, CSP in
+  `public/_headers`) ·
+  **9 accounts ✓** (Better Auth on D1, email+password with client-side
+  stretching, Google provider wired, 18+ gate enforced in a database hook,
+  settings blob + encryption mode per user, account deletion) ·
+  **8 vault ✓** (token identity, HKDF+AES-GCM client-side encryption, D1
+  record store, pull/push sync over Dexie, account deletion, deployed to
+  chat.belayet.co) ·
+  **10 client accounts ✓** (sign-up/sign-in/Google UI, 18+ gate, session
+  restore, locked/unlock flow, session-authenticated sync, settings panel in
+  the rail footer with theme/typeface/size/width/density and the OpenRouter
+  key) ·
+  11 next: **image blobs to R2** — `stripBlobs` in `lib/sync.ts` still drops
+  image bytes before upload (records cap at 128KB), so pixels stay on the
+  device that made them and only image *metadata* syncs. Also pending: the
+  Google redirect URI must be registered in the Cloud console and
+  `GOOGLE_CLIENT_SECRET` set, an edge rate limit on the auth endpoints, and a
+  privacy policy — this app now stores names, dates of birth and emails — `stripBlobs` in `lib/sync.ts` currently
+  drops image bytes before upload (records cap at 128KB), so pixels stay on
+  the device that made them and only the image *metadata* syncs. Serve them
+  from an R2 custom domain, not through the Worker: the blobs are ciphertext
+  under random ids, so public-by-URL is safe and costs no invocations. Also
+  pending: an edge rate limit on `POST /v1/account`, the one unauthenticated
+  write · then vision/attachments, sub-agent delegation, per-thread
+  temperature (the wire already carries it).
 ## Design system (the law)
 
 **Strictly black, white, neutral gray interface chrome — both themes, no
@@ -262,10 +486,23 @@ aesthetic.
   always respect `prefers-reduced-motion`.
 - **Theme toggle** swaps instantly — no cross-fade.
 
-## Hard constraints / non-goals (v1)
+## Hard constraints / non-goals
 
-- No auth/accounts, no server DB, no cross-device sync. Storage =
-  IndexedDB via Dexie (Phase 4), entirely client-side.
+- **Repealed (was a v1 non-goal):** no auth, no server storage, no sync.
+  All three now exist. Dexie remains the source of truth and cloud sync is a
+  replica of it — never the other way round.
+- **Cloud sync is optional and must stay optional.** The app is fully usable
+  with no account; the vault adds durability and a second device. Anything
+  that turns it into a login wall is a regression.
+- **Never widen `run_worker_first` beyond `/v1/*`.** Static asset requests
+  are free and do not invoke the Worker. Widening that glob puts every page
+  load onto the billable path.
+- **The operator never holds a model key.** Users bring their own. Any
+  change that reintroduces a server-held `OPENROUTER_API_KEY` is a
+  regression — it puts the operator back in the billing path and makes the
+  privacy claim on the connect screen false.
+- **E2EE means our server cannot read it, not that nobody can.** OpenRouter
+  and the upstream provider see every prompt in the clear. Say it that way.
 - No billing/usage limits. No open-ended agentic tools beyond web search
   and (exploratory) model delegation — no file access, code execution, or
   general browsing. No voice.

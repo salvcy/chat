@@ -198,9 +198,16 @@ export default function MessageBubble({
               </div>
             )}
             {text && (
-              <p className="whitespace-pre-wrap px-4 py-3 text-[15px] leading-relaxed text-foreground">
-                {text}
-              </p>
+              /* Padding belongs on the wrapper, never on the element holding
+                 the text. A selection highlights whole line boxes, and a
+                 padded paragraph's line boxes begin 16px before the first
+                 character and end 16px past the last — so selecting a message
+                 painted a band of empty space all around it. */
+              <div className="px-4 py-3">
+                <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-foreground">
+                  {text}
+                </p>
+              </div>
             )}
           </div>
           <div className="mt-1 flex items-center justify-end gap-1">

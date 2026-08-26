@@ -1,4 +1,4 @@
-import "server-only";
+"use client";
 
 import {
   EFFORT_ORDER,
@@ -8,10 +8,16 @@ import {
 } from "./types";
 
 /**
- * Server-side model catalog. OpenRouter's `/models` is the single source of
- * truth for what each model can do — this module normalizes it once and
- * everything else (the /api/models route, request validation) reads from
- * here rather than re-deriving capability rules.
+ * The model catalog, fetched by the browser.
+ *
+ * OpenRouter's `/models` is the single source of truth for what each model
+ * can do, and it is a *public* endpoint — no key, and `Access-Control-Allow-
+ * Origin: *`. So the catalog loads before a key is connected, which is what
+ * lets the model list render behind the connect screen instead of after it.
+ *
+ * This module used to be server-only and sat behind `/api/models`, using
+ * Next's fetch cache for its hourly revalidate. The normalization is
+ * unchanged; only the cache moved (see `readCache`).
  */
 
 /** The raw shape we care about. OpenRouter sends considerably more. */
@@ -45,9 +51,10 @@ type RawModel = {
 };
 
 const CATALOG_URL = "https://openrouter.ai/api/v1/models";
+const CACHE_KEY = "dial:catalog";
 
-/** Cache the upstream catalog for an hour — it changes on the order of days. */
-const REVALIDATE_SECONDS = 3600;
+/** Cache the catalog for an hour — it changes on the order of days. */
+const MAX_AGE_MS = 60 * 60 * 1000;
 
 function isEffort(v: string): v is ReasoningEffort {
   return v in EFFORT_ORDER;
@@ -128,6 +135,46 @@ function normalize(m: RawModel): OpenRouterModel {
   };
 }
 
+/* -------------------------------- cache -------------------------------- */
+
+type CacheEntry = { fetchedAt: number; models: OpenRouterModel[] };
+
+/** Session-lifetime copy, so a remount never re-reads or re-parses. */
+let memory: CacheEntry | null = null;
+
+function readCache(): CacheEntry | null {
+  if (memory) return memory;
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<CacheEntry>;
+    if (
+      typeof parsed.fetchedAt !== "number" ||
+      !Array.isArray(parsed.models) ||
+      parsed.models.length === 0
+    ) {
+      return null;
+    }
+    memory = { fetchedAt: parsed.fetchedAt, models: parsed.models };
+    return memory;
+  } catch {
+    return null;
+  }
+}
+
+function writeCache(entry: CacheEntry): void {
+  memory = entry;
+  try {
+    // ~220KB. Written once an hour rather than per load, because
+    // localStorage writes are synchronous and this one is not small.
+    localStorage.setItem(CACHE_KEY, JSON.stringify(entry));
+  } catch {
+    // Quota or private mode — the session cache above still holds.
+  }
+}
+
+/* -------------------------------- fetch -------------------------------- */
+
 export class CatalogError extends Error {
   constructor(
     message: string,
@@ -138,34 +185,42 @@ export class CatalogError extends Error {
   }
 }
 
-/**
- * Fetch + normalize the catalog. Relies on Next's fetch cache for the hourly
- * revalidate, so concurrent callers within a request share one upstream hit.
- */
-export async function fetchCatalog(): Promise<OpenRouterModel[]> {
-  const key = process.env.OPENROUTER_API_KEY;
-  if (!key) {
-    throw new CatalogError(
-      "OPENROUTER_API_KEY is not set — add it to .env.local",
-      500,
-    );
-  }
-
-  const res = await fetch(CATALOG_URL, {
-    headers: { Authorization: `Bearer ${key}` },
-    next: { revalidate: REVALIDATE_SECONDS },
-  });
-
+async function fetchFresh(signal?: AbortSignal): Promise<OpenRouterModel[]> {
+  const res = await fetch(CATALOG_URL, { signal });
   if (!res.ok) {
     throw new CatalogError(
       `OpenRouter catalog returned ${res.status}`,
-      res.status === 401 ? 401 : 502,
+      res.status,
     );
   }
-
   const { data } = (await res.json()) as { data: RawModel[] };
   return data
     .filter((m) => typeof m.id === "string")
     .map(normalize)
     .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/**
+ * The catalog, cached for an hour.
+ *
+ * A stale cache is preferred over a failed load: if the network is down but
+ * we have yesterday's copy, the switcher still works and the capability
+ * controls are still correct for all but the newest models.
+ */
+export async function fetchCatalog(
+  signal?: AbortSignal,
+): Promise<OpenRouterModel[]> {
+  const cached = readCache();
+  if (cached && Date.now() - cached.fetchedAt < MAX_AGE_MS) {
+    return cached.models;
+  }
+
+  try {
+    const models = await fetchFresh(signal);
+    writeCache({ fetchedAt: Date.now(), models });
+    return models;
+  } catch (error) {
+    if (cached) return cached.models;
+    throw error;
+  }
 }

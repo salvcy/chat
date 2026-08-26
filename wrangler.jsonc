@@ -1,0 +1,51 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "chat",
+  "main": "worker/src/index.ts",
+  "compatibility_date": "2026-08-01",
+
+  // Better Auth reaches for node:crypto and AsyncLocalStorage. Without this
+  // the Worker fails validation at deploy time rather than at runtime, which
+  // is at least an honest failure.
+  "compatibility_flags": ["nodejs_compat"],
+
+  // The app's real home. `custom_domain` makes Cloudflare create and manage
+  // the DNS record on the belayet.co zone, and it is what puts the API on
+  // the same origin as the page — which is the whole reason there is no CORS
+  // preflight and no cross-site cookie configuration in this project.
+  "routes": [{ "pattern": "chat.belayet.co", "custom_domain": true }],
+
+  // One Worker, one origin: the static export is served as assets and the
+  // API runs on the same hostname. Splitting them across subdomains would
+  // buy nothing and cost cross-site cookie configuration plus a CORS
+  // preflight on every request for the rest of the project's life.
+  //
+  // Asset requests are free and unmetered and do NOT invoke the Worker, so
+  // the entire frontend costs nothing to serve at any volume. `run_worker_first`
+  // is scoped to /v1/* precisely so that stays true — widening it would put
+  // every page load back on the billable path.
+  "assets": {
+    "directory": "./out",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/v1/*"]
+  },
+
+  // The OAuth *client id* is public by design — it appears in the redirect
+  // URL every user sees. Only the client secret is a secret, and that lives
+  // in `wrangler secret`, never here.
+  "vars": {
+    "GOOGLE_CLIENT_ID": "447230264584-b5upq6jgdquigsc2dsallqbk5nthhrkl.apps.googleusercontent.com"
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "chat-vault",
+      "database_id": "c599d87a-9f30-46c5-b3ad-80e021da3d31"
+    }
+  ],
+
+  "observability": {
+    "enabled": true
+  }
+}

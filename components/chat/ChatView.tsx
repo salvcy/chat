@@ -1,11 +1,7 @@
 "use client";
 
 import { useChat } from "@ai-sdk/react";
-import {
-  DefaultChatTransport,
-  convertFileListToFileUIParts,
-  type FileUIPart,
-} from "ai";
+import { convertFileListToFileUIParts, type FileUIPart } from "ai";
 import { AnimatePresence, motion } from "motion/react";
 import {
   useCallback,
@@ -22,7 +18,10 @@ import MessageNavigator from "./MessageNavigator";
 import SystemPrompt from "./SystemPrompt";
 import type { DialMessage } from "@/lib/conversations";
 import { capabilitiesFor } from "@/lib/capabilities";
+import { currentKey } from "@/lib/credentials";
+import { generateImage } from "@/lib/image";
 import { hasRenderableResponse } from "@/lib/messages";
+import { OpenRouterChatTransport } from "@/lib/transport";
 import {
   DEFAULT_IMAGE_MODEL,
   type ChatSettings,
@@ -35,21 +34,24 @@ import {
 const STREAM_SAVE_MS = 1200;
 /** Distance from the bottom that still counts as "following the stream". */
 const STICK_THRESHOLD_PX = 80;
+/**
+ * Once the reader has cancelled the follow, they must come back this close
+ * before it re-engages. The hysteresis exists for Safari's rubber-band: an
+ * overscroll bounce settles *downward*, which without it looks exactly like
+ * a deliberate return to the bottom and re-starts the following the reader
+ * just cancelled.
+ */
+const RESTICK_THRESHOLD_PX = 24;
+/**
+ * How long after a wheel/touch/key gesture a scroll event is still credited
+ * to the reader rather than to layout.
+ */
+const GESTURE_WINDOW_MS = 400;
+/** Chat-pane width at which the transcript minimap earns its space. */
+const NAVIGATOR_MIN_PX = 880;
 const MAX_ATTACHMENTS = 4;
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES = 16 * 1024 * 1024;
-
-type ImageRouteResponse = {
-  model: string;
-  images: Array<{ url: string; mediaType: string }>;
-  durationMs: number;
-  usage?: {
-    promptTokens?: number;
-    completionTokens?: number;
-    totalTokens?: number;
-    costUsd?: number;
-  };
-};
 
 /** Approximate decoded bytes in the data URLs held by FileUIParts. */
 function attachmentBytes(part: FileUIPart): number {
@@ -62,33 +64,6 @@ function isImageReference(part: DialMessage["parts"][number]): boolean {
   if (part.type !== "file") return false;
   const dial = part.providerMetadata?.dial;
   return !!dial && typeof dial === "object" && dial.imageReference === true;
-}
-
-/**
- * Keep generated pixels local. The text model gets a compact provenance note,
- * never a multi-megabyte base64 payload or image-only reference attachment.
- */
-function messagesForTextModel(messages: DialMessage[]): DialMessage[] {
-  return messages.flatMap((message) => {
-    const parts = message.parts.flatMap((part) => {
-      if (isImageReference(part)) return [];
-      if (part.type === "data-requestStatus") return [];
-      if (part.type !== "data-image") return [part];
-      const outcome =
-        part.data.status === "complete" ? "Generated image" : "Image request";
-      return [
-        {
-          type: "text" as const,
-          text: `[${outcome}: ${part.data.prompt}]`,
-        },
-      ];
-    });
-    // A placeholder-only assistant turn has no model-visible content. Drop
-    // that turn from the next request instead of sending an invalid empty
-    // assistant message; partial responses keep their real text/reasoning.
-    if (message.role === "assistant" && parts.length === 0) return [];
-    return [{ ...message, parts }];
-  });
 }
 
 /** Attach a quiet, persisted terminal state to an interrupted/empty turn. */
@@ -186,17 +161,13 @@ export default function ChatView({
     settingsRef.current = settings;
   });
 
+  /**
+   * Inference runs here, in the browser, against the user's own key. The
+   * transport reads settings through the ref rather than capturing them, so
+   * a mid-thread model switch takes effect on the very next turn.
+   */
   const transport = useMemo(
-    () =>
-      new DefaultChatTransport<DialMessage>({
-        api: "/api/chat",
-        prepareSendMessagesRequest: ({ messages, body }) => ({
-          body: {
-            ...body,
-            messages: messagesForTextModel(messages),
-          },
-        }),
-      }),
+    () => new OpenRouterChatTransport(settingsRef),
     [],
   );
 
@@ -243,17 +214,6 @@ export default function ChatView({
     : undefined;
   const activeImageModel = selectedImageModel ?? DEFAULT_IMAGE_MODEL;
 
-  /** The body sent with every turn — the whole per-conversation state. */
-  const requestBody = useCallback(() => {
-    const s = settingsRef.current;
-    return {
-      model: s.model,
-      reasoning: s.reasoning,
-      search: s.search,
-      ...(s.system.trim() ? { system: s.system } : {}),
-    };
-  }, []);
-
   /* ----------------------- mid-stream persistence ---------------------- */
 
   // Latest messages, read by the snapshot timer. Keeping them in a ref is
@@ -285,21 +245,42 @@ export default function ChatView({
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
+  const regionRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
   const scrollGeometryRef = useRef<{
     top: number;
     clientHeight: number;
   } | null>(null);
+  /** When the reader last actually touched the scroll, as opposed to layout. */
+  const gestureAtRef = useRef(0);
 
   /**
    * Pin after the DOM has its final measured height. The last streaming
    * render adds metrics/actions and can settle over more than one layout
    * pass, so a single effect-time `scrollTop` write is not sufficient.
+   *
+   * The explicit maximum is not a tidiness pass — it is the fix for a
+   * Safari-only jump to the *top* of the transcript.
+   *
+   * `scrollTop = scrollHeight` reads as "go to the bottom" only because
+   * browsers clamp the value to `scrollHeight - clientHeight`. When the
+   * element is momentarily not scrollable that maximum is zero, so the write
+   * lands at zero — the top — and nothing puts it back, because the next
+   * `followLatest` only arrives on the following render.
+   *
+   * Safari resolves `flex-1 min-h-0` heights a layout pass later than Chrome,
+   * so it hits that window on exactly the two occasions this misbehaved: the
+   * relayout when a finished turn swaps in its metrics and actions, and the
+   * ResizeObserver firing as the jump-to-bottom control mounts. Declining to
+   * write when there is nothing to scroll is self-correcting — the observer
+   * calls back once the layout settles.
    */
   const followLatest = useCallback(() => {
     const el = scrollRef.current;
     if (!el || !stickRef.current) return;
-    el.scrollTop = el.scrollHeight;
+    const max = el.scrollHeight - el.clientHeight;
+    if (max <= 0) return;
+    el.scrollTop = max;
     scrollGeometryRef.current = {
       top: el.scrollTop,
       clientHeight: el.clientHeight,
@@ -316,11 +297,20 @@ export default function ChatView({
     };
     scrollGeometryRef.current = current;
 
+    const fromReader = Date.now() - gestureAtRef.current < GESTURE_WINDOW_MS;
+
     // Growing the composer emits a scroll event even though the reader did
     // not scroll: scrollTop stays put while the viewport gets shorter. Do not
     // interpret that browser-generated event as an instruction to stop
     // following the answer. The ResizeObserver below will restore the bottom.
+    //
+    // `fromReader` guards it because the sub-pixel test is not safe on its
+    // own. Safari reports a fractional `scrollTop` and a trackpad delivers
+    // deltas well under a pixel, so a slow deliberate scroll satisfies
+    // "moved less than 1px" and was being snapped back as if it were a
+    // composer resize.
     if (
+      !fromReader &&
       previous &&
       Math.abs(previous.top - current.top) < 1 &&
       previous.clientHeight !== current.clientHeight
@@ -332,11 +322,71 @@ export default function ChatView({
       return;
     }
 
-    const near =
-      el.scrollHeight - el.scrollTop - el.clientHeight < STICK_THRESHOLD_PX;
-    stickRef.current = near;
-    setAtBottom(near);
+    const distance = el.scrollHeight - current.top - current.clientHeight;
+
+    // Scrolling up is an instruction, not a measurement. Deciding purely on
+    // distance meant a small scroll up stayed inside the threshold, so the
+    // next token dragged the reader back down — the thing they had just
+    // tried to stop.
+    const scrolledUp =
+      fromReader && previous !== null && current.top < previous.top - 0.5;
+
+    stickRef.current = scrolledUp
+      ? false
+      : distance <
+        (stickRef.current ? STICK_THRESHOLD_PX : RESTICK_THRESHOLD_PX);
+
+    // The control is about distance, not intent: it should not appear because
+    // someone nudged the wheel two pixels.
+    setAtBottom(distance < STICK_THRESHOLD_PX);
   };
+
+  /**
+   * Gate the minimap on the chat pane's own width.
+   *
+   * This replaces a CSS container query. `container-type` implies layout
+   * containment, and having that on the scroll container's parent made
+   * WebKit restore the scroll position on every re-layout — the Safari bug
+   * where scrolling up jumped to the top and the jump-to-bottom control
+   * snapped straight back. Measuring here costs one observer and writes an
+   * attribute, so dragging the sidebar still re-renders nothing.
+   */
+  useEffect(() => {
+    const region = regionRef.current;
+    if (!region || typeof ResizeObserver === "undefined") return;
+    const apply = () => {
+      region.dataset.roomy = String(region.clientWidth >= NAVIGATOR_MIN_PX);
+    };
+    apply();
+    const observer = new ResizeObserver(apply);
+    observer.observe(region);
+    return () => observer.disconnect();
+  }, []);
+
+  /**
+   * Distinguish a reader's scroll from a layout-driven one.
+   *
+   * A `scroll` event carries no hint about its origin, and the two need
+   * opposite responses: one cancels the follow, the other should restore it.
+   * Passive listeners, so none of this can delay Safari's scrolling.
+   */
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const note = () => {
+      gestureAtRef.current = Date.now();
+    };
+    el.addEventListener("wheel", note, { passive: true });
+    el.addEventListener("touchmove", note, { passive: true });
+    el.addEventListener("touchstart", note, { passive: true });
+    el.addEventListener("keydown", note);
+    return () => {
+      el.removeEventListener("wheel", note);
+      el.removeEventListener("touchmove", note);
+      el.removeEventListener("touchstart", note);
+      el.removeEventListener("keydown", note);
+    };
+  }, []);
 
   useLayoutEffect(() => {
     // An empty workspace has nothing to follow. Scrolling it to its own
@@ -381,7 +431,12 @@ export default function ChatView({
     if (!el) return;
     stickRef.current = true;
     setAtBottom(true);
-    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    // Same clamp as followLatest: an unclamped scrollHeight is a request to
+    // scroll past the end, which resolves to the top when there is no end.
+    el.scrollTo({
+      top: Math.max(0, el.scrollHeight - el.clientHeight),
+      behavior: "smooth",
+    });
   };
 
   /* ------------------------------ actions ------------------------------ */
@@ -477,51 +532,37 @@ export default function ChatView({
       let finalData: GeneratedImageData;
       let finalMetadata: DialMessage["metadata"];
       try {
-        const response = await fetch("/api/image", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            ...(selectedImageModel ? { model: selectedImageModel } : {}),
-            prompt: cleanPrompt,
-            ...(references.length > 0
-              ? {
-                  references: references.map((reference) => ({
-                    url: reference.url,
-                    mediaType: reference.mediaType,
-                  })),
-                }
-              : {}),
-          }),
+        const key = currentKey();
+        if (!key) throw new Error("Connect an OpenRouter key to generate images.");
+
+        const result = await generateImage({
+          key,
+          model: selectedImageModel,
+          prompt: cleanPrompt,
+          references: references.map((reference) => ({
+            url: reference.url,
+            mediaType: reference.mediaType,
+          })),
           signal: controller.signal,
         });
-        const payload = (await response.json()) as
-          | ImageRouteResponse
-          | { error?: string };
-        if (!response.ok || !("images" in payload)) {
-          throw new Error(
-            "error" in payload && payload.error
-              ? payload.error
-              : "Image generation failed.",
-          );
-        }
 
         finalData = {
           status: "complete",
           prompt: cleanPrompt,
-          model: payload.model,
-          images: payload.images,
+          model: result.model,
+          images: result.images,
           startedAt,
-          durationMs: payload.durationMs,
-          costUsd: payload.usage?.costUsd ?? null,
+          durationMs: result.durationMs,
+          costUsd: result.usage.costUsd ?? null,
           error: null,
         };
         finalMetadata = {
-          model: payload.model,
+          model: result.model,
           startedAt,
-          durationMs: payload.durationMs,
-          costUsd: payload.usage?.costUsd,
-          promptTokens: payload.usage?.promptTokens,
-          completionTokens: payload.usage?.completionTokens,
+          durationMs: result.durationMs,
+          costUsd: result.usage.costUsd,
+          promptTokens: result.usage.promptTokens,
+          completionTokens: result.usage.completionTokens,
           finishReason: "image",
         };
       } catch (requestError) {
@@ -610,12 +651,9 @@ export default function ChatView({
     setAttachmentError(null);
     stickRef.current = true;
     if (text) {
-      sendMessage(
-        { text, ...(attachments.length ? { files: attachments } : {}) },
-        { body: requestBody() },
-      );
+      sendMessage({ text, ...(attachments.length ? { files: attachments } : {}) });
     } else {
-      sendMessage({ files: attachments }, { body: requestBody() });
+      sendMessage({ files: attachments });
     }
     setInput("");
     setAttachments([]);
@@ -665,17 +703,14 @@ export default function ChatView({
     clearError();
     stickRef.current = true;
     setMessages(messages.slice(0, index));
-    sendMessage(
-      { text, ...(files.length ? { files } : {}) },
-      { body: requestBody() },
-    );
+    sendMessage({ text, ...(files.length ? { files } : {}) });
   };
 
   const regenerateAt = (messageId: string) => {
     if (busy) return;
     clearError();
     stickRef.current = true;
-    void regenerate({ messageId, body: requestBody() });
+    void regenerate({ messageId });
   };
 
   /** Fork the thread up to and including a message into a new conversation. */
@@ -717,15 +752,18 @@ export default function ChatView({
 
   return (
     <>
-      <div className="chat-scroll-region relative flex min-h-0 flex-1">
+      <div
+        ref={regionRef}
+        className="chat-scroll-region relative flex min-h-0 flex-1"
+      >
         <div
           ref={scrollRef}
           onScroll={onScroll}
-          className="dial-scroll relative min-w-0 flex-1 overflow-y-auto [overflow-anchor:none]"
+          className="dial-scroll relative min-w-0 flex-1 overflow-y-auto overscroll-contain [overflow-anchor:none]"
         >
           <div
             ref={transcriptRef}
-            className={`mx-auto w-full max-w-[760px] px-4 pb-5 pt-2 sm:px-7 ${
+            className={`dial-column px-4 pb-5 pt-2 sm:px-7 ${
               messages.length === 0 ? "h-full" : ""
             }`}
           >
@@ -737,7 +775,7 @@ export default function ChatView({
               />
             )}
 
-            <div className="space-y-9">
+            <div className="dial-rows">
               {messages.map((m, idx) => (
                 <div key={m.id} data-message-index={idx}>
                   <MessageBubble
@@ -819,7 +857,7 @@ export default function ChatView({
         )}
       </AnimatePresence>
 
-      <div className="mx-auto w-full max-w-[760px]">
+      <div className="dial-column">
         <Composer
           input={input}
           setInput={updateComposerInput}
@@ -867,49 +905,44 @@ export default function ChatView({
 /**
  * Failure display.
  *
- * Two very different things land here and used to look identical: a rejection
- * from *this app's* route (returned as `{"error":"…"}`) and a genuine failure
- * from the provider (a bare string in the stream). Labelling both "upstream
- * error" — and printing the raw JSON — sent people to check OpenRouter for a
- * bug that was local.
+ * Every error now originates in this tab — either from our own code before a
+ * request is built, or from OpenRouter's response to one. Those two want
+ * very different next actions, so the panel names which it is instead of
+ * labelling everything "upstream" and printing whatever it was handed.
  */
 function describeError(raw: string): {
   title: string;
   detail: string;
   hint: string;
 } {
-  let detail = raw;
-  let local = false;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (
-      parsed &&
-      typeof parsed === "object" &&
-      typeof (parsed as { error?: unknown }).error === "string"
-    ) {
-      detail = (parsed as { error: string }).error;
-      local = true;
-    }
-  } catch {
-    // Not JSON — an upstream message, already human-readable.
-  }
+  const detail = raw.trim();
+  // Raised by this app before anything is sent, so there is nothing upstream
+  // to blame and nothing to retry until the user acts.
+  const local = /connect (an|your) openrouter key/i.test(detail);
 
-  const hint = /provider\/model-slug|^model:/i.test(detail)
-    ? "this conversation points at a model id this build won't accept — pick another (⌘K)"
-    : /guardrail|data policy|privacy/i.test(detail)
-      ? "restricted by your OpenRouter data policy — pick another model (⌘K)"
-      : /rate|429|quota/i.test(detail)
-        ? "rate limited upstream — wait a moment or switch model (⌘K)"
-        : /credit|402|insufficient/i.test(detail)
-          ? "out of OpenRouter credit — top up, or pick a free model (⌘K)"
-          : /key|401|unauthor/i.test(detail)
-            ? "check OPENROUTER_API_KEY in .env.local, then restart the dev server"
-            : local
-              ? "the request was rejected before it was sent"
-              : "the request failed — retry, or switch model (⌘K)";
+  const hint = local
+    ? "no key is connected — connect one to continue"
+    : // OpenRouter answers a bad or revoked key with "User not found." — a
+      // literal 401 string almost never reaches here, and telling someone to
+      // switch models when their key is dead sends them the wrong way.
+      /\b401\b|unauthor|invalid api key|rejected this key|user not found|no auth credentials/i.test(
+          detail,
+        )
+      ? "OpenRouter rejected the key — reconnect it from the model palette (⌘K)"
+      : /credit|\b402\b|insufficient/i.test(detail)
+        ? "out of OpenRouter credit — top up, or pick a free model (⌘K)"
+        : /\b429\b|rate limit|too many requests/i.test(detail)
+          ? "rate limited upstream — wait a moment or switch model (⌘K)"
+          : /guardrail|data policy|privacy/i.test(detail)
+            ? "restricted by your OpenRouter data policy — pick another model (⌘K)"
+            : /provider\/model-slug|no endpoints|not a valid model/i.test(detail)
+              ? "this conversation points at a model OpenRouter won't serve — pick another (⌘K)"
+              : /failed to fetch|networkerror|load failed/i.test(detail)
+                ? "the browser could not reach OpenRouter — check your connection"
+                : "the request failed — retry, or switch model (⌘K)";
 
   return {
-    title: local ? "request rejected" : "upstream error",
+    title: local ? "not connected" : "request failed",
     detail,
     hint,
   };

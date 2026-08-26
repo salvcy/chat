@@ -1,4 +1,4 @@
-import type { DialMetadata, RequestStatusData } from "./types";
+import type { DialDataParts, DialMetadata, RequestStatusData } from "./types";
 import type { UIMessage } from "ai";
 
 /**
@@ -47,4 +47,44 @@ export function streamNeverFinished(message: Message): boolean {
 export function inferRequestStatus(message: Message): RequestStatusData["kind"] {
   if (message.metadata?.finishReason === "abort") return "interrupted";
   return streamNeverFinished(message) ? "interrupted" : "empty";
+}
+
+/* --------------------------- wire formatting --------------------------- */
+
+type DialMessage = UIMessage<DialMetadata, DialDataParts>;
+
+function isImageReference(part: DialMessage["parts"][number]): boolean {
+  if (part.type !== "file") return false;
+  const dial = part.providerMetadata?.dial;
+  return !!dial && typeof dial === "object" && dial.imageReference === true;
+}
+
+/**
+ * Reduce a thread to what the text model should actually receive.
+ *
+ * Generated pixels stay local: the model gets a compact provenance note
+ * instead of a multi-megabyte base64 payload, and local-only parts (the
+ * request-status placeholder, image reference attachments) are dropped
+ * entirely. This ran inside the HTTP transport's `prepareSendMessagesRequest`
+ * when there was a request body to prepare; it is a wire-format concern
+ * either way, which is why it lives here rather than in the view.
+ */
+export function messagesForTextModel(messages: DialMessage[]): DialMessage[] {
+  return messages.flatMap((message) => {
+    const parts = message.parts.flatMap((part) => {
+      if (isImageReference(part)) return [];
+      if (part.type === "data-requestStatus") return [];
+      if (part.type !== "data-image") return [part];
+      const outcome =
+        part.data.status === "complete" ? "Generated image" : "Image request";
+      return [
+        { type: "text" as const, text: `[${outcome}: ${part.data.prompt}]` },
+      ];
+    });
+    // A placeholder-only assistant turn has no model-visible content. Drop
+    // that turn from the next request instead of sending an invalid empty
+    // assistant message; partial responses keep their real text/reasoning.
+    if (message.role === "assistant" && parts.length === 0) return [];
+    return [{ ...message, parts }];
+  });
 }

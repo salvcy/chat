@@ -1,0 +1,12 @@
+{
+  "name": "chat-worker",
+  "private": true,
+  "type": "module",
+  "description": "Auth + sync API. Its own dependency tree on purpose: the repo root is pnpm-locked and pnpm is not installed on the macOS box, so installing here keeps the two trees from fighting.",
+  "dependencies": {
+    "better-auth": "^1.7.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260825.1"
+  }
+}

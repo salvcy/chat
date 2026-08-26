@@ -1,0 +1,18 @@
+# Cloudflare edge headers for the static export.
+#
+# The load-bearing directive is connect-src. The user's OpenRouter key lives
+# in this browser, so the realistic threat is script injection that exfiltrates
+# it — and exfiltration needs a network destination. Restricting outbound
+# connections to openrouter.ai means an injected script has nowhere to send it.
+#
+# script-src keeps 'unsafe-inline' because a static export cannot mint a
+# per-request nonce and Next inlines its bootstrap. Blocking foreign script
+# *origins* is still worth having; treat the inline allowance as the reason
+# connect-src has to be strict rather than as a reason to relax it.
+
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://openrouter.ai; form-action 'none'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'
+  Referrer-Policy: strict-origin-when-cross-origin
+  X-Content-Type-Options: nosniff
+  Cross-Origin-Opener-Policy: same-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()

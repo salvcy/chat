@@ -104,6 +104,13 @@ export type ModelCapabilities = {
 /** OpenRouter's documented default for its image-generation tool/API. */
 export const DEFAULT_IMAGE_MODEL = "openai/gpt-image-2";
 
+/**
+ * Names a thread in five words, so it should be the cheapest capable model
+ * rather than the one the conversation is using. Failure is non-fatal: the
+ * locally derived title stays.
+ */
+export const DEFAULT_TITLE_MODEL = "google/gemini-2.5-flash-lite";
+
 export type GeneratedImageAsset = {
   /** Embedded locally so the image survives a reload without a CDN. */
   url: string;

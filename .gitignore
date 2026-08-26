@@ -32,7 +32,6 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
-!.env.example
 
 # vercel
 .vercel
@@ -41,3 +40,16 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 package-lock.json
+# ...but the worker is its own npm-managed tree on purpose (the root is
+# pnpm-locked and pnpm is absent on the macOS box). Its lockfile is what makes
+# the Worker build reproducible, so it is tracked.
+!worker/package-lock.json
+
+# wrangler local state
+.wrangler
+
+# Google OAuth client credentials — never commit
+client_secret_*.json
+
+# worker has its own dependency tree
+worker/node_modules

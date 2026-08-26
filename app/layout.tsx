@@ -25,12 +25,14 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       suppressHydrationWarning
     >
       <head>
-        {/* Pre-paint: theme and rail geometry are applied before the first
-            frame so neither the palette nor a resized sidebar flashes. Keep
-            the storage keys in sync with ThemeToggle and lib/preferences.ts. */}
+        {/* Pre-paint: appearance and rail geometry are applied before the
+            first frame, so nothing flashes the wrong theme, typeface or
+            column width on load. This duplicates a little of lib/settings.ts
+            on purpose — it has to be inline and synchronous, and it cannot
+            import. Keep the two in sync; the storage keys are the contract. */}
         <script
           dangerouslySetInnerHTML={{
-            __html: `try{var d=document.documentElement;var t=localStorage.getItem('dial:theme')||'dark';d.classList.toggle('dark',t==='dark');var r=JSON.parse(localStorage.getItem('dial:rail')||'{}');var w=Math.min(460,Math.max(180,Math.round(r.width||272)));d.style.setProperty('--dial-rail-w',w+'px');d.classList.toggle('dial-rail-collapsed',r.collapsed===true)}catch(e){document.documentElement.classList.add('dark')}`,
+            __html: `try{var d=document.documentElement;var s=JSON.parse(localStorage.getItem('dial:settings')||'{}');var t=s.theme||localStorage.getItem('dial:theme')||'dark';var dark=t==='dark'||(t==='system'&&matchMedia('(prefers-color-scheme: dark)').matches);d.classList.toggle('dark',dark);d.dataset.themeChoice=t;var F={geist:'var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif',system:'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',serif:'ui-serif, Georgia, Cambria, "Times New Roman", serif'};var S={small:'0.9375',medium:'1',large:'1.0937'};var W={narrow:'640px',medium:'760px',wide:'920px'};var G={comfortable:'2.25rem',compact:'1.5rem'};d.style.setProperty('--dial-font',F[s.font]||F.geist);d.style.setProperty('--dial-text-scale',S[s.textSize]||S.medium);d.style.setProperty('--dial-column',W[s.width]||W.medium);d.style.setProperty('--dial-row-gap',G[s.density]||G.comfortable);var r=JSON.parse(localStorage.getItem('dial:rail')||'{}');var w=Math.min(460,Math.max(180,Math.round(r.width||272)));d.style.setProperty('--dial-rail-w',w+'px');d.classList.toggle('dial-rail-collapsed',r.collapsed===true)}catch(e){document.documentElement.classList.add('dark')}`,
           }}
         />
       </head>

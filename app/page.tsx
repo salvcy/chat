@@ -3,14 +3,21 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import ChatView from "@/components/chat/ChatView";
 import ConversationList from "@/components/sidebar/ConversationList";
+import AuthPanel from "@/components/settings/AuthPanel";
+import KeyGate from "@/components/settings/KeyGate";
+import SettingsPanel from "@/components/settings/SettingsPanel";
+import UnlockBar from "@/components/settings/UnlockBar";
 import Palette, { type Command } from "@/components/tuner/Palette";
 import RailHandle from "@/components/sidebar/RailHandle";
 import StatusStrip from "@/components/tuner/StatusStrip";
 import { reconcileSettings } from "@/lib/capabilities";
+import { fetchCatalog } from "@/lib/catalog";
+import { keyFingerprint, useCredential } from "@/lib/credentials";
 import { useConversations, type DialMessage } from "@/lib/conversations";
 import { db, settingsOf } from "@/lib/db";
 import { exportConversation } from "@/lib/export";
 import { newConversationSettings, writeDefaults } from "@/lib/preferences";
+import { useAccount } from "@/lib/session";
 import type { ChatSettings, OpenRouterModel } from "@/lib/types";
 
 /** Stable identity so the derived empty view doesn't remount the chat. */
@@ -26,6 +33,13 @@ const EMPTY_MESSAGES: DialMessage[] = [];
  */
 export default function Home() {
   const conv = useConversations();
+  const { credential, disconnect } = useCredential();
+  /**
+   * The signed-in account. `conv.localWrites` is the change signal — it
+   * counts local mutations only, so a pull writing rows cannot feed back and
+   * schedule another sync forever.
+   */
+  const account = useAccount(conv.localWrites);
   const [models, setModels] = useState<OpenRouterModel[]>([]);
   // Session defaults (model + reasoning + search) rather than hard defaults:
   // a new chat inherits the knobs you were last working with.
@@ -39,19 +53,36 @@ export default function Home() {
    */
   const [draftId, setDraftId] = useState(() => crypto.randomUUID());
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [authOpen, setAuthOpen] = useState(false);
   /** Messages for the active thread, once read out of Dexie. */
   const [loaded, setLoaded] = useState<{
     key: string;
     messages: DialMessage[];
   } | null>(null);
 
+  /**
+   * A pull writes into Dexie behind React's back, so the rail has to re-read
+   * once a sync settles — otherwise a conversation created on another device
+   * exists locally but never appears.
+   */
+  const syncState = account.status.state;
+  useEffect(() => {
+    if (syncState !== "idle") return;
+    void conv.reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reload is stable; re-run only when a sync settles
+  }, [syncState, account.status]);
+
   /* ------------------------------ catalog ------------------------------ */
 
+  // The catalog is a public endpoint, so it loads without a key — which is
+  // what lets the model list be populated behind the connect screen.
   useEffect(() => {
-    fetch("/api/models")
-      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
-      .then((d: { models: OpenRouterModel[] }) => setModels(d.models))
+    const controller = new AbortController();
+    fetchCatalog(controller.signal)
+      .then(setModels)
       .catch(() => setModels([]));
+    return () => controller.abort();
   }, []);
 
   /* ------------------------- active conversation ----------------------- */
@@ -218,8 +249,37 @@ export default function Home() {
       label: "Toggle light / dark theme",
       run: () => document.dispatchEvent(new CustomEvent("dial:toggle-theme")),
     });
+    // The token vault is intentionally not offered right now. Its endpoints
+    // were replaced by account-authenticated ones when auth landed, so the
+    // panel would fail on every action. Exposing a control that cannot work
+    // is worse than not having one; it comes back with the account UI.
+    list.push({
+      id: "settings",
+      label: "Account and settings",
+      hint: account.user ? account.user.email : "not signed in",
+      run: () => setSettingsOpen(true),
+    });
+    if (credential) {
+      list.push({
+        id: "disconnect",
+        label: "Disconnect OpenRouter key",
+        hint: keyFingerprint(credential.key),
+        run: () => {
+          disconnect();
+          account.updateSettings({ openrouterKey: null });
+        },
+      });
+    }
     return list;
-  }, [conv, newConversation, exportById, removeConversation]);
+  }, [
+    conv,
+    newConversation,
+    exportById,
+    removeConversation,
+    credential,
+    disconnect,
+    account,
+  ]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -234,6 +294,18 @@ export default function Home() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [newConversation]);
+
+  useEffect(() => {
+    if (!settingsOpen && !authOpen) return;
+    const closeOnEscape = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      if (authOpen) setAuthOpen(false);
+      else setSettingsOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [settingsOpen, authOpen]);
 
   useEffect(() => {
     if (!sidebarOpen) return;
@@ -260,6 +332,11 @@ export default function Home() {
       onDelete={(id) => void removeConversation(id)}
       onTogglePin={(id) => void conv.togglePin(id)}
       onExport={(id) => void exportById(id, "md")}
+      account={{
+        user: account.user,
+        status: account.status,
+        onOpen: () => setSettingsOpen(true),
+      }}
     />
   );
 
@@ -306,13 +383,26 @@ export default function Home() {
           title={activeMeta?.title}
           model={effective.model}
           ready={conv.ready}
+          apiKey={credential?.key ?? null}
           threadCostUsd={activeMeta?.totalCostUsd}
           threadTokens={activeMeta?.totalTokens}
           onOpenPalette={() => setPaletteOpen(true)}
           onOpenSidebar={() => setSidebarOpen(true)}
         />
 
-        {view ? (
+        {account.locked && account.user && (
+          <UnlockBar email={account.user.email} onUnlock={account.unlock} />
+        )}
+
+        {conv.ready && !credential ? (
+          <KeyGate
+            signedIn={account.user !== null}
+            encrypted={account.encrypted}
+            onConnect={(next) =>
+              account.updateSettings({ openrouterKey: next.key })
+            }
+          />
+        ) : view ? (
           <ChatView
             key={view.key}
             conversationId={view.key}
@@ -329,6 +419,33 @@ export default function Home() {
           <div className="flex flex-1 items-center justify-center">
             <span className="font-mono text-xs text-muted">…</span>
           </div>
+        )}
+
+        {settingsOpen && (
+          <SettingsPanel
+            user={account.user}
+            settings={account.settings}
+            status={account.status}
+            encrypted={account.encrypted}
+            onUpdate={account.updateSettings}
+            onSignOut={account.signOut}
+            onDestroy={account.destroy}
+            onSync={account.sync}
+            onClose={() => setSettingsOpen(false)}
+            onSignInRequested={() => {
+              setSettingsOpen(false);
+              setAuthOpen(true);
+            }}
+          />
+        )}
+
+        {authOpen && (
+          <AuthPanel
+            onSignIn={account.signIn}
+            onSignUp={account.signUp}
+            onGoogle={account.signInWithGoogle}
+            onClose={() => setAuthOpen(false)}
+          />
         )}
 
         {paletteOpen && (

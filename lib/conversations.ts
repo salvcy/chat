@@ -6,11 +6,13 @@ import type { UIMessage } from "ai";
 import {
   db,
   deriveTitle,
+  stamp,
   textOf,
   totalsOf,
   type ConversationMeta,
   type StoredMessage,
 } from "./db";
+import { generateTitle } from "./title";
 import type { ChatSettings, DialDataParts, DialMetadata } from "./types";
 
 export type DialMessage = UIMessage<DialMetadata, DialDataParts>;
@@ -26,13 +28,23 @@ export type DialMessage = UIMessage<DialMetadata, DialDataParts>;
  *     as duplicated branches.
  *
  *  2. Titles are generated, not sliced. A local fallback lands immediately
- *     so the sidebar is never blank, then /api/title replaces it once. The
- *     network call is fire-and-forget: it can never block or fail a save.
+ *     so the sidebar is never blank, then a cheap model replaces it once.
+ *     The call is fire-and-forget: it can never block or fail a save.
  */
 export function useConversations() {
   const [conversations, setConversations] = useState<ConversationMeta[]>([]);
   const [activeId, setActiveIdState] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
+  /**
+   * Bumped by local mutations only — never by `reload`.
+   *
+   * The sync engine watches this to know when there is something worth
+   * pushing. Watching the conversation array instead would feed back on
+   * itself: a pull writes rows, `reload` replaces the array, and that would
+   * read as a fresh local change and schedule another sync forever.
+   */
+  const [localWrites, setLocalWrites] = useState(0);
+  const touch = useCallback(() => setLocalWrites((n) => n + 1), []);
   /** Threads already sent for naming this session — one request each. */
   const namingRef = useRef(new Set<string>());
 
@@ -68,7 +80,7 @@ export function useConversations() {
   }, []);
 
   /** Ask a cheap model to name the thread. Best-effort, never blocking. */
-  const generateTitle = useCallback(
+  const nameThread = useCallback(
     async (id: string, messages: DialMessage[]) => {
       if (namingRef.current.has(id)) return;
       const prompt = messages.find((m) => m.role === "user");
@@ -78,26 +90,19 @@ export function useConversations() {
       if (!promptText) return;
       namingRef.current.add(id);
 
-      try {
-        const res = await fetch("/api/title", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            prompt: promptText.slice(0, 2000),
-            reply: reply ? textOf(reply).slice(0, 2000) : undefined,
-          }),
-        });
-        if (!res.ok) return;
-        const { title } = (await res.json()) as { title?: string };
-        if (!title) return;
-        // Only if the row still exists and hasn't been renamed by hand.
-        const current = await db.conversations.get(id);
-        if (!current || current.titleGenerated) return;
-        await db.conversations.update(id, { title, titleGenerated: true });
-        await reload();
-      } catch {
-        // Keep the fallback title — naming is a nicety, not a requirement.
-      }
+      const title = await generateTitle({
+        prompt: promptText,
+        reply: reply ? textOf(reply) : undefined,
+      });
+      // Null covers every failure path, including no key connected. The
+      // locally derived title stays, which is the whole fallback plan.
+      if (!title) return;
+
+      // Only if the row still exists and hasn't been renamed by hand.
+      const current = await db.conversations.get(id);
+      if (!current || current.titleGenerated) return;
+      await db.conversations.update(id, { title, titleGenerated: true });
+      await reload();
     },
     [reload],
   );
@@ -138,33 +143,54 @@ export function useConversations() {
         totalTokens,
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,
+        // Every local write is unsynced until the engine says otherwise.
+        dirty: 1,
+        stamp: stamp(),
+        rev: existing?.rev ?? 0,
       };
 
       const rows: StoredMessage[] = messages.map((m, seq) => ({
         ...m,
         conversationId: id,
         seq,
+        dirty: 1,
+        stamp: stamp(),
       }));
       const keep = new Set(rows.map((r) => r.id));
 
-      await db.transaction("rw", db.conversations, db.messages, async () => {
-        await db.conversations.put(meta);
-        const stale = await db.messages
-          .where("conversationId")
-          .equals(id)
-          .primaryKeys();
-        const drop = stale.filter((key) => !keep.has(key));
-        if (drop.length > 0) await db.messages.bulkDelete(drop);
-        await db.messages.bulkPut(rows);
-      });
+      await db.transaction(
+        "rw",
+        db.conversations,
+        db.messages,
+        db.tombstones,
+        async () => {
+          await db.conversations.put(meta);
+          const stale = await db.messages
+            .where("conversationId")
+            .equals(id)
+            .primaryKeys();
+          const drop = stale.filter((key) => !keep.has(key));
+          if (drop.length > 0) {
+            await db.messages.bulkDelete(drop);
+            // Truncating on edit/regenerate is a real deletion upstream too.
+            // Without tombstones the next pull would restore the branch that
+            // was just cut off.
+            await db.tombstones.bulkPut(
+              drop.map((key) => ({ id: String(key), deletedAt: now })),
+            );
+          }
+          await db.messages.bulkPut(rows);
+        },
+      );
 
       await reload();
+      touch();
 
       if (naming && !meta.titleGenerated && messages.length >= 2) {
-        void generateTitle(id, messages);
+        void nameThread(id, messages);
       }
     },
-    [reload, generateTitle],
+    [reload, nameThread, touch],
   );
 
   const loadMessages = useCallback(
@@ -192,36 +218,65 @@ export function useConversations() {
   const rename = useCallback(
     async (id: string, title: string) => {
       // A hand-typed name is final — stop the generator from replacing it.
-      await db.conversations.update(id, { title, titleGenerated: true });
+      await db.conversations.update(id, {
+        title,
+        titleGenerated: true,
+        dirty: 1,
+        stamp: stamp(),
+      });
       await reload();
+      touch();
     },
-    [reload],
+    [reload, touch],
   );
 
   const remove = useCallback(
     async (id: string) => {
-      await db.transaction("rw", db.conversations, db.messages, async () => {
-        await db.conversations.delete(id);
-        await db.messages.where("conversationId").equals(id).delete();
-      });
+      const now = Date.now();
+      await db.transaction(
+        "rw",
+        db.conversations,
+        db.messages,
+        db.tombstones,
+        async () => {
+          const messageIds = await db.messages
+            .where("conversationId")
+            .equals(id)
+            .primaryKeys();
+          await db.conversations.delete(id);
+          await db.messages.where("conversationId").equals(id).delete();
+          await db.tombstones.bulkPut(
+            [id, ...messageIds.map(String)].map((key) => ({
+              id: key,
+              deletedAt: now,
+            })),
+          );
+        },
+      );
       await reload();
+      touch();
       setActiveIdState((current) => {
         if (current !== id) return current;
         localStorage.removeItem("dial:active");
         return null;
       });
     },
-    [reload],
+    [reload, touch],
   );
 
   const togglePin = useCallback(
     async (id: string) => {
       const row = await db.conversations.get(id);
       if (!row) return;
-      await db.conversations.update(id, { pinned: !row.pinned });
+      await db.conversations.update(id, {
+        pinned: !row.pinned,
+        dirty: 1,
+        stamp: stamp(),
+      });
       await reload();
+      touch();
     },
-    [reload],
+    [reload, touch],
   );
 
   /** Persist a settings change on a thread that may not exist yet. */
@@ -229,10 +284,16 @@ export function useConversations() {
     async (id: string, patch: Partial<ChatSettings>) => {
       const row = await db.conversations.get(id);
       if (!row) return;
-      await db.conversations.update(id, { ...patch, updatedAt: Date.now() });
+      await db.conversations.update(id, {
+        ...patch,
+        updatedAt: Date.now(),
+        dirty: 1,
+        stamp: stamp(),
+      });
       await reload();
+      touch();
     },
-    [reload],
+    [reload, touch],
   );
 
   const getMeta = useCallback(
@@ -245,6 +306,10 @@ export function useConversations() {
     activeId,
     setActiveId,
     ready,
+    /** Increments on local mutations; the sync engine's change signal. */
+    localWrites,
+    /** Re-read from Dexie — call after a pull has written rows. */
+    reload,
     saveTurn,
     loadMessages,
     rename,

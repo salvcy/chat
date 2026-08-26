@@ -2,7 +2,10 @@
 
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useMemo, useState } from "react";
+import AccountButton from "./AccountButton";
+import type { SessionUser } from "@/lib/auth-client";
 import type { ConversationMeta } from "@/lib/db";
+import type { SyncStatus } from "@/lib/session";
 import { formatCost, groupForDate } from "@/lib/format";
 import { shortModelId } from "@/lib/capabilities";
 
@@ -27,6 +30,7 @@ export default function ConversationList({
   onDelete,
   onTogglePin,
   onExport,
+  account,
 }: {
   conversations: ConversationMeta[];
   activeId: string | null;
@@ -36,6 +40,12 @@ export default function ConversationList({
   onDelete: (id: string) => void;
   onTogglePin: (id: string) => void;
   onExport: (id: string) => void;
+  /** Footer state, passed in so the rail itself stays free of app concerns. */
+  account: {
+    user: SessionUser | null;
+    status: SyncStatus;
+    onOpen: () => void;
+  };
 }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -361,6 +371,12 @@ export default function ConversationList({
           </div>
         ))}
       </div>
+
+      <AccountButton
+        user={account.user}
+        status={account.status}
+        onOpen={account.onOpen}
+      />
     </aside>
   );
 }

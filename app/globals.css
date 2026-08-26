@@ -69,10 +69,42 @@
   --font-mono: var(--font-geist-mono);
 }
 
+/*
+ * Appearance knobs.
+ *
+ * Declared here so the app has correct values even before the boot script
+ * runs, and set as custom properties rather than React state — a typeface or
+ * column-width change must not re-render the transcript, and it has to be
+ * readable pre-paint without a hydration mismatch. Same reasoning as
+ * --dial-rail-w.
+ */
+:root {
+  --dial-font: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --dial-text-scale: 1;
+  --dial-column: 760px;
+  --dial-row-gap: 2.25rem;
+}
+
 body {
   background: var(--chrome);
   color: var(--foreground);
   overflow: hidden;
+  font-family: var(--dial-font);
+  /* Scales the whole rem-based type ramp together, so relative sizes stay
+     in proportion instead of one element growing out of the composition. */
+  font-size: calc(1rem * var(--dial-text-scale));
+}
+
+/* The reading column. Both the transcript and the composer read this, so
+   they cannot drift apart when the width preference changes. */
+.dial-column {
+  width: 100%;
+  max-width: var(--dial-column);
+  margin-inline: auto;
+}
+
+.dial-rows > * + * {
+  margin-top: var(--dial-row-gap);
 }
 
 button,
@@ -138,19 +170,30 @@ button:disabled {
 }
 
 /* The transcript minimap only appears when the chat pane itself has enough
-   room. This responds to sidebar resizing, not just the browser viewport. */
-.chat-scroll-region {
-  container-type: inline-size;
-}
-
+   room — sidebar resizing counts, not just the browser viewport.
+ *
+ * This was a container query, and it caused a Safari-only scroll bug that
+ * looked nothing like its cause: scrolling up jumped to the top, and the
+ * jump-to-bottom control snapped straight back, "like a refreshed page".
+ *
+ * `container-type: inline-size` silently applies `contain: layout style
+ * inline-size`, and it was on `.chat-scroll-region` — the direct parent of
+ * the scroll container. WebKit mishandles layout containment around a
+ * scroller: the constant re-layout from Motion animating the minimap's
+ * markers inside the container had it restoring scroll position on every
+ * frame. Chrome implements containment correctly and never showed it; iPhone
+ * Safari never matched the query, so the minimap never rendered and there was
+ * nothing to churn.
+ *
+ * The width is measured with a ResizeObserver instead (see ChatView), which
+ * writes `data-roomy` straight to the DOM — no containment, and no React
+ * state, so a sidebar drag still cannot re-render the transcript. */
 .message-navigator {
   display: none;
 }
 
-@container (min-width: 880px) {
-  .message-navigator {
-    display: block;
-  }
+.chat-scroll-region[data-roomy="true"] .message-navigator {
+  display: block;
 }
 
 /* ---- shimmer / glow for live telemetry (reasoning, search) ---- */

@@ -5,13 +5,7 @@ import ThemeToggle from "./ThemeToggle";
 import RailToggle from "@/components/sidebar/RailToggle";
 import { formatCost, formatTokens } from "@/lib/format";
 import { shortModelId } from "@/lib/capabilities";
-
-type KeyStatus = {
-  usage: number | null;
-  limit: number | null;
-  remaining: number | null;
-  freeTier: boolean;
-};
+import { fetchKeyStatus, type KeyStatus } from "@/lib/account";
 
 /**
  * Context bar: where am I, what is tuned, and what has this thread used?
@@ -24,6 +18,7 @@ export default function StatusStrip({
   title,
   model,
   ready,
+  apiKey,
   threadCostUsd,
   threadTokens,
   onOpenPalette,
@@ -32,24 +27,36 @@ export default function StatusStrip({
   title?: string;
   model: string;
   ready: boolean;
+  /** The connected OpenRouter key; null before one is connected. */
+  apiKey: string | null;
   threadCostUsd: number | undefined;
   threadTokens: number | undefined;
   onOpenPalette: () => void;
   onOpenSidebar: () => void;
 }) {
-  const [key, setKey] = useState<KeyStatus | null>(null);
+  /**
+   * Tagged with the key it describes. Disconnecting must not leave the
+   * previous account's balance on screen, and clearing it from an effect
+   * would cascade a render — so the reading is matched to the current key
+   * on read instead.
+   */
+  const [status, setStatus] = useState<{ key: string; value: KeyStatus } | null>(
+    null,
+  );
 
   useEffect(() => {
+    if (!apiKey) return;
     const controller = new AbortController();
-    fetch("/api/key", { signal: controller.signal })
-      .then((res) => (res.ok ? res.json() : Promise.reject(res.status)))
-      .then((data: KeyStatus) => setKey(data))
+    fetchKeyStatus(apiKey, controller.signal)
+      .then((value) => setStatus({ key: apiKey, value }))
       .catch(() => {
         // The rest of the bar remains useful without the account reading.
       });
     return () => controller.abort();
     // Refresh after a completed turn changes the thread cost.
-  }, [threadCostUsd]);
+  }, [apiKey, threadCostUsd]);
+
+  const key = apiKey && status?.key === apiKey ? status.value : null;
 
   const credit =
     key?.remaining !== null && key?.remaining !== undefined
