@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion } from "motion/react";
 import Link from "next/link";
 import type { SessionUser } from "@/lib/auth-client";
@@ -14,6 +14,7 @@ import {
   type UserSettings,
 } from "@/lib/settings";
 import type { SyncStatus } from "@/lib/session";
+import type { AccountUsage } from "@/lib/settings";
 
 /**
  * Account and preferences.
@@ -72,6 +73,68 @@ function Segmented<T extends string>({
   );
 }
 
+/** Bytes, at the precision a person actually reads. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const mb = bytes / (1024 * 1024);
+  if (mb < 1) return `${(bytes / 1024).toFixed(0)} KB`;
+  if (mb < 100) return `${mb.toFixed(1)} MB`;
+  const gb = mb / 1024;
+  return gb >= 1 ? `${gb.toFixed(2)} GB` : `${mb.toFixed(0)} MB`;
+}
+
+/**
+ * A usage bar.
+ *
+ * Monochrome like everything else: the fill is the foreground colour, and a
+ * bar that is nearly full says so in words rather than by turning red. There
+ * is no colour vocabulary in this interface to borrow for it, and inventing
+ * one here would be the first exception.
+ */
+function Meter({
+  used,
+  total,
+  label,
+  detail,
+}: {
+  used: number;
+  total: number;
+  label: string;
+  detail: string;
+}) {
+  const ratio = total > 0 ? Math.min(1, used / total) : 0;
+  const full = ratio >= 0.9;
+  return (
+    <div>
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+          {label}
+        </span>
+        <span className="font-mono text-[10px] text-secondary">{detail}</span>
+      </div>
+      <div
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(ratio * 100)}
+        aria-label={label}
+        className="mt-2 h-1 w-full overflow-hidden rounded-full bg-hairline"
+      >
+        <div
+          className="h-full rounded-full bg-foreground transition-[width] duration-300 ease-out"
+          style={{ width: `${Math.max(ratio * 100, used > 0 ? 1.5 : 0)}%` }}
+        />
+      </div>
+      {full && (
+        <p className="mt-1.5 font-mono text-[9px] leading-relaxed text-muted">
+          nearly full — deleting a conversation also deletes its images and
+          attachments
+        </p>
+      )}
+    </div>
+  );
+}
+
 function Row({
   label,
   hint,
@@ -109,6 +172,8 @@ export default function SettingsPanel({
   onSignOut,
   onDestroy,
   onSync,
+  usage,
+  onRefreshUsage,
   onClose,
   onSignInRequested,
 }: {
@@ -120,6 +185,8 @@ export default function SettingsPanel({
   onSignOut: (wipeDevice: boolean) => Promise<void>;
   onDestroy: () => Promise<void>;
   onSync: () => Promise<void>;
+  usage: AccountUsage | null;
+  onRefreshUsage: () => Promise<void>;
   onClose: () => void;
   onSignInRequested: () => void;
 }) {
@@ -127,6 +194,14 @@ export default function SettingsPanel({
   const [keyDraft, setKeyDraft] = useState("");
   const [keyError, setKeyError] = useState<string | null>(null);
   const [confirmDestroy, setConfirmDestroy] = useState(false);
+
+  // Read once on open, and again after a sync settles — storage only moves
+  // when something was uploaded or deleted, so polling it would be noise.
+  const settled = status.state === "idle";
+  useEffect(() => {
+    if (!user) return;
+    void onRefreshUsage();
+  }, [user, settled, onRefreshUsage]);
 
   const saveKey = () => {
     const value = keyDraft.trim();
@@ -198,6 +273,31 @@ export default function SettingsPanel({
                     </p>
                   </div>
 
+                  {usage && (
+                    <Row label="storage">
+                      <div className="space-y-3.5">
+                        <Meter
+                          label="files"
+                          used={usage.blobBytes}
+                          total={usage.blobQuota}
+                          detail={`${formatBytes(usage.blobBytes)} of ${formatBytes(usage.blobQuota)}`}
+                        />
+                        <div className="flex items-baseline justify-between gap-3 font-mono text-[10px] text-muted">
+                          <span>
+                            {usage.blobCount === 1
+                              ? "1 image or attachment"
+                              : `${usage.blobCount} images and attachments`}
+                          </span>
+                          <span>
+                            {usage.records === 1
+                              ? "1 synced record"
+                              : `${usage.records} synced records`}
+                          </span>
+                        </div>
+                      </div>
+                    </Row>
+                  )}
+
                   <Row label="chat history">
                     <p className="text-[12px] leading-relaxed text-secondary">
                       {encrypted
@@ -267,18 +367,18 @@ export default function SettingsPanel({
                       </div>
                     ) : (
                       <div className="flex items-center justify-between gap-3">
-                        <button
-                          onClick={() => setConfirmDestroy(true)}
-                          className="font-mono text-[10px] text-muted underline decoration-hairline underline-offset-2 transition-colors hover:text-foreground"
-                        >
-                          delete account
-                        </button>
                         <Link
                           href="/privacy"
-                          className="shrink-0 font-mono text-[10px] text-muted underline decoration-hairline underline-offset-2 transition-colors hover:text-foreground"
+                          className="font-mono text-[10px] text-muted underline decoration-hairline underline-offset-2 transition-colors hover:text-foreground"
                         >
                           privacy policy
                         </Link>
+                        <button
+                          onClick={() => setConfirmDestroy(true)}
+                          className="shrink-0 font-mono text-[10px] text-muted underline decoration-hairline underline-offset-2 transition-colors hover:text-foreground"
+                        >
+                          delete account
+                        </button>
                       </div>
                     )}
                   </div>

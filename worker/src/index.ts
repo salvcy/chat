@@ -60,7 +60,30 @@ type RecordRow = {
   deleted: number;
   payload: string | null;
 };
-type StateRow = { rev: number; encryption: string; settings: string | null };
+type StateRow = {
+  rev: number;
+  encryption: string;
+  settings: string | null;
+  blob_bytes: number;
+  blob_count: number;
+};
+
+/**
+ * How much R2 one account may hold.
+ *
+ * R2's free tier is 10GB for the whole bucket, and until now nothing stopped
+ * a single signed-in account from filling it — every other limit in this file
+ * is per request, which bounds nothing cumulative. Overridable per
+ * deployment so the ceiling can move without a code change.
+ */
+const DEFAULT_BLOB_QUOTA_BYTES = 250 * 1024 * 1024;
+
+function blobQuota(env: Env): number {
+  const configured = Number(env.BLOB_QUOTA_BYTES);
+  return Number.isSafeInteger(configured) && configured > 0
+    ? configured
+    : DEFAULT_BLOB_QUOTA_BYTES;
+}
 
 const ENCRYPTION_MODES = new Set(["none", "password", "passphrase"]);
 
@@ -105,7 +128,8 @@ async function loadState(
   userId: string,
 ): Promise<StateRow | null> {
   const existing = await env.DB.prepare(
-    `SELECT rev, encryption, settings FROM user_state WHERE user_id = ?`,
+    `SELECT rev, encryption, settings, blob_bytes, blob_count
+       FROM user_state WHERE user_id = ?`,
   )
     .bind(userId)
     .first<StateRow>();
@@ -124,7 +148,7 @@ async function loadState(
   } catch {
     return null;
   }
-  return { rev: 0, encryption: "none", settings: null };
+  return { rev: 0, encryption: "none", settings: null, blob_bytes: 0, blob_count: 0 };
 }
 
 /* ------------------------------ endpoints ------------------------------ */
@@ -264,7 +288,7 @@ async function push(
     ctx.waitUntil(
       Promise.all(
         deletedIds.map((recordId) =>
-          deleteRecordBlobs(env.BLOBS, userId, recordId),
+          deleteRecordBlobs(env, userId, recordId),
         ),
       ).then(() => undefined),
     );
@@ -305,7 +329,30 @@ async function putBlob(
     return fail("image exceeded 11 MB", 413);
   }
 
-  const object = await env.BLOBS.put(blobKey(userId, blobId), bytes, {
+  const key = blobKey(userId, blobId);
+
+  /*
+   * Enforce the account's ceiling before writing.
+   *
+   * Blob ids are deterministic, so a retry — or a record being re-synced —
+   * overwrites an existing object rather than adding one. The previous size
+   * therefore has to come out of the total, or a single image re-uploaded
+   * often enough would exhaust the quota while occupying one object's worth
+   * of space. `head` is a metadata read: it costs a Class B operation and no
+   * transfer.
+   */
+  const existing = await env.BLOBS.head(key);
+  const previous = existing?.size ?? 0;
+  const quota = blobQuota(env);
+  const projected = state.blob_bytes - previous + bytes.byteLength;
+  if (projected > quota) {
+    return fail(
+      `this account's ${Math.round(quota / (1024 * 1024))} MB of file storage is full — delete some conversations with images or attachments`,
+      507,
+    );
+  }
+
+  const object = await env.BLOBS.put(key, bytes, {
     httpMetadata: {
       contentType: "application/octet-stream",
       // A retry can replace a deterministic key, so stale ciphertext must
@@ -313,6 +360,18 @@ async function putBlob(
       cacheControl: "no-store",
     },
   });
+
+  // MAX guards the total against ever going negative, which would otherwise
+  // be permanent: there is no reconciliation pass to correct it.
+  await env.DB.prepare(
+    `UPDATE user_state
+        SET blob_bytes = MAX(0, blob_bytes - ? + ?),
+            blob_count = MAX(0, blob_count + ?)
+      WHERE user_id = ?`,
+  )
+    .bind(previous, bytes.byteLength, existing ? 0 : 1, userId)
+    .run();
+
   return json({
     id: blobId,
     etag: object.httpEtag,
@@ -343,28 +402,66 @@ async function deleteBlob(
   userId: string,
   blobId: string,
 ): Promise<Response> {
-  await env.BLOBS.delete(blobKey(userId, blobId));
+  const key = blobKey(userId, blobId);
+  const existing = await env.BLOBS.head(key);
+  await env.BLOBS.delete(key);
+  if (existing) {
+    await env.DB.prepare(
+      `UPDATE user_state
+          SET blob_bytes = MAX(0, blob_bytes - ?),
+              blob_count = MAX(0, blob_count - 1)
+        WHERE user_id = ?`,
+    )
+      .bind(existing.size, userId)
+      .run();
+  }
   return new Response(null, { status: 204 });
+}
+
+/** Total size and object count under a prefix, without deleting anything. */
+async function measureBlobPrefix(
+  bucket: R2Bucket,
+  prefix: string,
+): Promise<{ bytes: number; count: number }> {
+  let bytes = 0;
+  let count = 0;
+  let cursor: string | undefined;
+  do {
+    const page = await bucket.list({ prefix, limit: 1000, cursor });
+    for (const object of page.objects) {
+      bytes += object.size;
+      count += 1;
+    }
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+  return { bytes, count };
 }
 
 async function deleteBlobPrefix(
   bucket: R2Bucket,
   prefix: string,
-): Promise<void> {
+): Promise<{ bytes: number; count: number }> {
+  let bytes = 0;
+  let count = 0;
   // Restart at the prefix after each delete. Continuing an opaque cursor
   // through a collection we just mutated can skip keys on some object stores.
   for (;;) {
     const page = await bucket.list({ prefix, limit: 1000 });
-    if (page.objects.length === 0) return;
+    if (page.objects.length === 0) return { bytes, count };
+    for (const object of page.objects) {
+      bytes += object.size;
+      count += 1;
+    }
     await bucket.delete(page.objects.map((object) => object.key));
   }
 }
 
 async function deleteRecordBlobs(
-  bucket: R2Bucket,
+  env: Env,
   userId: string,
   recordId: string,
 ): Promise<void> {
+  const bucket = env.BLOBS;
   let prefix = recordId;
   if (!/^[A-Za-z0-9_-]{1,96}$/.test(recordId)) {
     const digest = new Uint8Array(
@@ -377,7 +474,16 @@ async function deleteRecordBlobs(
       .replace(/\//g, "_")
       .replace(/=+$/, "");
   }
-  await deleteBlobPrefix(bucket, `${userId}/${prefix}.`);
+  const freed = await deleteBlobPrefix(bucket, `${userId}/${prefix}.`);
+  if (freed.count === 0) return;
+  await env.DB.prepare(
+    `UPDATE user_state
+        SET blob_bytes = MAX(0, blob_bytes - ?),
+            blob_count = MAX(0, blob_count - ?)
+      WHERE user_id = ?`,
+  )
+    .bind(freed.bytes, freed.count, userId)
+    .run();
 }
 
 async function notifyLive(
@@ -413,12 +519,60 @@ function connectLive(
   });
 }
 
-/** GET /v1/state — settings blob + encryption mode. */
-function readState(state: StateRow): Response {
+/**
+ * GET /v1/state — settings blob, encryption mode, and what this account is
+ * using.
+ *
+ * The blob totals are already on the row, so they cost nothing. The record
+ * count is one indexed COUNT and is deliberately kept here rather than in
+ * `loadState`: this endpoint is called when someone opens settings, not on
+ * every sync.
+ */
+async function readState(
+  env: Env,
+  userId: string,
+  state: StateRow,
+): Promise<Response> {
+  const counted = await env.DB.prepare(
+    `SELECT COUNT(*) AS records FROM record WHERE user_id = ? AND deleted = 0`,
+  )
+    .bind(userId)
+    .first<{ records: number }>();
+
+  /*
+   * Backfill accounts that predate the counters.
+   *
+   * The running totals only know about writes made since they existed, so an
+   * account that already had images would report zero for ever. When both are
+   * zero the truth is one prefix list away — and for an account that really
+   * holds nothing that is a single empty listing, so the self-healing costs
+   * nothing to leave in place.
+   */
+  let blobBytes = state.blob_bytes;
+  let blobCount = state.blob_count;
+  if (blobBytes === 0 && blobCount === 0) {
+    const measured = await measureBlobPrefix(env.BLOBS, `${userId}/`);
+    if (measured.count > 0) {
+      blobBytes = measured.bytes;
+      blobCount = measured.count;
+      await env.DB.prepare(
+        `UPDATE user_state SET blob_bytes = ?, blob_count = ? WHERE user_id = ?`,
+      )
+        .bind(blobBytes, blobCount, userId)
+        .run();
+    }
+  }
+
   return json({
     rev: state.rev,
     encryption: state.encryption,
     settings: state.settings,
+    usage: {
+      blobBytes,
+      blobCount,
+      blobQuota: blobQuota(env),
+      records: counted?.records ?? 0,
+    },
   });
 }
 
@@ -614,7 +768,9 @@ const handler = {
       }
 
       if (pathname === "/v1/state") {
-        if (request.method === "GET") return readState(state);
+        if (request.method === "GET") {
+          return await readState(env, userId, state);
+        }
         if (request.method === "PUT") {
           return await writeState(request, env, userId, state);
         }

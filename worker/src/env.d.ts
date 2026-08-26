@@ -18,6 +18,9 @@ export interface Env {
   /** Optional public R2 custom domain, e.g. https://blobs.belayet.co. */
   BLOB_PUBLIC_ORIGIN?: string;
 
+  /** Per-account R2 ceiling in bytes. Falls back to DEFAULT_BLOB_QUOTA_BYTES. */
+  BLOB_QUOTA_BYTES?: string;
+
   /** Signs session cookies. `wrangler secret put AUTH_SECRET`. */
   AUTH_SECRET: string;
 

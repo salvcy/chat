@@ -316,6 +316,31 @@ invoking a Worker.
 
 ### Rules learned the hard way
 
+- **R2 has no per-prefix quota, so the total has to be carried in D1.**
+  `blob_bytes` / `blob_count` on `user_state` are maintained on every put and
+  delete. The put path subtracts the *previous* object's size first: blob ids
+  are deterministic, so a re-sync overwrites rather than adds, and counting it
+  as new would exhaust the quota while occupying one object's worth of space.
+  Accounts predating the counters backfill themselves from one prefix list the
+  first time settings is opened.
+- **`atBottom` has to be recomputed on geometry change, not only on scroll.**
+  Nudging the wheel a few pixels sets `stickRef` false while `atBottom` stays
+  true; content then arrives from a sync, `followLatest` correctly declines to
+  move, no scroll event fires, and the reader is stranded with nothing
+  offering to take them to the bottom. `measureAtBottom` is a pure readout —
+  it never writes `scrollTop` or `stickRef`, which is what keeps it clear of
+  the follow hysteresis and the Safari fixes.
+- **Selection painting: measure before believing.** Within a message every
+  gesture — drag, double-click, triple-click — already paints tight to the
+  glyphs in Chromium; the padding-on-the-wrapper rule is what buys that.
+  A range spanning block boundaries paints full-width bands, and neither
+  `user-select: none` on the wrappers nor `::selection { background:
+  transparent }` fixes it: the first does not stop the range from spanning,
+  and the second cascades into the text and kills the highlight entirely.
+  Both were measured, not assumed. `getClientRects()` also reports rectangles
+  the browser never paints, so screenshot the selection rather than trusting
+  the geometry.
+
 - **A revision must be allocated by the database, not derived from a read.**
   `push` computed `state.rev + 1` from a row read earlier in the request, so
   two devices pushing at once both wrote the same revision — and a third

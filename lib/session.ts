@@ -18,9 +18,11 @@ import {
   applyAppearance,
   clearLocal,
   fetchRemote,
+  fetchUsage,
   pushRemote,
   readLocal,
   writeLocal,
+  type AccountUsage,
   type UserSettings,
 } from "./settings";
 import {
@@ -89,6 +91,8 @@ export function useAccount(changeSignal: unknown) {
    * sync look broken while it was in fact working.
    */
   const [pulled, setPulled] = useState(0);
+  /** Storage totals, fetched on demand rather than kept live. */
+  const [usage, setUsage] = useState<AccountUsage | null>(null);
 
   const userRef = useRef<SessionUser | null>(null);
   const kekRef = useRef<CryptoKey | null>(null);
@@ -161,6 +165,11 @@ export function useAccount(changeSignal: unknown) {
   useEffect(() => {
     syncRef.current = sync;
   }, [sync]);
+
+  const refreshUsage = useCallback(async () => {
+    if (!userRef.current) return;
+    setUsage(await fetchUsage());
+  }, []);
 
   /* ------------------------- adopt a signed-in user --------------------- */
 
@@ -534,6 +543,8 @@ export function useAccount(changeSignal: unknown) {
     updateSettings,
     /** Increments when a sync applied remote records. */
     pulled,
+    usage,
+    refreshUsage,
     signUp,
     verifyEmail,
     resendEmail: apiResendEmailOTP,

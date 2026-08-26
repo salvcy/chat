@@ -372,6 +372,28 @@ export default function ChatView({
     };
   }, []);
 
+  /**
+   * Recompute *only* the jump-to-bottom control.
+   *
+   * `atBottom` used to be written from `onScroll` alone, so it went stale
+   * whenever the transcript grew without the reader touching it — which is
+   * exactly what a sync does now that pulls reach the open thread. Nudging
+   * the wheel a few pixels sets `stickRef` false while `atBottom` is still
+   * true; content then arrives, `followLatest` declines to move (correctly,
+   * the reader had scrolled), no scroll event fires, and the reader is left
+   * far from the bottom with nothing offering to take them there.
+   *
+   * Deliberately a pure readout: it never writes `scrollTop` and never
+   * touches `stickRef`, so the follow hysteresis and the Safari fixes above
+   * are untouched by it.
+   */
+  const measureAtBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setAtBottom(distance < STICK_THRESHOLD_PX);
+  }, []);
+
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
@@ -482,9 +504,12 @@ export default function ChatView({
     // The SDK's finished state and the message's final UI do not always land
     // in the same layout pass. Re-pin on the next frame before the browser's
     // own scroll anchoring gets a chance to choose an older message.
-    const frame = requestAnimationFrame(followLatest);
+    const frame = requestAnimationFrame(() => {
+      followLatest();
+      measureAtBottom();
+    });
     return () => cancelAnimationFrame(frame);
-  }, [messages, status, followLatest]);
+  }, [messages, status, followLatest, measureAtBottom]);
 
   useEffect(() => {
     const transcript = transcriptRef.current;
@@ -496,7 +521,10 @@ export default function ChatView({
     let frame = 0;
     const observer = new ResizeObserver(() => {
       cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(followLatest);
+      frame = requestAnimationFrame(() => {
+        followLatest();
+        measureAtBottom();
+      });
     });
     // Follow both kinds of geometry change: streaming alters the transcript's
     // height, while a wrapping composer shrinks the scroller's viewport. The
@@ -509,7 +537,7 @@ export default function ChatView({
       cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [followLatest]);
+  }, [followLatest, measureAtBottom]);
 
   const jumpToBottom = () => {
     const el = scrollRef.current;

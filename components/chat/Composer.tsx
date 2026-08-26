@@ -1,6 +1,7 @@
 "use client";
 
 import Image from "next/image";
+import FileGlyph from "./FileGlyph";
 import type { FileUIPart } from "ai";
 import { useEffect, useRef, useState } from "react";
 import Dropdown from "@/components/ui/Dropdown";
@@ -152,6 +153,7 @@ export default function Composer({
             {attachments.map((file, index) => (
               <div
                 key={`${file.url.slice(0, 40)}-${index}`}
+                title={file.filename ?? undefined}
                 className="group/file relative h-16 w-16 shrink-0 overflow-hidden rounded-xl border border-hairline bg-surface"
               >
                 {file.mediaType.startsWith("image/") ? (
@@ -164,9 +166,10 @@ export default function Composer({
                     className="h-full w-full object-cover"
                   />
                 ) : (
-                  <div className="flex h-full items-center justify-center px-1 text-center font-mono text-[8px] text-muted">
-                    {file.filename ?? "file"}
-                  </div>
+                  <FileGlyph
+                    kind={file.mediaType}
+                    className="h-full w-full text-muted"
+                  />
                 )}
                 <button
                   type="button"

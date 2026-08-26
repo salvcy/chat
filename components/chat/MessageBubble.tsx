@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import Citations from "./Citations";
 import GeneratedImage from "./GeneratedImage";
 import Markdown from "./Markdown";
+import FileGlyph from "./FileGlyph";
 import MessageActions from "./MessageActions";
 import Metrics from "./Metrics";
 import ThinkingPanel from "./ThinkingPanel";
@@ -189,9 +190,13 @@ export default function MessageBubble({
                   ) : file.url ? (
                     <div
                       key={`${file.url.slice(0, 40)}-${index}`}
-                      className="rounded-xl border border-hairline bg-background/35 px-3 py-2 font-mono text-[10px] text-muted"
+                      title={file.filename ?? undefined}
+                      className="flex items-center gap-2.5 rounded-xl border border-hairline bg-background/35 px-3 py-2.5 text-muted"
                     >
-                      {file.filename ?? "attachment"}
+                      <FileGlyph kind={file.mediaType} className="shrink-0" />
+                      <span className="min-w-0 truncate font-mono text-[10px]">
+                        {file.filename ?? "attachment"}
+                      </span>
                     </div>
                   ) : (
                     <div

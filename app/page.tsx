@@ -433,6 +433,8 @@ export default function Home() {
             onSignOut={account.signOut}
             onDestroy={account.destroy}
             onSync={account.sync}
+            usage={account.usage}
+            onRefreshUsage={account.refreshUsage}
             onClose={() => setSettingsOpen(false)}
             onSignInRequested={() => {
               setSettingsOpen(false);

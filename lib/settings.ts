@@ -185,6 +185,26 @@ export type RemoteState = {
  * key; without it we return null rather than guessing, so the caller can
  * keep using the local mirror instead of overwriting it with nothing.
  */
+/** What the account is using, for the readouts in settings. */
+export type AccountUsage = {
+  blobBytes: number;
+  blobCount: number;
+  blobQuota: number;
+  records: number;
+};
+
+/** Storage totals only. Cheap enough to call whenever settings is opened. */
+export async function fetchUsage(): Promise<AccountUsage | null> {
+  try {
+    const response = await fetch("/v1/state", { credentials: "same-origin" });
+    if (!response.ok) return null;
+    const payload = (await response.json()) as { usage?: AccountUsage };
+    return payload.usage ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchRemote(kek: CryptoKey | null): Promise<RemoteState> {
   const response = await fetch("/v1/state", { credentials: "same-origin" });
   if (!response.ok) throw new Error(`settings unavailable (${response.status})`);
