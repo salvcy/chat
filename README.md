@@ -1,79 +1,81 @@
 # Chat
 
-A minimal, local-first OpenRouter client with optional encrypted account sync.
+A minimal, cloud-first OpenRouter chat client with end-to-end encryption for
+email/password accounts.
 
-The frontend is a static Next.js export. Model inference, catalog requests,
-search, vision, and image generation go directly from the browser to
-OpenRouter using the user’s own key. Cloudflare serves the static files and
-runs the small account/sync surface: Better Auth on D1, encrypted image blobs
-in R2, and realtime revision signals through hibernating Durable Objects.
+The frontend is a static Next.js export. Inference, model discovery, search,
+vision, PDFs, and image generation run directly from the browser against
+OpenRouter with the user’s own key. Cloudflare provides the account layer: a
+Worker with Better Auth, D1 as the authoritative chat store, R2 for encrypted
+images/attachments and oversized messages, and hibernating Durable Objects for
+revision-only realtime updates.
 
 Live: [chat.belayet.co](https://chat.belayet.co)
 
 ## Product principles
 
-- Local-first. Dexie/IndexedDB is the working source of truth; cloud sync is
-  an optional replica, and the app remains usable without an account.
-- Bring your own key. The operator never holds or proxies an OpenRouter key.
-- End-to-end encryption for password accounts. The password is stretched in
-  the browser and independently derives the credential sent to Better Auth
-  and the non-extractable AES-GCM key used for records, settings, and images.
-- Minimal infrastructure. Static assets do not invoke the Worker. D1 stores
-  opaque records, R2 stores browser-encrypted blobs, and live sockets carry
-  only integer revision hints.
-- Monochrome interface. State is expressed through inversion rather than an
-  accent color; restrained syntax highlighting is the functional exception.
+- **One source of truth.** D1 owns threads and messages. The browser holds only
+  the open transcript and sidebar in memory; there is no local conversation
+  database to reconcile.
+- **Bring your own key.** OpenRouter traffic goes directly from the browser to
+  OpenRouter. The operator never receives or pays for model requests.
+- **End-to-end encryption.** Email/password accounts derive an auth credential
+  and a separate AES-GCM vault key from the same client-side PBKDF2 pass. D1 and
+  R2 receive sealed content.
+- **Deliberate device security.** The non-extractable vault key is remembered in
+  IndexedDB by default so refreshes stay unlocked. A synced “lock on exit” mode
+  keeps it in memory only and requires the password after a refresh.
+- **Minimal infrastructure.** Static assets bypass the Worker. Streaming saves
+  are checkpointed, serialized per thread, and realtime sockets carry only a
+  revision and random thread id.
+- **Monochrome interface.** State is expressed through fill and inversion
+  rather than accent colors; restrained syntax highlighting is the functional
+  exception. Surface structure — hairlines, layered shadows, gliding
+  highlights, loaders — is adapted from
+  [Beautiful UI](https://www.beautifului.dev) (MIT).
 
 ## Architecture
 
 ```text
 Browser
-  ├─ OpenRouter API ───── chat/search/vision/images (user-owned key)
-  ├─ IndexedDB ───────── local conversations, messages, vault CryptoKey
+  ├─ OpenRouter API ─── chat/search/vision/PDFs/images (user-owned key)
+  ├─ memory ─────────── open transcript + sidebar
+  ├─ IndexedDB ──────── optional non-extractable vault key only
+  ├─ localStorage ───── appearance + device-key preference only
   └─ /v1/*
        └─ Cloudflare Worker
-            ├─ Better Auth + D1 ─ identity, sessions, opaque sync records
-            ├─ R2 ────────────── encrypted generated images/attachments
-            └─ Durable Object ── hibernating per-account revision socket
+            ├─ Better Auth + D1 ─ identity, settings, threads, messages
+            ├─ R2 ────────────── encrypted images, files, large payloads
+            └─ Durable Object ── hibernating per-account invalidation hub
 
-Cloudflare Assets ─────── static Next.js `out/` (no Worker invocation)
+Cloudflare Assets ───── static Next.js `out/` export
 ```
 
-### Trust boundary
-
-For email/password accounts, conversation records, synchronized settings,
-the OpenRouter key, generated images, and attachments are encrypted in the
-browser. The Worker moves or stores opaque bytes and cannot decrypt them.
-Account identity, date of birth, session/security metadata, record ids,
-revisions, and blob sizes are not end-to-end encrypted. OpenRouter and the
-selected model provider see prompts and attachments sent to a model.
+The server can see account identity, timestamps, random record ids, thread
+shape/order, blob sizes, and storage totals. For password accounts it cannot
+read titles, messages, settings, the OpenRouter key, generated images, or
+attachments. OpenRouter and the selected model provider necessarily receive
+the prompts and files sent to them.
 
 ## Main surfaces
 
-- `app/page.tsx` — application shell and active conversation.
-- `components/chat/` — streaming transcript, composer, image generation,
-  citations, syntax highlighting, and message navigator.
-- `components/sidebar/` — searchable/resizable/collapsible history rail.
-- `components/settings/` — account, keys, appearance, unlock and auth flows.
+- `app/page.tsx` — login/unlock gates, application shell, active conversation.
+- `components/chat/` — streaming transcript, composer, tools, citations,
+  syntax highlighting, and message navigator.
+- `components/sidebar/` — searchable, resizable, collapsible thread history.
+- `components/settings/` — auth, account, key, appearance, and device security.
 - `lib/transport.ts` — direct browser-to-OpenRouter streaming transport.
-- `lib/db.ts` / `lib/conversations.ts` — local-first Dexie store.
-- `lib/sync.ts` / `lib/blob.ts` — encrypted D1 record and R2 blob sync.
-- `lib/auth-client.ts` / `lib/session.ts` — browser password derivation,
-  sessions, settings, realtime connection, and device locking.
-- `worker/src/index.ts` — authenticated sync, blob, live, state and deletion
-  routes.
-- `worker/src/auth.ts` — Better Auth, age gate, persistent rate limiting, and
-  optional email OTP.
-- `worker/src/live.ts` — content-free Durable Object invalidation hub.
-- `wrangler.jsonc` — Worker, static assets, D1, R2 and Durable Object bindings.
-
-`CLAUDE.md` contains the detailed invariants and design law. Read it before
-changing auth, encryption, streaming persistence, sync cursors, or scroll
-behavior; those areas contain fixes for real data-loss and browser bugs.
+- `lib/store.ts` / `lib/conversations.ts` — sealed cloud reads/writes and
+  ordered streaming checkpoints.
+- `lib/session.ts` / `lib/keystore.ts` — session, realtime revisions, settings,
+  lock state, and optional browser key retention.
+- `worker/src/index.ts` — authenticated state/thread/blob/account endpoints.
+- `worker/src/live.ts` — content-free hibernating invalidation hub.
+- `ARCHITECTURE.md` and `CLAUDE.md` — protocol invariants and design law.
 
 ## Local development
 
-Requirements: Node 24+ and a recent Wrangler 4 release.
+Requirements: Node 24+ and Wrangler 4.
 
 ```bash
 npm install
@@ -81,78 +83,43 @@ cd worker && npm install && cd ..
 npm run dev
 ```
 
-The static frontend can run on its own. Account/sync testing additionally
-needs Wrangler with local D1/R2/DO bindings:
+The Next.js server can render the frontend alone. Account and storage testing
+needs Wrangler’s local D1/R2/Durable Object bindings:
 
 ```bash
+npm run build -- --webpack
 npx wrangler dev
 ```
 
-OpenRouter keys are entered in the app. There is no frontend `.env` file and
-no server-held model credential.
+OpenRouter keys are entered in the app. No server-held model key or frontend
+environment variable is required.
 
 ## Cloudflare setup
 
-The checked-in config expects:
-
-- D1 database: `chat-vault`
-- R2 Standard bucket: `chat-blobs`
-- SQLite-backed Durable Object class: `SyncHub`
-- Worker secret: `AUTH_SECRET`
-
-Create the bucket once, then apply both idempotent schemas:
+The checked-in configuration expects D1 database `chat-vault`, R2 bucket
+`chat-blobs`, Durable Object class `SyncHub`, and Worker secret `AUTH_SECRET`.
 
 ```bash
 npx wrangler r2 bucket create chat-blobs
 npx wrangler d1 execute chat-vault --remote --file worker/schema-auth.sql
 npx wrangler d1 execute chat-vault --remote --file worker/schema-app.sql
-```
-
-Build and deploy:
-
-```bash
-npm run build
+npm run build -- --webpack
 npx wrangler deploy
 ```
 
-### Optional public blob domain
-
-Authenticated Worker downloads are the correctness fallback. To avoid a
-Worker invocation for encrypted blob reads, connect an R2 custom domain such
-as `blobs.belayet.co`, allow CORS GETs from `https://chat.belayet.co`, and set
-`BLOB_PUBLIC_ORIGIN` to that origin in the Worker. Only encrypted accounts are
-given direct URLs; unencrypted-account blobs stay behind authentication.
-
-### Optional email verification
-
-The signup UI and Better Auth OTP flow are implemented but remain disabled
-until both `EMAIL` (Cloudflare Email Sending binding) and `EMAIL_FROM` exist.
-Cloudflare’s general transactional Email Sending product currently requires a
-Workers Paid plan; free Email Routing can send only to pre-verified destination
-addresses and cannot verify arbitrary signups. Without the binding, signup
-continues without email verification rather than locking users out.
-
-Google remains a disabled UI placeholder until its redirect URI and secret
-are intentionally configured.
+Google remains a disabled placeholder. Email OTP activates only when both the
+`EMAIL` binding and `EMAIL_FROM` exist; without them signup remains immediate.
 
 ## Verification
 
 ```bash
 npm run lint
-npm run build
+npm run build -- --webpack
 ./node_modules/.bin/tsc --noEmit --strict --skipLibCheck \
   --target es2022 --module esnext --moduleResolution bundler \
   --types ./worker/node_modules/@cloudflare/workers-types \
   worker/src/index.ts worker/src/auth.ts worker/src/live.ts worker/src/env.d.ts
-node worker/gen-schema.mjs
 ```
 
-The generated auth schema must match `worker/schema-auth.sql` after every
-Better Auth option or version change.
-
-## Privacy and deletion
-
-The static policy is at `/privacy`. Account deletion removes Better Auth
-identity/session rows, D1 state and records through foreign-key cascades, and
-all R2 objects under the account prefix. Verify that
-`privacy@belayet.co` is a working mailbox before treating the policy as final.
+The privacy policy is at `/privacy`. Verify that `privacy@belayet.co` is a
+working mailbox before treating it as final.

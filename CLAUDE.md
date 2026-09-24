@@ -3,8 +3,9 @@
 # Chat — project law for future sessions
 
 A minimal chat interface for every model, through one OpenRouter key.
-Single user, no auth. Local-first. This file locks the stack and the
-design system — don't deviate without the user explicitly approving it.
+Accounts required, end-to-end encrypted, cloud-first. This file locks the
+stack and the design system — don't deviate without the user explicitly
+approving it.
 
 ## Stack (locked)
 
@@ -14,8 +15,10 @@ design system — don't deviate without the user explicitly approving it.
   `app/globals.css` as custom properties on `:root` (light) and `.dark`,
   wired through `@theme inline`. `dark` variant via `@custom-variant dark`.
   Default theme is **dark**, applied by a pre-paint boot script in
-  `app/layout.tsx` reading `localStorage("dial:theme")` (no flash, no
-  cross-fade on toggle — see ThemeToggle).
+  `app/layout.tsx` reading `localStorage("dial:appearance")` (no flash, no
+  cross-fade on toggle — see ThemeToggle). That one key is the only thing in
+  the app that reads local storage; the authoritative copy of every
+  preference is the sealed settings blob on the account.
 - **AI SDK v7** (`ai`) + **`@ai-sdk/react` v4** (`useChat` +
   `DefaultChatTransport` from `ai`) +
   **`@openrouter/ai-sdk-provider` v3** (`createOpenRouter`).
@@ -47,6 +50,13 @@ The organizing idea after the v2 rework: **the app measures what it does.**
 Every assistant message carries a flight recorder, and the model catalog
 carries a capability surface — so the mono readouts have real numbers and
 the controls can't offer something the model won't honour.
+
+The organizing idea after the v4 rework: **there is one copy of the data.**
+D1 holds it, the browser renders it, and the two are never asked to agree.
+Every data-loss bug in this project's history had the same shape — two
+stores, a cursor, and a merge rule that had to be exactly right — and none of
+them can recur, because the second store is gone. What is left is a cache
+with no durability obligations: losing it costs a refetch.
 
 The organizing idea after the v3 rework: **nothing we pay for sits in the
 token path.** The user brings their own OpenRouter key and the browser talks
@@ -87,11 +97,49 @@ signup work plus two D1 writes, not construction.
 
 ### The Worker (`worker/`, deployed from `wrangler.jsonc`)
 
-The only server, and it cannot read anything it stores. `worker/src/index.ts`
-is four endpoints — mint an account from a token verifier, pull records above
-a cursor, push records, delete everything — over D1. Deployed as one Worker
-on **chat.belayet.co** that also serves the static export, so the app and its
-API share an origin: no CORS preflight, no cross-site cookie configuration.
+The only server, and it holds the only copy. `worker/src/index.ts` is five
+data endpoints over D1 — list threads, read one thread, write a turn, delete a
+thread, and ask what changed — plus state, blobs, live and account deletion.
+Deployed as one Worker on **chat.belayet.co** that also serves the static
+export, so the app and its API share an origin: no CORS preflight, no
+cross-site cookie configuration.
+
+- **`thread` and `message` are typed, and the structure is in the clear.**
+  `thread_id`, `seq`, `pinned`, `updated_at` and `deleted` are plain columns
+  because sorting and grouping cannot be done through a seal; `meta` and
+  `payload` stay AES-GCM sealed. A database dump reveals the *shape* of
+  someone's usage — thread count, message counts, order, timing — and none of
+  its content. That is a real disclosure, it is stated in those words in
+  `schema-app.sql` and in the privacy policy, and it is what buys a page load
+  costing one indexed query instead of downloading and decrypting the account.
+- **`PUT /v1/threads/:id` is one endpoint because a turn is one atomic thing.**
+  It can create the thread, truncate a tail, and write messages in a single
+  `batch()`. Statement order inside that batch is load-bearing: thread upsert
+  first (a new thread and its first message land together), then the truncate,
+  then the inserts — an edit-and-resend truncates from seq 3 and immediately
+  writes a new message at seq 3, and the other order deletes what it just
+  wrote.
+- **Message inserts are guarded by `WHERE EXISTS` on a live thread.** One
+  device deleting a thread while another is streaming into it is a real race,
+  and without the guard those rows land pointing at nothing — invisible to
+  every read, because reads go through the thread, and therefore never cleaned
+  up.
+- **A checkpoint does not touch the thread row.** `touch` is what a streaming
+  save leaves out. Bumping the thread alongside every checkpoint would double
+  the rows written for a long answer to announce something no reader needs —
+  the delta probe already sees the message move.
+- **Tombstones are gone.** A deletion is a `DELETE` on the authoritative
+  store. `thread.deleted` survives only long enough for a connected device to
+  notice (`PURGE_AFTER_MS`), swept lazily inside the next delete's batch; a
+  device that misses the window needs nothing, because its next list simply
+  will not contain the thread.
+- **Blobs are keyed by thread, not by message.** `<threadId>/<messageId>.…`
+  makes deleting a conversation one R2 prefix delete. The old scheme fanned
+  out one unbounded list/delete loop *per message* from a single request.
+- **State is loaded per route, not up front.** Every request used to pay
+  `getSession` + `loadState` before the router looked at the path, so a 404
+  and a WebSocket upgrade cost the same D1 read as a write. Fetching an image
+  is now one R2 get and no D1 at all.
 
 - **Zero dependencies, deliberately.** Workers bill CPU and the free tier
   allows 10ms; a router and an auth library would spend it on nothing. A
@@ -117,15 +165,22 @@ API share an origin: no CORS preflight, no cross-site cookie configuration.
   decrypt was no longer ciphertext. `pushRemote` now refuses
   (`WouldDowngradeError`) and `adopt` bails to `locked` first. The server's
   `encryption` field is the authority, never the local key.
-- **Never sync an encrypted account without its key.** `runSync` throws
-  `LockedError`. The earlier version pulled ciphertext, failed to read every
-  record, and *still advanced the cursor past all of it* — leaving a
-  signed-in user with an empty history sitting above a revision the device
-  would never ask for again. `unlock` also calls `clearCursor()`, because
-  regaining a key means you do not know what you missed.
+- **Never read or write an encrypted account without its key.**
+  `assertUnlocked()` in `lib/store.ts` throws `LockedError` before any request
+  leaves. An earlier build pulled ciphertext, failed to read every record, and
+  *still advanced the cursor past all of it* — leaving a signed-in user with
+  an empty history above a revision the device would never ask for again.
+  There is no cursor to strand now, and the failure mode has correspondingly
+  shrunk to "this request does not happen", but the gate stays: writing
+  through a missing key is what would put plaintext over ciphertext.
 - **The session cookie is httpOnly and outlives local storage.** Clearing
   site data leaves someone authenticated and keyless. That is the `locked`
   state, and it needs its own UI — an empty transcript reads as lost data.
+- **Remembering the vault key is a user choice, and remembered keys are
+  account-scoped.** The default stores the non-extractable key in
+  `dial-vault`, so refreshes remain unlocked. “Lock on exit” deletes it and
+  keeps it in memory only. A legacy unscoped key must prove itself by opening
+  sealed settings; if it cannot, delete it and enter `locked` before any write.
 - **A cookie-cached session outlives the account it belongs to.** Sessions
   are read from a signed cookie for five minutes to save CPU, so a deleted
   user's cookie stays cryptographically valid. `loadState` returns null when
@@ -149,8 +204,9 @@ API share an origin: no CORS preflight, no cross-site cookie configuration.
 - `lib/session.ts` — `useAccount()`. Session, settings, sync and the locked
   state, in that order of dependency.
 - `lib/settings.ts` — one opaque blob (theme, typeface, text size, column
-  width, density, OpenRouter key), encrypted whenever the account has a key.
-  The key is billable, so this blob is never stored in the clear.
+  width, density, device-key retention, OpenRouter key), encrypted whenever
+  the account has a key. The model key is billable, so this blob is never
+  stored in the clear.
 - `components/settings/` — `AuthPanel` (sign in / create / Google),
   `SettingsPanel` (account · keys · appearance), `UnlockBar`.
 - `components/sidebar/AccountButton.tsx` — the rail footer. `shrink-0`
@@ -172,12 +228,18 @@ are the only places those values are consumed.
   `getRandomValues`, so there is nothing to guess and stretching would burn
   a second of the user's CPU for zero security. That same fact is what keeps
   the Worker inside its CPU budget.
-- `lib/sync.ts` — pull, then push. That order is what makes a local edit
-  win on the device being typed on. Last-writer-wins per record is correct
-  here, not lazy: messages are append-only and there is no concurrent editor.
-- `lib/vault.ts` — session lifecycle. The session lives in Dexie holding a
-  **non-extractable `CryptoKey`**; the token itself is never persisted. So
-  injected script can use the vault but cannot carry it away.
+- `lib/store.ts` — the whole data layer, replacing `lib/db.ts` and
+  `lib/sync.ts` together. Seal on write, open on read, R2 for anything heavy,
+  and five requests. There is no cursor, no dirty flag, no merge.
+- `lib/keystore.ts` — raw IndexedDB holding an account-scoped,
+  **non-extractable `CryptoKey`** when the user chooses to remember this
+  browser. This is the *only* remaining use of
+  IndexedDB and it is deliberate: `localStorage` takes strings, so putting the
+  key there would mean exporting the raw bytes and turning a key script can
+  *use* into one it can *steal*. The memory-only alternative is a password
+  prompt on every reload. It also deletes the legacy `dial` database on load, because
+  leaving it would mean a browser quietly retaining a full plaintext copy of
+  someone's history for as long as the profile lives.
 - `components/settings/VaultPanel.tsx` — the token is shown once and the
   confirm button stays disabled until the checkbox is ticked. That friction
   is deliberate and is the only place in this app that should have any.
@@ -192,12 +254,11 @@ app touches. `next.config.ts` is therefore `output: "export"`: the whole
 build is static files, which Cloudflare serves free and unmetered without
 invoking a Worker.
 
-- `lib/credentials.ts` — the user's OpenRouter key, behind a
-  `CredentialStore` interface. Device-local today (`localStorage`, never
-  Dexie — Dexie is what step 2 syncs). The interface exists because the
-  backing store is going to move into the encrypted vault; the doc comment
-  names the three planned identity modes so the seam stays shaped for all
-  of them.
+- `lib/credentials.ts` — the user's OpenRouter key, held in memory for the
+  life of the tab and written nowhere. It arrives from the sealed settings
+  blob when the account is opened. The `CredentialStore` interface is gone
+  along with the localStorage backing it abstracted over — the move it existed
+  to anticipate has happened.
 - `lib/pkce.ts` — OpenRouter OAuth PKCE. The user authorizes on
   openrouter.ai and returns with a key scoped to this app, revocable on its
   own. PKCE is what makes this safe with no server: there is no client
@@ -221,8 +282,10 @@ invoking a Worker.
   not — and PDFs ride the existing R2 attachment path for free.
 - `lib/catalog.ts` — the same normalization as before, now client-side.
   `/models` needs no key, which is what lets the model list populate behind
-  the connect screen. Cached an hour in `localStorage` (~220KB, written on
-  refetch rather than per load).
+  the connect screen. Cached an hour in the **Cache API** — ~220KB of public
+  data, which is an HTTP response with a TTL and therefore what that API is
+  for and what `localStorage` is not. The old version stringified the parsed
+  catalog and wrote it synchronously on the main thread.
 - `lib/title.ts` / `lib/image.ts` / `lib/account.ts` — the other three
   routes. All best-effort, all direct.
 
@@ -240,16 +303,19 @@ invoking a Worker.
 - `lib/syntax.ts` — restrained, theme-aware Prism palette. Code is the one
   functional exception to the monochrome chrome: low-chroma semantic colors
   distinguish keywords, strings, numbers, functions and types.
-- `lib/db.ts` — Dexie **v2**: `conversations` (+ `system`, `pinned`,
-  `totalCostUsd`, `totalTokens`, `titleGenerated`) and `messages`
-  (+ `seq`, with a `[conversationId+seq]` compound index — IndexedDB
-  guarantees no insertion order, so thread order is stored explicitly).
-  v1→v2 upgrade backfills both.
-- `lib/conversations.ts` — `useConversations()`. `saveTurn` **reconciles
-  rather than appends**: messages absent from the passed array are deleted,
-  which is what makes edit/regenerate/branch safe (otherwise orphan
-  branches reappear on reload). Titles are generated once per thread; a
-  hand-typed rename sets `titleGenerated` and is never overwritten.
+- `lib/conversations.ts` — `useConversations()`, with the **same thirteen
+  members and signatures** it had over Dexie. That is what kept `page.tsx` and
+  `ChatView.tsx` (1,600 lines) almost unchanged through the inversion, and it
+  is why the rework was tractable. `saveTurn` sends only what `contentKey`
+  says changed, computes a `truncateFrom` from what has disappeared since the
+  last write, and patches the in-memory list optimistically so the sidebar
+  moves at the speed of the keyboard rather than the network. Titles are
+  generated once per thread; a hand-typed rename sets `titleGenerated` and is
+  never overwritten.
+- `lib/credentials.ts` — the OpenRouter key, **in memory only**. Its own doc
+  comment used to promise the backing store would move into the vault once
+  accounts existed; it has. `dial:credential` held a billable API key as
+  plaintext on disk, which was the worst thing in this app's storage.
 - `lib/export.ts` — Markdown + JSON conversation export.
 - `lib/sources.ts` — dedupe/label helpers for web-search sources. Tracking
   parameters, fragments, and trailing slashes are canonicalized so variants
@@ -259,10 +325,12 @@ invoking a Worker.
   by an OAuth hiccup is not acceptable. A pasted key is verified against
   `/key` before it is stored, so a typo fails there with a reason instead of
   three screens later as a mystery stream error.
-- `lib/preferences.ts` — things that outlive a conversation: **session
-  defaults** (model + reasoning + search, so a new chat inherits the knobs you
-  were last using — only the model used to carry over) and **rail geometry**
-  (width + collapsed).
+- **There is no `lib/preferences.ts`.** Session defaults, recent models, the
+  open thread, and rail geometry were four separate `localStorage` keys; they
+  are fields of the sealed settings blob now, so a preference set on the
+  laptop is on the phone at the next load. Appearance is additionally mirrored
+  to `dial:appearance` for the pre-paint script, and that mirror is the only
+  thing in this app that reads `localStorage`.
 - `app/page.tsx` — the shell. Owns catalog, active thread, settings.
   `view` (empty state) and `effective` (reconciled settings) are **derived
   during render**, not stored — writing them from effects cascades renders
@@ -279,10 +347,11 @@ invoking a Worker.
 - `components/chat/Metrics.tsx` — the per-message flight recorder. Collapsed
   = tok/s · duration · cost; expanded = provider, ttft, token split.
 - `components/chat/ThinkingPanel.tsx` — **one** pre-answer telemetry row, not
-  two. Reasoning and web search share a header ("thought for 11.4s · 3
-  sources"). Expanding reveals the trace plus a compact, singly numbered
-  source list (`1 · example.com`); Citations still provides the answer's
-  canonical `[1] [2]` links below the response. `thinkingMs` is measured server-side at the first-reasoning →
+  two. Reasoning and web search share a header: the pixel-grid loader,
+  "Thinking" and a live timer while it runs; "Thought for 11.4s · 3 sources"
+  once settled. Expanding hangs the mono trace and a numbered source list
+  (title, domain) off a hairline rule; Citations still provides the
+  answer's source chips below the response. `thinkingMs` is measured server-side at the first-reasoning →
   first-text boundary, so a slow provider queue isn't counted as thinking.
   Auto-collapses when the answer starts unless the reader opened it.
 - `components/chat/MessageActions.tsx` — copy / edit / regenerate / branch,
@@ -299,20 +368,31 @@ invoking a Worker.
   call the app's search tool, and the tuner-tick on select.
 - `components/tuner/StatusStrip.tsx` — the readout the README always drew
   and never got built: model · thread cost · thread tokens · key balance.
-- `components/sidebar/ConversationList.tsx` — filter, date grouping, pin,
-  export, rename, delete; per-row cost. Two tight lines per row; one quiet
-  ellipsis opens a compact action menu instead of four icons covering the
-  active-row treatment. The ellipsis overlays the title on hover rather than
-  reserving a right column, keeping the model and cost aligned to the rail.
-  A compact search button expands an inline title/model filter in the rail
-  header; Escape closes and clears it.
+- `components/sidebar/ConversationList.tsx` — brand, New chat, then a
+  "Chats" header whose search control grows right-to-left into a
+  title/model filter (Escape closes and clears it); date grouping, pin,
+  export, rename, delete. **One line per row** — model and cost moved to the
+  row's tooltip, and the open thread's totals are always in the status
+  strip. The ellipsis overlays the title on hover and opens a pop-in menu;
+  delete asks twice.
 - `components/sidebar/RailHandle.tsx` / `RailToggle.tsx` — drag-to-resize
   (180–460px, double-click resets) and collapse (⌘B).
-- `components/chat/Citations.tsx` — one row of numbered links (`[1] [2] [3]`) linking
-  out, title+domain on hover. It was a full-width footnote block, which for a
-  five-source answer was taller than the answer.
+- `components/chat/Citations.tsx` — one wrapping row of small chips (number
+  + domain) linking out, title on hover. It was a full-width footnote block,
+  then bare `[1] [2]` links that said nothing until hovered.
+- `components/chat/SelectionActions.tsx` — select text inside one answer and
+  a small bar offers Quote (into the composer as `> …`, ahead of any draft)
+  and Copy. Waits for pointer-up, stays off touch screens, and ignores
+  selections spanning messages.
 - `components/ui/Dropdown.tsx` — carries a `disabledReason`. Open state is
   derived (`open && !disabled`) so a model switch can't strand it.
+- `components/ui/Button.tsx` — pill buttons (`primary` inverted, `secondary`
+  lifted, `ghost`, `quiet`) at three explicit heights. `buttonClass()` for
+  anything that is not a `<button>`.
+- `components/ui/GlideMenu.tsx` — the single gliding highlight; `hover` mode
+  follows the pointer, `active` mode follows `data-glide-active` (the
+  palette's keyboard cursor).
+- `components/ui/Loader.tsx` — `PixelGrid`, `Elapsed`, and the two together.
 
 ### Rules learned the hard way
 
@@ -341,6 +421,67 @@ invoking a Worker.
   the browser never paints, so screenshot the selection rather than trusting
   the geometry.
 
+- **Retired — and the reason the architecture changed.** Four rules used to
+  live here, and none of them is reachable now: a pull must never overwrite a
+  row this device has not pushed yet; the pull cursor may only advance to a
+  revision whose rows you have seen; an empty page must advance nothing; and a
+  push may adopt its own revision only when it is exactly `cursor + 1`. Each
+  was found the hard way, each was silent data loss, and each was the *same*
+  bug in different clothes — two copies of the truth and a rule for
+  reconciling them. Phase 13 deleted the second copy instead of getting the
+  rules right a fifth time. If a future change proposes a local cache of
+  conversations "just for offline" or "just for speed", this paragraph is the
+  argument against it: the cache is the easy part and the reconciliation is
+  what costs.
+- **Allocate the revision *inside* the write batch, not before it.**
+  `UPDATE … RETURNING` fixed concurrent allocation but stayed its own
+  statement, so `user_state.rev` was briefly visible to a concurrent reader
+  before the rows belonging to it existed. `batch` is one implicit
+  transaction: put the UPDATE first and have the inserts read the revision
+  back with `(SELECT rev FROM user_state WHERE user_id = ?)`. That closes the
+  window and removes a D1 round trip from the hottest write path. When the
+  state row is gone the inserts have no revision to read and the NOT NULL
+  constraint rolls the whole transaction back — catch it and return 401, or a
+  deleted account fails open with a 500.
+- **Per-request limits bound nothing cumulative.** The blob quota exists
+  because R2 needed a ceiling; D1 needed one too and did not have it, so an
+  authenticated client looping `/v1/sync` could spend the deployment's whole
+  daily row-write allowance. `writes_day` / `writes_today` are advanced by the
+  same UPDATE that allocates the revision, and enforced against the state row
+  the request already loaded — a bounded ceiling for no extra statement and no
+  extra CPU.
+- **`react-syntax-highlighter`'s default `Prism` export is `refractor/all`.**
+  297 grammars, 1.87 MB raw and 557 KB gzipped, in a chunk `index.html` loads
+  eagerly — three quarters of this app's entire first-load JavaScript, to
+  colour the dozen languages a chat answer contains. `PrismLight` plus the
+  curated `GRAMMARS` list in `lib/syntax.ts` registers them asynchronously
+  after boot: 31 lazy chunks totalling 51 KB gzipped, none of them eager.
+  Anything unregistered falls through the library's own try/catch and renders
+  as plain monospace, which is what an unknown fence always did. **Measure the
+  built chunks before and after** — splitting `lib/transport.ts` out looked
+  like the same kind of win and made the eager bundle *larger*, because
+  `@ai-sdk/react` already pulls that graph and Turbopack duplicated it.
+- **react-markdown memoizes nothing.** It runs remark-parse → remark-gfm →
+  remark-rehype → element creation inside its own render, measured at 2.4 ms
+  for a 17 KB answer, and an inline `components` object guaranteed a fresh
+  subtree on top. The transcript re-renders on every streamed token, so a long
+  thread spent tens of milliseconds per token re-parsing messages nobody had
+  touched. `Markdown` is `memo`'d on its only prop and the component map is
+  hoisted to module scope; a finished message now parses exactly once.
+- **Content-hashed assets were being revalidated on every load.** Workers
+  Assets serves everything `max-age=0, must-revalidate` by default, so all
+  nine entry scripts made a conditional round trip before hydration for bytes
+  the browser already had. `/_next/static/*` is immutable by construction —
+  the hash is in the filename — and now says so in `public/_headers`. Scoped
+  to that directory on purpose: the HTML must keep revalidating or a deploy
+  never reaches anyone holding a cached page.
+- **Refresh the rail on what actually changed, not on the sync status.**
+  Status settles on every reconciliation and most apply nothing; a streaming
+  turn wrote about every five seconds, so watching it re-read the whole
+  conversations table and replaced the array — re-rendering the entire rail —
+  several times per answer to learn nothing had changed. The delta now returns
+  the changed thread rows themselves and `applyDelta` patches them into the
+  list, so a refresh costs one map write per moved thread and no query at all.
 - **A revision must be allocated by the database, not derived from a read.**
   `push` computed `state.rev + 1` from a row read earlier in the request, so
   two devices pushing at once both wrote the same revision — and a third
@@ -348,22 +489,28 @@ invoking a Worker.
   never asked for the second batch again. `UPDATE … RETURNING rev` is the fix.
   Realtime is what turned this from theoretical into routine, because it made
   two devices online at the same time the normal case.
-- **`PAGE_SIZE` must stay strictly greater than `MAX_PUSH_RECORDS`.** The pull
-  cursor advances to the last row's revision, so every record sharing a
-  revision has to fit in one page or the remainder is skipped permanently.
+- **A short page is not the last page.** `PAGE_SIZE > MAX_PUSH_RECORDS` is
+  retired with the cursor it protected, but the shape of that bug came back
+  immediately in a new form: the server ends a message page early when the
+  payloads reach its byte budget, so a page of 12 rows out of a 200-row limit
+  is routine on a thread of long answers. Paging is therefore resumed from the
+  last `seq` seen, never from an offset or a row count — the two limits
+  disagree and only `seq` satisfies both.
 - **Never echo a revision to the device that caused it.** The hub fans out to
   every socket; before the connection-id tag, a device pushing mid-stream woke
   itself, found the rows its own 1.2s snapshot had just re-dirtied, pushed
   again, and looped at round-trip speed.
-- **A pull is invisible until something re-reads it.** `applyRecords` writes
-  straight into Dexie, which is not React. The rail refreshed (it reloads when
-  sync settles) and the open transcript did not — which is the whole reason
-  cross-device sync looked broken while it was working perfectly. ChatView now
-  adopts remote changes, but never while busy, never twice for the same
-  version, and never when the stored copy is missing a message it is holding
-  (that means our own save is still in flight). The cost of the last guard is
+- **A remote change is invisible until something re-reads it.** The rail
+  refreshed and the open transcript did not, which is the whole reason
+  cross-device sync looked broken while it was working perfectly. ChatView
+  adopts remote changes, but never while busy or saving, never after a failed
+  save, never twice for the same version, and never when the stored copy is
+  missing a message it is holding (that means our own save is still in
+  flight). The cost of the last guard is
   that a *truncation* made elsewhere waits for a thread switch; losing a
-  locally streamed answer would be worse.
+  locally streamed answer would be worse. `pulled` now increments only when
+  the delta says the *open* thread moved — a write to some other conversation
+  must not make the transcript in front of the reader re-read itself.
 - **`saveTurn` must only rewrite what changed.** It marked the entire thread
   dirty on every save, so one turn in a fifty-message conversation queued
   fifty records — and the mid-stream snapshot did it again every 1.2s, about
@@ -374,11 +521,23 @@ invoking a Worker.
   *size* of attachments — hashing megabytes of base64 every 1.2s would cost
   more than the writes it saves, and reaching into those parts would pick up
   the very blob ids that must not count as a change.
-- **Local durability and cloud freshness are different clocks.** The snapshot
-  stays at 1.2s because that is what stops a closed tab losing a long answer.
-  Pushing it to D1 at the same rate is a separate question, and the answer is
-  no: `DRAFT_SYNC_MS` throttles streaming pushes to ~5s, which still reads as
-  live on another device for a tenth of the writes.
+- **Local durability and cloud freshness used to be different clocks; now
+  there is one.** The 1.2s snapshot existed so a closed tab could not lose a
+  long answer to IndexedDB, and `DRAFT_SYNC_MS` throttled the *cloud* push to
+  ~5s on top of it. With no local store the throttle carries the durability
+  itself, so the shape changed: the first checkpoint of a turn is written
+  immediately (`lastDraftRef` is reset by every settled save) and only the
+  ones after it are throttled. Closing the tab early costs about a second of
+  an answer; closing it late costs at most five. ChatView still ticks at 1.2s
+  and `saveTurn` decides whether that tick becomes a request.
+- **A streaming checkpoint and the final save must never race.** Sealing and
+  R2 spill uploads are asynchronous, so starting the final save second did not
+  guarantee it reached D1 second. One older half-answer landed last, gained the
+  newest revision, and realtime correctly pulled the regression over the
+  complete in-memory text. `saveTurn` now serializes writes per thread;
+  `onFinish` synchronously closes the draft gate; ChatView defers remote reads
+  while a save is pending or failed; and local commits advance `revRef` so this
+  device does not classify its own checkpoints as remote edits.
 - **The 128KB record cap is really ~90KB of text.** `sealRecord` base64s the
   ciphertext, a 4/3 expansion on top of JSON escaping, so a long reasoning
   answer overflowed it — and because one rejected batch throws, a single
@@ -439,6 +598,46 @@ invoking a Worker.
 - **Don't put `overflow-*` on a row that hosts a dropdown.** A scroll
   container clips in *both* axes, so a menu anchored `bottom-full` is
   silently swallowed — it looks exactly like a dead click.
+- **Some models answer on the reasoning channel.** Kimi K2.5 does it
+  routinely: the whole reply streams as reasoning tokens and content never
+  opens (OpenRouterTeam/ai-sdk-provider#426 — the provider relays it
+  faithfully, so it is ours to handle). The transcript showed "Thought for
+  40s" over nothing, with the answer folded inside the collapsed trace.
+  `promoteReasoningAnswer` in `lib/messages.ts` moves the trace into a text
+  part when a turn *finished normally* with reasoning and no text — never on
+  `length`, `error`, `tool-calls`, an abort, or a stream that never reached
+  its finish, where the trace is a half-thought. It runs in three places that
+  must stay in agreement: ChatView's `onFinish` (so the saved turn is right),
+  MessageBubble's render (for turns saved before it existed), and
+  `messagesForTextModel` (so the next request carries the answer as assistant
+  text instead of reasoning many models strip). The flight recorder marks it
+  (`answerInReasoning`). While any model thinks, the newest two lines of the
+  trace show under the header, so a long think never reads as a hang.
+- **The provider drops reasoning once content opens — even a lone newline.**
+  `@openrouter/ai-sdk-provider` stops emitting reasoning at the first truthy
+  `delta.content`, and some models send `"\n\n"` mid-thought. The header
+  flipped to "Thought for 0.7s", the trace froze, and the model went on
+  thinking invisibly. `lib/reasoning-stream.ts` runs over `fullStream` with
+  `includeRawChunks`: raw chunks arrive *ahead of* the parts derived from
+  them, so reasoning the provider is about to discard is re-emitted as its own
+  part — only after the provider has opened a text part, or it would double.
+  The UI side of the same rule: whitespace is never "the answer started", and
+  the thinking header stays live while any reasoning part is `streaming`.
+  "Thought for" spans first reasoning token to last. Tested in
+  `tests/reasoning-stream.test.ts`; if the provider is upgraded, re-check
+  whether it still drops late reasoning before deleting this.
+- **Nested GlideMenus must ignore each other's rows.** A row menu inside the
+  rail is a GlideMenu inside a GlideMenu, and pointer events bubble — the
+  rail's highlight slid behind the popover to the hovered item's height. A
+  menu only tracks rows whose nearest `[data-glide-menu]` is itself.
+- **Favicons are cached by site, not by URL query.** After the mark changed,
+  browsers that had the create-next-app default kept showing it, because the
+  `app/icon.*` convention only changes a query string. Icons live at
+  versioned paths in `public/brand/` and are declared in `layout.tsx`
+  metadata; bump the `-v` suffix whenever the mark changes.
+- **`0 && …` renders a literal 0.** The status strip printed a stray "0" for a
+  thread whose cost and tokens were both zero. Coerce with `Boolean()` when
+  the left side is a number.
 - **A turn can end with nothing to show and no tag on it.** `onFinish`
   attaches the `data-requestStatus` part, but it never runs when the tab is
   closed or reloaded mid-answer. `lib/messages.ts` holds the shared predicates
@@ -458,8 +657,18 @@ invoking a Worker.
   selected by double-click looked like a band of grey around the words.
 - **No focus ring on text fields.** The caret is the affordance; a box around
   the borderless composer textarea reads as a stray outline.
-- **The rail shares the transcript's ground.** Glass is for things that
-  float; `bg-surface` on a pinned sidebar reads as a different application.
+- **The rail sits on the page; the chat window is the lifted surface.** A
+  card around the rail as well made two competing windows, and glass on a
+  pinned sidebar reads as a different application.
+- **Hidden controls must not reserve space.** The user bubble's hover
+  actions sit absolutely in the row gap; reserving a line for them pushed
+  every answer a full row away from its question.
+- **The front door is the whole page.** Sign-in, unlock and connect-a-key
+  render in `components/settings/FrontDoor.tsx` with no rail and no status
+  strip — the shell used to render around them, offering "new chat" and a
+  model switcher that did nothing until the gate was passed. The inner gates
+  carry "signed in as … · Sign out" in the footer, because the account
+  button is not there to do it.
 - **Validate model ids against the *catalog*, not against intuition.**
   `MODEL_ID_PATTERN` has to accept everything `/api/models` will offer, or the
   switcher lists models the route then 400s on. OpenRouter publishes floating
@@ -472,9 +681,11 @@ invoking a Worker.
   prefers the upstream body over the SDK's generic message for the same
   reason — "insufficient credits" is actionable, "Failed after 3 attempts"
   is not.
-- **Never put the user's key in a field yourself, and never in Dexie.**
-  It is device-local in `localStorage` precisely because Dexie is what gets
-  synced in step 2; a key in a synced table is a key in someone's cloud.
+- **Never put the user's key in a field yourself, and never on disk.**
+  It lived in `localStorage` while sync was optional, on the reasoning that a
+  key in a synced table is a key in someone's cloud. That reasoning inverted
+  once the settings blob became ciphertext the server cannot read: the safe
+  place is the sealed blob, and the unsafe place is the disk.
 - **`DirectChatTransport` looks like the answer and isn't.** AI SDK v7 ships
   one, but its generic is `UIMessage<unknown, never, …>` — the `never` is the
   data-parts slot, and this app has two (`data-image`, `data-requestStatus`).
@@ -532,52 +743,115 @@ invoking a Worker.
   `BLOB_PUBLIC_ORIGIN`, which removes Worker invocations for ciphertext reads.
   Google intentionally remains a disabled placeholder. ·
   **12 sync economics + documents ✓** (write amplification removed, oversized
-  payloads spill to R2, PDF input via OpenRouter's file-parser). Next product
-  work: sub-agent delegation and per-thread temperature (the wire already
-  carries it).
+  payloads spill to R2, PDF input via OpenRouter's file-parser) ·
+  **13 cloud-first ✓** (Dexie and `lib/sync.ts` deleted, typed `thread` /
+  `message` tables replace the opaque record store, five REST endpoints
+  replace pull/push, forced login, every preference moved into the sealed
+  settings blob, one localStorage key left). ·
+  **14 interface pass ✓** (Beautiful UI's structure in a monochrome palette:
+  solid hairlines and layered shadows, flush rail and lifted chat window,
+  gliding highlights, pixel-grid loaders, full-page front door, greeting
+  empty state with a docked composer, source chips, selection quoting). Next product work: sub-agent
+  delegation and per-thread temperature (the wire already carries it).
 ## Design system (the law)
 
 **Strictly black, white, neutral gray interface chrome — both themes, no
-accent color.** State is shown by **inversion** (filled contrast-swapped
-element), not color. Syntax highlighting is the sole functional exception.
-No default shadcn look, no purple gradients, no generic dark+neon SaaS
-aesthetic.
+accent color.** Every token has zero chroma. State is shown by **fill**:
+a binary switch that is on (web search, a conversation prompt, the send
+button) is an **inversion** — a filled, contrast-swapped block; a selection
+among peers (the open thread, a segmented option, the effort menu) is a
+**quiet fill or a lifted thumb**, because a permanently inverted block would
+be the loudest thing on screen. Syntax highlighting is the sole functional
+exception to monochrome. No default shadcn look, no purple gradients, no
+generic dark+neon SaaS aesthetic.
 
-- Dark: bg `#0A0A0A` · surface `rgba(255,255,255,0.06)` + blur 20px ·
-  fg `#F5F5F5` · muted `#8A8A8A` · hairline `rgba(255,255,255,0.10)` (1px
-  max) · invert = `#FFF` fill / `#0A0A0A` text.
-- Light: bg `#FAFAFA` · surface `rgba(0,0,0,0.04)` + blur 20px ·
-  fg `#0A0A0A` · muted `#8A8A8A` (same both themes) · hairline
-  `rgba(0,0,0,0.10)` · invert = `#0A0A0A` fill / `#FAFAFA` text.
+The structure — solid hairlines, a layered shadow scale, tight radii, strong
+ease-out curves, gliding highlights — is adapted from **Beautiful UI**
+(beautifului.dev, MIT, © 2026 Shane Levine). Its palette is not: it tints
+neutrals blue and keeps a blue accent, and both were dropped. It is a
+reference, not a dependency — its components pull in `clsx`,
+`tailwind-merge`, `class-variance-authority`, `iconoir-react` and a paid
+icon set, and none of those were added. Ported pieces carry an attribution
+comment.
+
+- **Surfaces** (tokens in `app/globals.css`): `chrome` is the page and the
+  rail sits directly on it; `background` is the chat window, the one lifted
+  surface (`shadow-window`); `panel` is every solid floating surface —
+  composer, menus, dialogs, cards; `field` is inputs and the user's own
+  bubble; `hover` / `hover-2` are translucent row fills. Dark: chrome
+  `#0E0E0E` · window `#141414` · panel `#1A1A1A` · field `#1F1F1F` · line
+  `#242424` · fg `#F2F2F2` · muted `#878787`. Light: chrome `#F1F1F1` ·
+  window `#FCFCFC` · panel `#FFF` · field `#F4F4F4` · line `#E8E8E8` · fg
+  `#111` · muted `#767676`. Muted differs per theme on purpose: it carries
+  small mono metadata and has to clear ~4.5:1 on each window colour.
+- **Edges are solid, not alpha.** `line` / `line-strong` for dividers; the
+  `shadow-*` scale (`hairline · btn · card · raised · overlay · window`) is a
+  1px ring plus soft layered stacks. In dark mode the ring becomes a faint
+  *light* edge so it reads against the shadow. No backdrop blur on surfaces —
+  the old glass was replaced by solid panels; overlays dim with `bg-black/30`
+  and a 2px blur only.
+- **Radii:** `rounded-chip` 6 · `rounded-control` 8 · `rounded-card` 10 ·
+  `rounded-window` 14 · pills `rounded-full`. The composer (20px) and user
+  bubble (18px, 6px tail corner) are the deliberate exceptions.
 - **Type split:** Geist Mono for anything the system *measured* (model
-  slug, tok/s, latency, timestamps, reasoning trace); Geist Sans for
-  anything a person *authored* (messages, labels). Numbers/process = mono,
-  content = sans.
-- **Layout:** centered 680px column (narrower than the 760–800px default).
+  slug, tok/s, latency, timestamps, costs, reasoning trace); Geist Sans for
+  anything a person *authored* — messages, and interface labels and buttons,
+  which are sentence case ("Sign out", "Retry"). Numbers/process = mono,
+  content and controls = sans.
+- **Layout:** centered reading column (`--dial-column`, 760px by default).
   Assistant messages get **no bubble** — bare text on the page. User
-  messages are the only bubbles: right-aligned glass pill, 14px radius.
-  This asymmetry is deliberate.
+  messages are the only bubbles, right-aligned. This asymmetry is deliberate.
 - **Signature control:** the sticky top "tuner strip" — model switcher
-  styled as a channel/frequency readout, not a dropdown. Its select
-  animation (damped ~200ms ease-out with slight overshoot, a filled block
-  inverting into place) is the one place motion may be expressive.
+  styled as a channel readout, not a dropdown. Its palette select animation
+  (damped ~200ms with slight overshoot, a filled block inverting into place)
+  is the one place motion may be expressive.
+- **One highlight per list.** Menus, the rail and the palette use
+  `components/ui/GlideMenu.tsx`: a single fill glides between rows instead
+  of each row painting its own hover. Geometry is written to the DOM, never
+  React state — a pointer crossing a long rail must not re-render it.
 - **Code gets restrained semantic color.** `lib/syntax.ts` uses low-chroma,
   theme-aware token colors while the surrounding interface remains neutral.
-  Every fenced block can collapse independently from its language header.
-  Focus rings and `::selection` are hairline/inversion, not the browser's blue.
+  Every fenced block collapses from its header, which shows the language and
+  a labelled Copy. `::selection` is a gray tint (`--selection`), not the
+  browser's blue and not a full inversion — an inverted block across a long
+  selection was the heaviest thing on the page and flattened code colours.
+  Keyboard focus is a visible 1.5px `muted` outline offset 2px; text fields
+  are the exception (the caret is the affordance).
+- **Work with no progress to show** gets `components/ui/Loader.tsx`: a 3×3
+  pixel grid with a chevron wavefront, a shimmering label, and a live mono
+  timer anchored to a real start time. Used for the gap before the first
+  token, live thinking, image renders, and session resolution.
 - **Motion elsewhere is quiet:** messages fade + 4px slide-up 150ms;
-  streaming = opacity ramp per chunk (no blinking caret, no typewriter);
-  always respect `prefers-reduced-motion`.
-- **Theme toggle** swaps instantly — no cross-fade.
+  popovers pop in from their anchor (scale 0.96 → 1, 160–200ms, strong
+  ease-out); presses scale to 0.97. Streaming shows **one small breathing
+  mark at the live edge** of the last paragraph — solid, not blinking, and
+  not a caret (nothing is being typed); no typewriter. Always respect
+  `prefers-reduced-motion`.
+- **Theme toggle** swaps instantly — no cross-fade. `color-scheme` follows
+  the theme so native controls (date picker, autofill) match.
 
 ## Hard constraints / non-goals
 
 - **Repealed (was a v1 non-goal):** no auth, no server storage, no sync.
-  All three now exist. Dexie remains the source of truth and cloud sync is a
-  replica of it — never the other way round.
-- **Cloud sync is optional and must stay optional.** The app is fully usable
-  with no account; the vault adds durability and a second device. Anything
-  that turns it into a login wall is a regression.
+  All three now exist.
+- **Repealed (was the v3 law):** "Dexie remains the source of truth and cloud
+  sync is a replica of it — never the other way round." The inversion is the
+  whole of phase 13. **D1 is the source of truth**; the browser holds the open
+  thread and the sidebar in memory and nothing on disk. Reintroducing a local
+  copy of conversations would reintroduce the reconciliation problem that
+  caused three separate data-loss bugs, and it is a regression.
+- **Repealed (was a v3 non-goal):** "Cloud sync is optional and must stay
+  optional… anything that turns it into a login wall is a regression." It is
+  a login wall now, deliberately. There is no local store to fall back on, so
+  an unauthenticated visitor has no app to show.
+- **The browser stores exactly three kinds of things, and none of them is a
+  conversation.** One `localStorage` key (`dial:appearance` — appearance,
+  rail geometry, and the non-sensitive remember/lock preference), an optional
+  account-scoped IndexedDB record (the non-extractable vault key, because no
+  other web storage can hold one safely), and the Cache API copy of
+  OpenRouter's public model catalog. Adding a fourth
+  needs a reason that survives the question "what happens when this disagrees
+  with the server?"
 - **Never widen `run_worker_first` beyond `/v1/*`.** Static asset requests
   are free and do not invoke the Worker. Widening that glob puts every page
   load onto the billable path.

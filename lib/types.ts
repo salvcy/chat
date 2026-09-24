@@ -196,6 +196,12 @@ export type DialMetadata = {
   costUsd?: number;
   /** Why generation stopped: "stop" | "length" | "tool-calls" | … */
   finishReason?: string;
+  /**
+   * The model delivered its answer on the reasoning channel and nothing on
+   * the content channel, so the trace was promoted to the answer. Recorded
+   * so the flight recorder can say so rather than pretend it streamed text.
+   */
+  answerInReasoning?: boolean;
   /** Reasoning effort the request was sent with, for provenance. */
   effort?: ReasoningEffort;
   /** Whether web search was armed for this turn. */

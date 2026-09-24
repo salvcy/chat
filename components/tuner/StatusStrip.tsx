@@ -23,6 +23,9 @@ export default function StatusStrip({
   threadTokens,
   onOpenPalette,
   onOpenSidebar,
+  onNewChat,
+  onRailCollapse,
+  onTheme,
 }: {
   title?: string;
   model: string;
@@ -33,6 +36,12 @@ export default function StatusStrip({
   threadTokens: number | undefined;
   onOpenPalette: () => void;
   onOpenSidebar: () => void;
+  /** Phones have no rail on screen, so the header carries "new chat". */
+  onNewChat: () => void;
+  /** Rail collapse travels with the account, so it is persisted upward. */
+  onRailCollapse: (collapsed: boolean) => void;
+  /** So does the theme. */
+  onTheme: (theme: "light" | "dark") => void;
 }) {
   /**
    * Tagged with the key it describes. Disconnecting must not leave the
@@ -66,42 +75,48 @@ export default function StatusStrip({
         : null;
 
   return (
-    <header className="flex h-[58px] shrink-0 items-center gap-2 border-b border-hairline px-3 sm:px-4">
-      <RailToggle />
+    <header className="flex h-12 shrink-0 items-center gap-1 border-b border-line px-2 sm:px-2.5">
+      <RailToggle onCommit={onRailCollapse} />
       <button
         onClick={onOpenSidebar}
         aria-label="Conversations"
-        className="flex h-8 w-8 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface hover:text-foreground md:hidden"
+        className="flex size-8 items-center justify-center rounded-control text-muted transition-colors hover:bg-hover-2 hover:text-foreground md:hidden"
       >
         <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
-          <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11" />
+          <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h7" />
         </svg>
       </button>
 
-      <div className="flex min-w-0 items-center gap-2.5">
+      <div className="flex min-w-0 items-center gap-1.5">
         <button
           onClick={onOpenPalette}
           title="Change model (⌘K)"
-          className="group flex min-w-0 items-center gap-2 rounded-full border border-hairline bg-surface px-2.5 py-1.5 font-mono text-[10px] text-secondary transition-colors hover:border-hairline-strong hover:text-foreground"
+          className="group flex h-8 min-w-0 items-center gap-2 rounded-control px-2 font-mono text-[12px] text-secondary transition-[background-color,color,transform] duration-150 hover:bg-hover-2 hover:text-foreground active:scale-[0.98]"
         >
-          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-foreground/55" />
-          <span className="max-w-40 truncate">
+          <span aria-hidden className="relative flex size-2 shrink-0 items-center justify-center">
+            <span className="absolute size-2 rounded-full bg-foreground/15" />
+            <span className="size-1 rounded-full bg-foreground/80" />
+          </span>
+          <span className="max-w-44 truncate">
             {ready ? shortModelId(model) : ""}
           </span>
-          <svg viewBox="0 0 12 12" className="h-2.5 w-2.5 shrink-0 text-muted transition-transform group-hover:translate-y-px" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
+          <svg viewBox="0 0 12 12" className="h-3 w-3 shrink-0 text-muted transition-transform duration-200 group-hover:translate-y-px" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
             <path d="m3.25 4.75 2.75 2.5 2.75-2.5" />
           </svg>
         </button>
 
-        <span className="hidden h-4 w-px bg-hairline sm:block" />
-        <p className="hidden max-w-[32vw] truncate text-[12px] text-secondary sm:block">
+        <span className="hidden h-4 w-px shrink-0 bg-line sm:block" />
+        <p className="hidden min-w-0 max-w-[36vw] truncate px-1.5 text-[13px] text-secondary sm:block">
           {title || "New conversation"}
         </p>
       </div>
 
-      <div className="ml-auto flex shrink-0 items-center gap-1.5">
-        {(threadCostUsd || threadTokens) && (
-          <div className="hidden items-center gap-2 rounded-full border border-hairline px-2.5 py-1.5 font-mono text-[9px] text-muted md:flex">
+      <div className="ml-auto flex shrink-0 items-center gap-1">
+        {Boolean(threadCostUsd || threadTokens) && (
+          <div
+            className="hidden items-center gap-1.5 px-2 font-mono text-[11px] tabular-nums text-muted md:flex"
+            title="This conversation's total cost and tokens"
+          >
             {threadCostUsd ? <span>{formatCost(threadCostUsd)}</span> : null}
             {threadCostUsd && threadTokens ? <span className="opacity-40">·</span> : null}
             {threadTokens ? <span>{formatTokens(threadTokens)} tok</span> : null}
@@ -109,13 +124,24 @@ export default function StatusStrip({
         )}
         {credit && (
           <span
-            className="hidden px-1.5 font-mono text-[9px] text-muted lg:block"
+            className="hidden rounded-full bg-hover px-2 py-0.5 font-mono text-[10.5px] tabular-nums text-muted lg:block"
             title="OpenRouter account usage"
           >
             {credit}
           </span>
         )}
-        <ThemeToggle />
+        <button
+          onClick={onNewChat}
+          aria-label="New chat"
+          title="New chat"
+          className="flex size-8 items-center justify-center rounded-control text-muted transition-[background-color,color,transform] duration-150 hover:bg-hover-2 hover:text-foreground active:scale-[0.96] md:hidden"
+        >
+          <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <path d="M11.2 2.8a1.7 1.7 0 0 1 2.4 2.4L7.4 11.4l-3.1.8.8-3.1Z" />
+            <path d="M13 9.5V13a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h3.5" />
+          </svg>
+        </button>
+        <ThemeToggle onCommit={onTheme} />
       </div>
     </header>
   );

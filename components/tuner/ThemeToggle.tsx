@@ -2,18 +2,26 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-const KEY = "dial:theme";
-
 /**
  * Theme toggle — swaps instantly. No cross-fade: a colour transition on the
  * one control that switches the palette would undercut "no colour, ever"
- * everywhere else. Persisted; the boot script in layout.tsx applies it
- * before paint so there's no flash.
+ * everywhere else.
+ *
+ * The choice travels with the account, so it is reported upward rather than
+ * written here; `lib/session.ts` persists it to the sealed blob and mirrors
+ * it to `dial:appearance` for the pre-paint script. It used to write
+ * `dial:theme` directly, which quietly disagreed with the `theme` field the
+ * settings panel wrote — two keys for one preference, and whichever ran last
+ * won.
  *
  * Also listens for `dial:toggle-theme` so the command palette can drive it
  * without lifting theme state into the shell.
  */
-export default function ThemeToggle() {
+export default function ThemeToggle({
+  onCommit,
+}: {
+  onCommit: (theme: "light" | "dark") => void;
+}) {
   const [dark, setDark] = useState(true);
 
   useEffect(() => {
@@ -36,15 +44,12 @@ export default function ThemeToggle() {
     );
     document.head.appendChild(style);
     root.classList.toggle("dark", next);
-    try {
-      localStorage.setItem(KEY, next ? "dark" : "light");
-    } catch {
-      // Storage disabled — the theme just won't survive a reload.
-    }
+    root.dataset.themeChoice = next ? "dark" : "light";
+    onCommit(next ? "dark" : "light");
     requestAnimationFrame(() => {
       requestAnimationFrame(() => style.remove());
     });
-  }, []);
+  }, [onCommit]);
 
   useEffect(() => {
     const handler = () => toggle();
@@ -54,7 +59,7 @@ export default function ThemeToggle() {
 
   return (
     <button
-      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface-strong hover:text-foreground"
+      className="flex size-8 shrink-0 items-center justify-center rounded-control text-muted transition-[background-color,color,transform] duration-150 hover:bg-hover-2 hover:text-foreground active:scale-[0.96]"
       onClick={toggle}
       aria-label={dark ? "Switch to light theme" : "Switch to dark theme"}
       title={dark ? "Light theme" : "Dark theme"}

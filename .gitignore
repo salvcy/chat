@@ -53,3 +53,9 @@ client_secret_*.json
 
 # worker has its own dependency tree
 worker/node_modules
+
+# D1 dumps. These contain Better Auth password hashes and live session
+# tokens alongside every account's ciphertext — a backup is not a build
+# artifact and must never reach the repo.
+/.backups
+sync-audit.js

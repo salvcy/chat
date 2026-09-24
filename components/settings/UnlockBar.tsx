@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { motion } from "motion/react";
+import Button from "@/components/ui/Button";
+import { GateCard } from "./FrontDoor";
 
 /**
  * Shown when someone is signed in but this device cannot read their history.
@@ -18,9 +19,11 @@ import { motion } from "motion/react";
  */
 export default function UnlockBar({
   email,
+  rememberDeviceKey,
   onUnlock,
 }: {
   email: string;
+  rememberDeviceKey: boolean;
   onUnlock: (password: string) => Promise<void>;
 }) {
   const [password, setPassword] = useState("");
@@ -44,52 +47,76 @@ export default function UnlockBar({
   };
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: -4 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.15, ease: "easeOut" }}
-      className="shrink-0 border-b border-hairline bg-surface px-4 py-3 sm:px-7"
-    >
-      <div className="dial-column flex flex-wrap items-center gap-x-3 gap-y-2">
-        <div className="min-w-0 flex-1">
-          <p className="font-mono text-[10px] uppercase tracking-wider text-muted">
-            locked on this device
-          </p>
-          <p className="mt-1 text-[12px] leading-relaxed text-secondary">
-            Your conversations are encrypted and this browser no longer has the
-            key. Enter your password to unlock them — nothing has been lost.
-          </p>
-        </div>
+    <GateCard>
+      <span className="flex size-9 items-center justify-center rounded-card bg-field shadow-hairline">
+        <svg viewBox="0 0 16 16" className="h-4 w-4 text-secondary" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <rect x="3" y="7" width="10" height="7" rx="1.75" />
+          <path d="M5.25 7V5a2.75 2.75 0 0 1 5.5 0v2" />
+        </svg>
+      </span>
+      <h1 className="mt-4 text-[19px] font-semibold tracking-[-0.02em] text-foreground">
+        Unlock your conversations
+      </h1>
+      <p className="mt-1 text-[13px] leading-relaxed text-secondary">
+        Your history is safe in the cloud as ciphertext. Enter the password for{" "}
+        <span className="text-foreground">{email}</span> to open it here.
+      </p>
 
-        <div className="flex shrink-0 items-center gap-2">
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => {
-              setPassword(e.target.value);
-              setError(null);
-            }}
-            onKeyDown={(e) => e.key === "Enter" && void submit()}
-            placeholder="Password"
-            autoComplete="current-password"
-            aria-label={`Password for ${email}`}
-            className="w-44 rounded-full border border-hairline bg-background px-3.5 py-1.5 text-[12px] text-foreground placeholder:text-muted focus:outline-none"
-          />
-          <button
-            onClick={() => void submit()}
-            disabled={!password || busy}
-            className="shrink-0 rounded-full bg-foreground px-3.5 py-1.5 font-mono text-[10px] text-background transition-opacity hover:opacity-90 disabled:opacity-30"
-          >
-            {busy ? "unlocking…" : "unlock"}
-          </button>
-        </div>
-      </div>
+      <form
+        className="mt-6 space-y-2.5"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void submit();
+        }}
+      >
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => {
+            setPassword(e.target.value);
+            setError(null);
+          }}
+          placeholder="Password"
+          autoComplete="current-password"
+          aria-label={`Password for ${email}`}
+          autoFocus
+          className="dial-input"
+        />
+        <Button
+          type="submit"
+          variant="primary"
+          size="md"
+          disabled={!password || busy}
+          className="w-full"
+        >
+          {busy ? "Unlocking…" : "Unlock"}
+        </Button>
+      </form>
 
       {error && (
-        <p className="dial-column mt-2 font-mono text-[10px] text-foreground">
+        <p
+          role="alert"
+          className="mt-3 rounded-control bg-hover px-3 py-2 text-[12.5px] leading-relaxed text-foreground"
+          style={{ animation: "dial-fade-up 200ms cubic-bezier(0.23,1,0.32,1) both" }}
+        >
           {error}
         </p>
       )}
-    </motion.div>
+
+      <p className="mt-5 flex items-start gap-2 border-t border-line pt-4 text-[11.5px] leading-relaxed text-muted">
+        <span
+          aria-hidden="true"
+          className={`mt-[5px] size-1.5 shrink-0 rounded-full ${
+            rememberDeviceKey ? "bg-foreground" : "border border-foreground"
+          }`}
+        />
+        <span>
+          {rememberDeviceKey
+            ? "This browser will keep a non-exportable unlock key after you sign in."
+            : "High privacy is on — this browser locks again after a refresh."}{" "}
+          You can change this in settings.
+        </span>
+      </p>
+    </GateCard>
   );
 }

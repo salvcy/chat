@@ -12,14 +12,16 @@ import MessageActions from "./MessageActions";
 import Metrics from "./Metrics";
 import ThinkingPanel from "./ThinkingPanel";
 import type { DialMessage } from "@/lib/conversations";
-import { textOf } from "@/lib/db";
+import { textOf } from "@/lib/store";
 import { dedupeSources } from "@/lib/sources";
 import {
   hasRenderableResponse,
   inferRequestStatus,
+  promoteReasoningAnswer,
   streamNeverFinished,
 } from "@/lib/messages";
 import type { GeneratedImageData, RequestStatusData } from "@/lib/types";
+import Button from "@/components/ui/Button";
 
 /** New messages: fade + 4px slide-up, 150ms ease-out. */
 const enter = {
@@ -56,18 +58,22 @@ function RequestStatusLine({
   onRetry?: () => void;
 }) {
   return (
-    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
-      <p role="status" className="text-[13px] italic leading-relaxed text-muted">
+    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+      <p role="status" className="flex items-center gap-2 text-[13.5px] leading-relaxed text-muted">
+        <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" aria-hidden>
+          <circle cx="8" cy="8" r="5.75" />
+          <path d="M8 5v3.25M8 10.75v.01" />
+        </svg>
         {text}
       </p>
       {onRetry && (
-        <button
-          type="button"
-          onClick={onRetry}
-          className="rounded-full border border-hairline px-2 py-0.5 font-mono text-[10px] text-muted transition-colors hover:bg-surface hover:text-foreground"
-        >
-          retry
-        </button>
+        <Button variant="secondary" size="xs" onClick={onRetry}>
+          <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <path d="M13.5 8a5.5 5.5 0 1 1-1.7-4" />
+            <path d="M13.5 2.5V6H10" />
+          </svg>
+          Retry
+        </Button>
       )}
     </div>
   );
@@ -97,6 +103,8 @@ export default function MessageBubble({
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
+  /** Long pasted prompts start folded, so the answer is not a scroll away. */
+  const [unfolded, setUnfolded] = useState(false);
   const editRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -113,6 +121,8 @@ export default function MessageBubble({
 
   if (message.role === "user") {
     const text = textOf(message);
+    const long = text.length > 1400 || text.split("\n").length > 14;
+    const folded = long && !unfolded;
     const files = message.parts.filter(
       (part): part is FileUIPart => part.type === "file",
     );
@@ -126,11 +136,12 @@ export default function MessageBubble({
       };
       return (
         <motion.div {...enter} className="flex justify-end">
-          <div className="w-full max-w-[84%] sm:max-w-[78%]">
-            <div className="rounded-[20px] border border-hairline-strong bg-surface-strong px-4 py-3">
+          <div className="w-full max-w-[88%] sm:max-w-[80%]">
+            <div className="rounded-[18px] bg-panel px-4 py-3 shadow-raised">
               <textarea
                 ref={editRef}
                 value={draft}
+                aria-label="Edit message"
                 onChange={(e) => {
                   setDraft(e.target.value);
                   e.target.style.height = "0px";
@@ -146,20 +157,17 @@ export default function MessageBubble({
                 className="dial-scroll max-h-[320px] w-full resize-none bg-transparent text-[15px] leading-relaxed text-foreground outline-none"
               />
             </div>
-            <div className="mt-1.5 flex items-center justify-end gap-2 font-mono text-[10px] text-muted">
-              <span>⏎ resend · esc cancel</span>
-              <button
-                onClick={() => setEditing(false)}
-                className="rounded-md px-1.5 py-0.5 transition-colors hover:text-foreground"
-              >
-                cancel
-              </button>
-              <button
-                onClick={commit}
-                className="rounded-md bg-invert-fill px-2 py-0.5 text-invert-text"
-              >
-                resend
-              </button>
+            <div className="mt-2 flex items-center justify-end gap-1.5">
+              <span className="mr-1 hidden items-center gap-1 text-[11.5px] text-muted sm:flex">
+                <span className="dial-kbd">⏎</span> resend
+                <span className="dial-kbd ml-1.5">esc</span> cancel
+              </span>
+              <Button variant="quiet" size="xs" onClick={() => setEditing(false)}>
+                Cancel
+              </Button>
+              <Button variant="primary" size="xs" onClick={commit}>
+                Resend
+              </Button>
             </div>
           </div>
         </motion.div>
@@ -168,8 +176,8 @@ export default function MessageBubble({
 
     return (
       <motion.div {...enter} className="group flex justify-end">
-        <div className="max-w-[84%] sm:max-w-[78%]">
-          <div className="overflow-hidden rounded-[20px] rounded-br-md border border-hairline-strong bg-surface-strong">
+        <div className="relative max-w-[84%] sm:max-w-[78%]">
+          <div className="overflow-hidden rounded-[18px] rounded-br-[6px] bg-field shadow-hairline">
             {files.length > 0 && (
               <div
                 className={`grid gap-1.5 p-1.5 ${
@@ -185,23 +193,23 @@ export default function MessageBubble({
                       alt={file.filename ?? `Attachment ${index + 1}`}
                       width={320}
                       height={220}
-                      className="max-h-56 w-full rounded-[15px] object-cover"
+                      className="max-h-56 w-full rounded-[13px] object-cover"
                     />
                   ) : file.url ? (
                     <div
                       key={`${file.url.slice(0, 40)}-${index}`}
                       title={file.filename ?? undefined}
-                      className="flex items-center gap-2.5 rounded-xl border border-hairline bg-background/35 px-3 py-2.5 text-muted"
+                      className="flex items-center gap-2.5 rounded-card bg-panel px-3 py-2.5 text-muted shadow-hairline"
                     >
                       <FileGlyph kind={file.mediaType} className="shrink-0" />
-                      <span className="min-w-0 truncate font-mono text-[10px]">
+                      <span className="min-w-0 truncate font-mono text-[11px]">
                         {file.filename ?? "attachment"}
                       </span>
                     </div>
                   ) : (
                     <div
                       key={`missing-${index}`}
-                      className="rounded-xl border border-hairline bg-background/35 px-3 py-2 font-mono text-[10px] text-muted"
+                      className="rounded-card bg-panel px-3 py-2 font-mono text-[11px] text-muted shadow-hairline"
                     >
                       attachment unavailable on this device
                     </div>
@@ -215,14 +223,36 @@ export default function MessageBubble({
                  padded paragraph's line boxes begin 16px before the first
                  character and end 16px past the last — so selecting a message
                  painted a band of empty space all around it. */
-              <div className="px-4 py-3">
-                <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-foreground">
+              <div className="px-4 py-2.5">
+                <p
+                  className={`whitespace-pre-wrap text-[15px] leading-relaxed text-foreground ${
+                    folded
+                      ? "max-h-[13.5em] overflow-hidden [mask-image:linear-gradient(to_bottom,#000_65%,transparent)]"
+                      : ""
+                  }`}
+                >
                   {text}
                 </p>
+                {long && (
+                  <button
+                    type="button"
+                    onClick={() => setUnfolded((open) => !open)}
+                    aria-expanded={!folded}
+                    className="-mb-1 -ml-1.5 mt-1 flex h-6 items-center gap-1 rounded-chip px-1.5 text-[12px] font-medium text-muted transition-colors hover:bg-hover-2 hover:text-foreground"
+                  >
+                    {folded ? "Show more" : "Show less"}
+                    <svg viewBox="0 0 12 12" className={`h-2.5 w-2.5 transition-transform duration-200 ${folded ? "" : "rotate-180"}`} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                      <path d="m3.25 4.75 2.75 2.5 2.75-2.5" />
+                    </svg>
+                  </button>
+                )}
               </div>
             )}
           </div>
-          <div className="mt-1 flex items-center justify-end gap-1">
+          {/* Hung in the row gap rather than below the bubble: reserving a
+              line for controls that are invisible until hover pushed every
+              answer a full row further from its question. */}
+          <div className="absolute right-0 top-full z-10 mt-1 flex items-center justify-end gap-1">
             <MessageActions
               text={text}
               align="right"
@@ -242,11 +272,23 @@ export default function MessageBubble({
   }
 
   if (message.role !== "assistant") return null;
+  // Turns saved before reasoning-channel answers were promoted at finish:
+  // show the reply where a reader expects it rather than inside the trace.
+  if (!streaming) {
+    const promoted = promoteReasoningAnswer(message);
+    if (promoted) message = promoted;
+  }
 
   /* ---------------------------- assistant ----------------------------- */
 
+  // Whitespace is not an answer: some models emit a bare newline mid-think.
   const answerStarted = message.parts.some(
-    (p) => p.type === "text" && p.text.length > 0,
+    (p) => p.type === "text" && p.text.trim().length > 0,
+  );
+  // Reasoning can resume after the answer has begun; while a reasoning part
+  // is still open, the model is thinking, whatever came before it.
+  const reasoningOpen = message.parts.some(
+    (p) => p.type === "reasoning" && p.state === "streaming",
   );
   const sources = dedupeSources(
     message.parts.filter(
@@ -298,13 +340,19 @@ export default function MessageBubble({
   const isDeadEnd = untaggedDeadEnd || requestStatus !== undefined;
 
   return (
-    <motion.div {...enter} className="group max-w-full pb-1">
+    <motion.div
+      {...enter}
+      data-selectable="assistant"
+      className={`group max-w-full pb-1 ${streaming ? "dial-streaming" : ""}`}
+    >
       <ThinkingPanel
         reasoning={reasoning}
         sources={sources}
         thinkingMs={message.metadata?.thinkingMs}
+        startedAt={message.metadata?.startedAt}
         streaming={streaming}
         answerStarted={answerStarted}
+        reasoningOpen={reasoningOpen}
       />
 
       {message.parts.map((part, i) => {
@@ -338,7 +386,7 @@ export default function MessageBubble({
 
       <Citations sources={sources} />
 
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex min-h-8 items-center justify-between gap-3">
         {!hasGeneratedImage && !isDeadEnd && (
           <Metrics meta={message.metadata} streaming={streaming} />
         )}

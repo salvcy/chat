@@ -46,6 +46,7 @@ export default function Composer({
   onAttachFiles,
   onRemoveAttachment,
   onHeightSettled,
+  focusToken = 0,
 }: {
   input: string;
   setInput: (v: string) => void;
@@ -68,6 +69,8 @@ export default function Composer({
   onRemoveAttachment: (index: number) => void;
   /** Re-anchor the transcript after textarea auto-sizing has finished. */
   onHeightSettled?: () => void;
+  /** Bumped by the parent to put the caret at the end of the field. */
+  focusToken?: number;
 }) {
   const canSend =
     !busy &&
@@ -91,6 +94,14 @@ export default function Composer({
     void document.fonts?.ready.then(fit).catch(() => {});
     return () => cancelAnimationFrame(raf);
   }, [input, onHeightSettled]);
+
+  useEffect(() => {
+    if (!focusToken) return;
+    const el = taRef.current;
+    if (!el) return;
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+  }, [focusToken]);
 
   const caps = capabilitiesFor(settings.model, models);
   const entry = modelFor(settings.model, models);
@@ -118,11 +129,18 @@ export default function Composer({
     requestAnimationFrame(() => taRef.current?.focus());
   };
 
+  const pill = (on: boolean) =>
+    `flex h-8 items-center gap-1.5 rounded-full px-2.5 text-[12.5px] font-medium transition-[background-color,color,transform] duration-150 active:scale-[0.97] disabled:pointer-events-none disabled:opacity-35 ${
+      on
+        ? "bg-foreground text-background"
+        : "text-secondary hover:bg-hover-2 hover:text-foreground"
+    }`;
+
   return (
     <div className="px-3 pb-3 pt-2 sm:px-5">
       <div
-        className={`composer-surface relative rounded-[22px] border backdrop-blur-[28px] transition-colors ${
-          dragging ? "border-hairline-strong bg-surface-strong" : "border-hairline-strong"
+        className={`composer-surface relative rounded-[20px] ${
+          dragging ? "bg-field" : ""
         }`}
         onDragEnter={(e) => {
           e.preventDefault();
@@ -143,18 +161,19 @@ export default function Composer({
         }}
       >
         {dragging && (
-          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-[22px] bg-panel/90 font-mono text-[11px] text-secondary backdrop-blur-sm">
-            drop images here
+          <div className="pointer-events-none absolute inset-1.5 z-10 flex items-center justify-center rounded-[15px] border border-dashed border-line-strong bg-panel/90 text-[13px] font-medium text-secondary backdrop-blur-sm">
+            Drop images or PDFs
           </div>
         )}
 
         {attachments.length > 0 && (
-          <div className="flex gap-2 overflow-x-auto px-3.5 pt-3.5">
+          <div className="flex gap-2 overflow-x-auto px-3 pt-3">
             {attachments.map((file, index) => (
               <div
                 key={`${file.url.slice(0, 40)}-${index}`}
                 title={file.filename ?? undefined}
-                className="group/file relative h-16 w-16 shrink-0 overflow-hidden rounded-xl border border-hairline bg-surface"
+                className="group/file relative h-16 w-16 shrink-0 overflow-hidden rounded-card bg-field shadow-hairline"
+                style={{ animation: "dial-pop-in 200ms cubic-bezier(0.23,1,0.32,1) both" }}
               >
                 {file.mediaType.startsWith("image/") ? (
                   <Image
@@ -175,9 +194,11 @@ export default function Composer({
                   type="button"
                   onClick={() => onRemoveAttachment(index)}
                   aria-label={`Remove ${file.filename ?? "attachment"}`}
-                  className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-background/90 text-[11px] text-foreground opacity-0 shadow-sm backdrop-blur transition-opacity group-hover/file:opacity-100 focus-visible:opacity-100"
+                  className="absolute right-1 top-1 flex size-5 items-center justify-center rounded-full bg-panel/95 text-foreground opacity-0 shadow-btn transition-opacity group-hover/file:opacity-100 focus-visible:opacity-100"
                 >
-                  ×
+                  <svg viewBox="0 0 16 16" className="h-2.5 w-2.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+                    <path d="m4 4 8 8M12 4l-8 8" />
+                  </svg>
                 </button>
               </div>
             ))}
@@ -186,7 +207,7 @@ export default function Composer({
 
         <textarea
           ref={taRef}
-          className="dial-scroll max-h-[220px] min-h-[58px] w-full resize-none bg-transparent px-[18px] pt-4 text-[16px] leading-relaxed text-foreground outline-none placeholder:text-muted sm:px-5"
+          className="dial-scroll block max-h-[220px] min-h-[54px] w-full resize-none bg-transparent px-4 pt-3.5 text-[15.5px] leading-relaxed text-foreground outline-none placeholder:text-muted sm:px-[18px]"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onPaste={(e) => {
@@ -196,7 +217,7 @@ export default function Composer({
             }
           }}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
               if (showImageSuggestion) {
                 activateImageTool();
@@ -212,21 +233,22 @@ export default function Composer({
                 : "Generating — Esc to stop"
               : imageMode
                 ? "Describe an image…"
-                : "Message…"
+                : "Ask anything…"
           }
           aria-label="Message"
           rows={1}
         />
 
         {showImageSuggestion && (
-          <div className="px-2.5 pb-1">
+          <div className="px-2 pb-1">
             <button
               type="button"
               onClick={activateImageTool}
-              className="flex w-full items-center justify-between gap-4 rounded-xl border border-hairline bg-surface px-3 py-2.5 text-left transition-colors hover:border-hairline-strong hover:bg-surface-strong"
+              className="flex w-full items-center justify-between gap-4 rounded-card bg-hover px-2.5 py-2 text-left transition-colors hover:bg-hover-2"
+              style={{ animation: "dial-fade-up 200ms cubic-bezier(0.23,1,0.32,1) both" }}
             >
               <span className="flex min-w-0 items-center gap-2.5">
-                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-invert-fill text-invert-text">
+                <span className="flex size-7 shrink-0 items-center justify-center rounded-control bg-foreground text-background">
                   <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
                     <rect x="2.5" y="3" width="11" height="10" rx="2" />
                     <circle cx="10.5" cy="6" r="1" />
@@ -234,29 +256,27 @@ export default function Composer({
                   </svg>
                 </span>
                 <span className="min-w-0">
-                  <span className="block font-mono text-[11px] text-foreground">
+                  <span className="block font-mono text-[12px] text-foreground">
                     @image
                   </span>
-                  <span className="block truncate text-[11px] text-muted">
+                  <span className="block truncate text-[12px] text-muted">
                     {imageModelNote}
                   </span>
                 </span>
               </span>
-              <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-muted">
-                tool
-              </span>
+              <span className="dial-kbd">⏎</span>
             </button>
           </div>
         )}
 
         {attachmentError && (
-          <p className="px-[18px] pb-1 font-mono text-[10px] text-secondary sm:px-5">
+          <p className="px-4 pb-1 text-[12px] text-secondary sm:px-[18px]">
             {attachmentError}
           </p>
         )}
 
-        <div className="flex items-center justify-between gap-2 px-2.5 pb-2.5 pt-1">
-          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+        <div className="flex items-center justify-between gap-2 px-2 pb-2 pt-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-1">
             <input
               ref={fileRef}
               type="file"
@@ -279,11 +299,11 @@ export default function Composer({
                     ? "Attach images or PDFs"
                     : "Attach PDFs — this model does not accept images"
               }
-              aria-label="Attach images"
-              className="flex h-8 w-8 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface-strong hover:text-foreground disabled:opacity-30"
+              aria-label="Attach files"
+              className="flex size-8 items-center justify-center rounded-full text-muted transition-[background-color,color,transform] duration-150 hover:bg-hover-2 hover:text-foreground active:scale-[0.94] disabled:opacity-30"
             >
-              <svg viewBox="0 0 18 18" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M6.25 9.7 10.6 5.35a2.35 2.35 0 1 1 3.32 3.32l-5.5 5.5a4 4 0 0 1-5.66-5.66l5.5-5.5" />
+              <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden>
+                <path d="M8 3v10M3 8h10" />
               </svg>
             </button>
 
@@ -294,25 +314,29 @@ export default function Composer({
                 disabled={busy}
                 title="Leave image generation"
                 aria-label="Remove image tool"
-                className="flex h-8 items-center gap-1.5 rounded-full bg-invert-fill px-2.5 font-mono text-[10px] text-invert-text"
+                className={pill(true)}
               >
-                <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
+                <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                   <rect x="2.5" y="3" width="11" height="10" rx="2" />
                   <circle cx="10.5" cy="6" r="1" />
                   <path d="m4.5 11 2.6-2.6 1.7 1.7 1-1 1.7 1.9" />
                 </svg>
-                image
-                <span
-                  className="max-w-32 truncate opacity-55"
-                  title={imageModelNote}
-                >
-                  · {imageModelLabel}
+                Image
+                <span className="max-w-32 truncate font-mono text-[11px] opacity-60" title={imageModelNote}>
+                  {imageModelLabel}
                 </span>
-                <span className="ml-0.5 opacity-55">×</span>
+                <svg viewBox="0 0 16 16" className="h-2.5 w-2.5 opacity-60" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+                  <path d="m4 4 8 8M12 4l-8 8" />
+                </svg>
               </button>
             ) : caps.reasoning && efforts.length > 0 ? (
               <Dropdown
-                label="think"
+                label="Think"
+                icon={
+                  <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="currentColor" aria-hidden>
+                    <path d="M8 1.5 9.4 6.6 14.5 8 9.4 9.4 8 14.5 6.6 9.4 1.5 8 6.6 6.6Z" />
+                  </svg>
+                }
                 value={settings.reasoning}
                 onChange={(v) => onSettingsChange({ reasoning: v as ReasoningEffort })}
                 options={efforts.map((effort) => ({
@@ -323,51 +347,49 @@ export default function Composer({
               />
             ) : null}
 
-            {!imageMode && <button
-              type="button"
-              disabled={searchReason !== null || busy}
-              aria-pressed={settings.search}
-              onClick={() => onSettingsChange({ search: !settings.search })}
-              title={
-                searchReason ??
-                (entry?.webSearchPrice
-                  ? `Web search · $${Number(entry.webSearchPrice).toFixed(3)}/call`
-                  : "Web search")
-              }
-              className={`flex h-8 items-center gap-1.5 rounded-full px-2.5 font-mono text-[10px] transition-colors disabled:opacity-30 ${
-                settings.search
-                  ? "bg-invert-fill text-invert-text"
-                  : "text-muted hover:bg-surface-strong hover:text-foreground"
-              }`}
-            >
-              <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="8" cy="8" r="5.25" />
-                <path d="M2.9 8h10.2M8 2.75c1.4 1.45 2.1 3.2 2.1 5.25S9.4 11.8 8 13.25C6.6 11.8 5.9 10.05 5.9 8S6.6 4.2 8 2.75Z" />
-              </svg>
-              web
-            </button>}
+            {!imageMode && (
+              <button
+                type="button"
+                disabled={searchReason !== null || busy}
+                aria-pressed={settings.search}
+                aria-label="Web search"
+                onClick={() => onSettingsChange({ search: !settings.search })}
+                title={
+                  searchReason ??
+                  (entry?.webSearchPrice
+                    ? `Web search · $${Number(entry.webSearchPrice).toFixed(3)}/call`
+                    : "Web search")
+                }
+                className={pill(settings.search)}
+              >
+                <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <circle cx="8" cy="8" r="5.25" />
+                  <path d="M2.9 8h10.2M8 2.75c1.4 1.45 2.1 3.2 2.1 5.25S9.4 11.8 8 13.25C6.6 11.8 5.9 10.05 5.9 8S6.6 4.2 8 2.75Z" />
+                </svg>
+                <span className="max-sm:hidden">Search</span>
+              </button>
+            )}
 
-            {!imageMode && <button
-              type="button"
-              aria-pressed={hasSystem}
-              onClick={onOpenSystemPrompt}
-              title={
-                hasSystem
-                  ? `Conversation prompt set · ${settings.system.trim().length} characters`
-                  : "Set a conversation prompt"
-              }
-              className={`flex h-8 items-center gap-1.5 rounded-full px-2.5 font-mono text-[10px] transition-colors ${
-                hasSystem
-                  ? "bg-invert-fill text-invert-text"
-                  : "text-muted hover:bg-surface-strong hover:text-foreground"
-              }`}
-            >
-              <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M3.25 3.25h9.5v7.5h-5.5L4 13v-2.25h-.75Z" />
-                <path d="M5.5 5.75h5M5.5 8h3.25" />
-              </svg>
-              prompt
-            </button>}
+            {!imageMode && (
+              <button
+                type="button"
+                aria-pressed={hasSystem}
+                aria-label="Conversation prompt"
+                onClick={onOpenSystemPrompt}
+                title={
+                  hasSystem
+                    ? `Conversation prompt set · ${settings.system.trim().length} characters`
+                    : "Set a conversation prompt"
+                }
+                className={pill(hasSystem)}
+              >
+                <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M3.25 3.25h9.5v7.5h-5.5L4 13v-2.25h-.75Z" />
+                  <path d="M5.5 5.75h5M5.5 8h3.25" />
+                </svg>
+                <span className="max-sm:hidden">Prompt</span>
+              </button>
+            )}
           </div>
 
           <button
@@ -393,16 +415,16 @@ export default function Composer({
                   ? "Use image tool (Enter)"
                   : "Send (Enter)"
             }
-            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-all duration-150 ${
+            className={`flex size-8 shrink-0 items-center justify-center rounded-full transition-[background-color,color,transform,box-shadow] duration-200 enabled:active:scale-[0.92] ${
               busy || canSend
-                ? "bg-invert-fill text-invert-text shadow-[0_5px_18px_var(--shadow)]"
-                : "bg-surface text-muted opacity-45"
+                ? "bg-foreground text-background shadow-[inset_0_1px_0_rgba(255,255,255,0.14)]"
+                : "bg-line-strong text-muted"
             }`}
           >
             {busy ? (
-              <span className="block h-2.5 w-2.5 rounded-[2px] bg-current" />
+              <span className="block size-2.5 rounded-[2.5px] bg-current" />
             ) : (
-              <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+              <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                 <path d="M8 12.75v-9.5M4 7.25l4-4 4 4" />
               </svg>
             )}

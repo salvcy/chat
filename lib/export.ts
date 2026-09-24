@@ -1,6 +1,6 @@
 import type { UIMessage } from "ai";
-import type { ConversationMeta } from "./db";
-import { textOf } from "./db";
+import type { ConversationMeta } from "./store";
+import { textOf } from "./store";
 import { formatCost, formatTokens } from "./format";
 import type { DialDataParts, DialMetadata } from "./types";
 

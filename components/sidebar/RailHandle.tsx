@@ -1,17 +1,26 @@
 "use client";
 
 import { useRef } from "react";
-import { RAIL_MAX, RAIL_MIN, clampRail, readRail, writeRail } from "@/lib/preferences";
+import { RAIL_MAX, RAIL_MIN } from "@/lib/settings";
+
+function clampRail(w: number): number {
+  return Math.min(RAIL_MAX, Math.max(RAIL_MIN, Math.round(w)));
+}
 
 /**
  * The rail's resize edge.
  *
  * Dragging writes `--dial-rail-w` straight onto the document instead of
  * going through React state — a width in state would re-render the whole
- * conversation list on every pointer move. The final value is persisted
- * once, on release.
+ * conversation list on every pointer move. The final value is reported once,
+ * on release, and the account persists it: rail geometry travels with the
+ * user now rather than being stranded on the device it was dragged on.
  */
-export default function RailHandle() {
+export default function RailHandle({
+  onCommit,
+}: {
+  onCommit: (width: number) => void;
+}) {
   const dragging = useRef(false);
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -42,9 +51,7 @@ export default function RailHandle() {
         getComputedStyle(root).getPropertyValue("--dial-rail-w"),
         10,
       );
-      if (Number.isFinite(width)) {
-        writeRail({ ...readRail(), width: clampRail(width) });
-      }
+      if (Number.isFinite(width)) onCommit(clampRail(width));
     };
 
     el.addEventListener("pointermove", onMove);
@@ -64,7 +71,7 @@ export default function RailHandle() {
       ) || 272;
     const next = clampRail(current + (e.key === "ArrowRight" ? step : -step));
     root.style.setProperty("--dial-rail-w", `${next}px`);
-    writeRail({ ...readRail(), width: next });
+    onCommit(next);
   };
 
   return (
@@ -80,7 +87,7 @@ export default function RailHandle() {
       onDoubleClick={() => {
         // Double-click snaps back to the default width.
         document.documentElement.style.setProperty("--dial-rail-w", "272px");
-        writeRail({ ...readRail(), width: 272 });
+        onCommit(272);
       }}
       title="Drag to resize · double-click to reset"
       className="group absolute inset-y-0 right-0 z-20 w-1.5 translate-x-1/2 cursor-col-resize"

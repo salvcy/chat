@@ -10,10 +10,13 @@ import { useEffect, useState } from "react";
 export default function CopyButton({
   text,
   label = "Copy",
+  showLabel = false,
   className = "",
 }: {
   text: string;
   label?: string;
+  /** Show "Copy" / "Copied" beside the glyph, as a code block header does. */
+  showLabel?: boolean;
   className?: string;
 }) {
   const [copied, setCopied] = useState(false);
@@ -38,7 +41,9 @@ export default function CopyButton({
           // Nothing useful to say here — leave the glyph unchanged.
         }
       }}
-      className={`flex h-6 w-6 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface hover:text-foreground ${className}`}
+      className={`flex items-center justify-center rounded-control transition-[background-color,color,transform] duration-150 hover:bg-hover-2 active:scale-[0.94] ${
+        showLabel ? "h-7 gap-1.5 px-2 text-[12px] font-medium" : "size-7"
+      } ${copied ? "text-foreground" : "text-muted hover:text-foreground"} ${className}`}
     >
       {copied ? (
         <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
@@ -50,6 +55,7 @@ export default function CopyButton({
           <path d="M10.25 3.75a1.75 1.75 0 0 0-1.5-1H4.5a1.75 1.75 0 0 0-1.75 1.75v4.25c0 .7.41 1.3 1 1.58" />
         </svg>
       )}
+      {showLabel && <span>{copied ? "Copied" : "Copy"}</span>}
     </button>
   );
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { applyRail, readRail, writeRail } from "@/lib/preferences";
+
 
 /**
  * Collapse / restore the conversation rail (⌘B).
@@ -10,7 +10,11 @@ import { applyRail, readRail, writeRail } from "@/lib/preferences";
  * paint); this only mirrors it for the icon, read after mount so there's no
  * hydration mismatch — the same approach ThemeToggle uses for the palette.
  */
-export default function RailToggle() {
+export default function RailToggle({
+  onCommit,
+}: {
+  onCommit: (collapsed: boolean) => void;
+}) {
   const [collapsed, setCollapsed] = useState(false);
 
   useEffect(() => {
@@ -25,11 +29,10 @@ export default function RailToggle() {
     const next = !document.documentElement.classList.contains(
       "dial-rail-collapsed",
     );
-    const state = { ...readRail(), collapsed: next };
-    applyRail(state);
-    writeRail(state);
+    document.documentElement.classList.toggle("dial-rail-collapsed", next);
     setCollapsed(next);
-  }, []);
+    onCommit(next);
+  }, [onCommit]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -47,7 +50,7 @@ export default function RailToggle() {
       onClick={toggle}
       title={collapsed ? "Show conversations (⌘B)" : "Hide conversations (⌘B)"}
       aria-label={collapsed ? "Show conversations" : "Hide conversations"}
-      className="hidden h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface-strong hover:text-foreground md:flex"
+      className="hidden size-8 shrink-0 items-center justify-center rounded-control text-muted transition-[background-color,color,transform] duration-150 hover:bg-hover-2 hover:text-foreground active:scale-[0.96] md:flex"
     >
       <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
         <rect x="2" y="3" width="12" height="10" rx="2" />

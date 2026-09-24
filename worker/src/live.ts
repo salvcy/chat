@@ -4,10 +4,20 @@ import type { Env } from "./env";
 /**
  * Per-user realtime invalidation hub.
  *
- * It never sees a record, title, prompt, or blob id. A sync commit sends the
- * latest integer revision and connected devices use that as a hint to run the
- * normal authenticated pull. Hibernatable sockets keep the connection alive
- * while the object sleeps, so idle accounts consume no Durable Object time.
+ * It never sees a title, a prompt, a message, or a blob id. A commit sends
+ * the latest integer revision and the id of the thread that moved, and
+ * connected devices use the pair as a hint to run the normal authenticated
+ * read. Hibernatable sockets keep the connection alive while the object
+ * sleeps, so idle accounts consume no Durable Object time.
+ *
+ * The thread id is new, and it is the difference between "something changed
+ * on this account" and "this specific conversation changed". With the old
+ * revision-only message every device re-read the whole account delta on every
+ * notification, including devices looking at a different conversation
+ * entirely. Now a device re-reads the open thread only when the notification
+ * names it. The id is a random client-minted string that already sits in the
+ * clear in the `thread` table, so this discloses nothing the database does
+ * not.
  */
 
 /**
@@ -37,14 +47,20 @@ export class SyncHub extends DurableObject<Env> {
       const connection = url.searchParams.get("c");
       this.ctx.acceptWebSocket(server, connection ? [connection] : []);
 
+      // The opening frame names no thread: it is the account's current
+      // revision, so a device that reconnects after a gap knows whether it
+      // has anything to catch up on at all.
       const rev = Number(url.searchParams.get("rev") ?? 0);
-      server.send(JSON.stringify({ rev: Number.isSafeInteger(rev) ? rev : 0 }));
+      server.send(
+        JSON.stringify({ rev: Number.isSafeInteger(rev) ? rev : 0, thread: null }),
+      );
       return new Response(null, { status: 101, webSocket: client });
     }
 
     if (url.pathname === "/notify" && request.method === "POST") {
       const body = (await request.json().catch(() => null)) as {
         rev?: unknown;
+        thread?: unknown;
         exclude?: unknown;
       } | null;
       const rev = Number(body?.rev);
@@ -53,8 +69,10 @@ export class SyncHub extends DurableObject<Env> {
       }
       const exclude =
         typeof body?.exclude === "string" && body.exclude ? body.exclude : null;
+      const thread =
+        typeof body?.thread === "string" && body.thread ? body.thread : null;
 
-      const message = JSON.stringify({ rev });
+      const message = JSON.stringify({ rev, thread });
       for (const socket of this.ctx.getWebSockets()) {
         // Never echo a revision back to the device that caused it. Without
         // this, a device that pushes mid-stream wakes itself, finds the rows

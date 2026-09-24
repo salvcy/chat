@@ -24,7 +24,7 @@ import type { DialMetadata } from "@/lib/types";
 function Field({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-baseline gap-1.5">
-      <span className="text-muted/70">{label}</span>
+      <span className="text-muted">{label}</span>
       <span className="text-foreground">{value}</span>
     </div>
   );
@@ -69,37 +69,44 @@ export default function Metrics({
   }
   if (meta.effort && meta.effort !== "off") detail.push(["effort", meta.effort]);
   if (meta.search) detail.push(["search", "on"]);
+  if (meta.answerInReasoning) detail.push(["answer", "sent as reasoning"]);
   // "stop" is the boring case; only surface a stop reason worth knowing.
   if (meta.finishReason && meta.finishReason !== "stop") {
     detail.push(["stopped", meta.finishReason]);
   }
 
   return (
-    <div className="mt-2">
+    <div className="mt-1.5">
       <button
         onClick={() => setOpen((o) => !o)}
-        className="group flex items-center gap-2 font-mono text-[10px] text-muted transition-colors hover:text-foreground"
+        aria-expanded={open}
+        className="group -mx-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 whitespace-nowrap rounded-control px-1.5 py-1 font-mono text-[11px] tabular-nums text-muted transition-colors hover:bg-hover hover:text-secondary"
         title={open ? "Hide telemetry" : "Show telemetry"}
       >
         {meta.startedAt && (
-          <span className="italic">{formatTime(meta.startedAt)}</span>
+          <span>{formatTime(meta.startedAt)}</span>
         )}
         {summary.map((s, i) => (
           <span key={i} className="flex items-center gap-2">
-            <span className="text-hairline">·</span>
+            <span className="opacity-40">·</span>
             <span className={streaming && i === 0 ? "dial-shimmer" : ""}>
               {s}
             </span>
           </span>
         ))}
         {detail.length > 0 && (
-          <motion.span
-            animate={{ rotate: open ? 180 : 0 }}
-            transition={{ duration: 0.15 }}
-            className="opacity-0 transition-opacity group-hover:opacity-60"
+          <svg
+            viewBox="0 0 12 12"
+            className={`h-2.5 w-2.5 opacity-0 transition-[opacity,transform] duration-200 group-hover:opacity-70 ${open ? "rotate-180 opacity-70" : ""}`}
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden
           >
-            ▾
-          </motion.span>
+            <path d="m3.25 4.75 2.75 2.5 2.75-2.5" />
+          </svg>
         )}
       </button>
 
@@ -112,7 +119,7 @@ export default function Metrics({
             transition={{ duration: 0.18, ease: "easeOut" }}
             className="overflow-hidden"
           >
-            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 border-l border-hairline py-1 pl-3 font-mono text-[10px]">
+            <div className="mb-1 mt-1 inline-flex flex-wrap gap-x-4 gap-y-1.5 rounded-card bg-hover px-3 py-2 font-mono text-[11px] tabular-nums">
               {detail.map(([label, value]) => (
                 <Field key={label} label={label} value={value} />
               ))}

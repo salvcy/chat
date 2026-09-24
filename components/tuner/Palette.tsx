@@ -2,11 +2,11 @@
 
 import { motion } from "motion/react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import GlideMenu from "@/components/ui/GlideMenu";
 import { formatContext, formatPricePerMillion } from "@/lib/format";
 import type { OpenRouterModel } from "@/lib/types";
 
 const MAX_ROWS = 60;
-const RECENTS_KEY = "dial:recent-models";
 const MAX_RECENTS = 6;
 type ModelScope =
   | "all"
@@ -24,28 +24,15 @@ export type Command = {
   run: () => void;
 };
 
-export function readRecents(): string[] {
-  try {
-    const raw = localStorage.getItem(RECENTS_KEY);
-    const parsed: unknown = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed)
-      ? parsed.filter((x): x is string => typeof x === "string")
-      : [];
-  } catch {
-    return [];
-  }
-}
-
-export function pushRecent(id: string) {
-  try {
-    const next = [id, ...readRecents().filter((x) => x !== id)].slice(
-      0,
-      MAX_RECENTS,
-    );
-    localStorage.setItem(RECENTS_KEY, JSON.stringify(next));
-  } catch {
-    // Private mode / storage disabled — recents are a convenience only.
-  }
+/**
+ * Recently picked models travel with the account rather than the device.
+ *
+ * The list arrives as a prop and changes are reported back up, the same way
+ * the theme and the rail do. Someone who works across a laptop and a phone
+ * gets the models they actually use at the top of both.
+ */
+export function nextRecents(current: readonly string[], id: string): string[] {
+  return [id, ...current.filter((x) => x !== id)].slice(0, MAX_RECENTS);
 }
 
 /** Capability chips. An absent capability is an absent chip, never a red X. */
@@ -72,7 +59,7 @@ function Chips({ m }: { m: OpenRouterModel }) {
                   ? "Can generate image output"
               : undefined
           }
-          className="rounded-full border border-hairline px-1.5 py-px text-[9px] uppercase tracking-wider text-muted"
+          className="rounded-chip px-1.5 py-px font-mono text-[10.5px] text-muted shadow-hairline"
         >
           {c}
         </span>
@@ -96,12 +83,17 @@ export default function Palette({
   models,
   current,
   commands,
+  recentModels,
+  onRecent,
   onSelect,
   onClose,
 }: {
   models: OpenRouterModel[];
   current: string;
   commands: Command[];
+  /** Newest first, from the account's settings blob. */
+  recentModels: readonly string[];
+  onRecent?: (next: string[]) => void;
   onSelect: (id: string) => void;
   onClose: () => void;
 }) {
@@ -111,7 +103,7 @@ export default function Palette({
   const [settled, setSettled] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const [recents] = useState(() => readRecents());
+  const recents = recentModels;
 
   const commandMode = query.startsWith(">");
   const term = (commandMode ? query.slice(1) : query).trim().toLowerCase();
@@ -178,7 +170,7 @@ export default function Palette({
   const chooseModel = (id: string) => {
     if (settled) return;
     setSettled(id);
-    pushRecent(id);
+    onRecent?.(nextRecents(recentModels, id));
     setTimeout(() => onSelect(id), 200);
   };
 
@@ -225,26 +217,36 @@ export default function Palette({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-chrome/70 px-3 pt-[10vh] backdrop-blur-md sm:px-4"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 px-3 pt-[11vh] backdrop-blur-[2px] sm:px-4"
       onClick={onClose}
+      style={{ animation: "dial-fade-in 150ms ease-out both" }}
     >
-      <motion.div
-        initial={{ opacity: 0, y: -8, scale: 0.985 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        transition={{ duration: 0.16, ease: "easeOut" }}
-        className="w-full max-w-[660px] overflow-hidden rounded-[24px] border border-hairline-strong bg-panel/95 shadow-[0_28px_100px_var(--shadow)] backdrop-blur-[28px]"
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={commandMode ? "Commands" : "Choose a model"}
+        className="w-full max-w-[640px] overflow-hidden rounded-window bg-panel shadow-overlay"
+        style={{
+          animation: "dial-pop-in 200ms cubic-bezier(0.23,1,0.32,1) both",
+          transformOrigin: "top center",
+        }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center gap-3 px-4 pb-2.5 pt-4 sm:px-5">
+        <div className="flex h-[52px] items-center gap-2.5 px-4">
+          <svg viewBox="0 0 16 16" className="h-4 w-4 shrink-0 text-muted" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden>
+            <circle cx="7" cy="7" r="4.25" />
+            <path d="m10.25 10.25 3.25 3.25" />
+          </svg>
           {commandMode && (
-            <span className="shrink-0 rounded-md bg-invert-fill px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-invert-text">
-              cmd
+            <span className="shrink-0 rounded-chip bg-foreground px-1.5 py-0.5 text-[11px] font-medium text-background">
+              Commands
             </span>
           )}
           <input
             ref={inputRef}
-            className="w-full bg-transparent text-[15px] text-foreground outline-none placeholder:text-muted"
-            placeholder="Find a model…  (> for commands)"
+            className="min-w-0 flex-1 bg-transparent text-[15px] text-foreground outline-none placeholder:text-muted"
+            placeholder={commandMode ? "Run a command…" : "Find a model…"}
+            aria-label={commandMode ? "Search commands" : "Search models"}
             value={query}
             onChange={(e) => {
               setQuery(e.target.value);
@@ -252,13 +254,13 @@ export default function Palette({
               setCursor(0);
             }}
           />
-          <span className="shrink-0 font-mono text-[10px] text-muted">
+          <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted">
             {rowCount}
           </span>
         </div>
 
         {!commandMode && (
-          <div className="flex items-center gap-1 border-b border-hairline px-4 pb-3 sm:px-5">
+          <div className="dial-scroll-none flex items-center gap-0.5 overflow-x-auto border-b border-line px-3 pb-2.5">
             {(["all", "reasoning", "web", "vision", "image", "free"] as const).map((item) => (
               <button
                 key={item}
@@ -271,13 +273,18 @@ export default function Palette({
                   setScope(item);
                   setCursor(0);
                 }}
-                className={`rounded-full px-2.5 py-1 font-mono text-[9px] transition-colors ${
-                  scope === item
-                    ? "bg-invert-fill text-invert-text"
-                    : "text-muted hover:bg-surface hover:text-foreground"
+                className={`relative h-7 shrink-0 rounded-full px-2.5 text-[12px] font-medium capitalize transition-colors duration-150 ${
+                  scope === item ? "text-foreground" : "text-muted hover:text-secondary"
                 }`}
               >
-                {item}
+                {scope === item && (
+                  <motion.span
+                    layoutId="palette-scope"
+                    className="absolute inset-0 rounded-full bg-hover-2 shadow-hairline"
+                    transition={{ duration: 0.22, ease: [0.23, 1, 0.32, 1] }}
+                  />
+                )}
+                <span className="relative">{item}</span>
               </button>
             ))}
           </div>
@@ -285,118 +292,144 @@ export default function Palette({
 
         <div
           ref={listRef}
-          className="dial-scroll max-h-[56vh] overflow-y-auto p-1.5"
+          className={`dial-scroll max-h-[56vh] overflow-y-auto p-1.5 ${commandMode ? "border-t border-line" : ""}`}
         >
-          {commandMode
-            ? visibleCommands.map((c, idx) => (
-                <button
-                  key={c.id}
-                  data-idx={idx}
-                  onMouseEnter={() => setCursor(idx)}
-                  onClick={() => runCommand(c)}
-                  className={`flex w-full items-baseline justify-between gap-4 rounded-xl px-3.5 py-2.5 text-left transition-colors ${
-                    idx === cursor ? "bg-surface-strong" : ""
-                  }`}
-                >
-                  <span className="truncate text-sm text-foreground">
-                    {c.label}
-                  </span>
-                  {c.hint && (
-                    <span className="shrink-0 font-mono text-[10px] text-muted">
-                      {c.hint}
-                    </span>
-                  )}
-                </button>
-              ))
-            : visibleModels.map((m, idx) => {
-                const isSettled = m.id === settled;
-                return (
+          <GlideMenu
+            mode="active"
+            activeKey={rowCount > 0 ? `${commandMode ? "c" : "m"}-${cursor}-${term}-${scope}` : null}
+            highlightClassName="inset-x-0 rounded-control bg-hover-2"
+          >
+            {commandMode
+              ? visibleCommands.map((c, idx) => (
                   <button
-                    key={m.id}
+                    key={c.id}
                     data-idx={idx}
-                    onMouseEnter={() => setCursor(idx)}
-                    onClick={() => chooseModel(m.id)}
-                    className={`relative flex w-full items-start justify-between gap-4 overflow-hidden rounded-xl px-3.5 py-2.5 text-left transition-colors ${
-                      idx === cursor ? "bg-surface-strong" : ""
-                    }`}
+                    data-glide-row
+                    data-glide-active={idx === cursor}
+                    onMouseMove={() => idx !== cursor && setCursor(idx)}
+                    onClick={() => runCommand(c)}
+                    className="relative z-10 flex h-10 w-full items-center justify-between gap-4 rounded-control px-3 text-left"
                   >
-                    <span className="min-w-0 flex-1">
-                      <span className="flex items-baseline gap-2">
-                        <span className="truncate text-sm text-foreground">
-                          {m.name}
+                    <span className="truncate text-[13.5px] text-foreground">
+                      {c.label}
+                    </span>
+                    {c.hint && (
+                      <span className="shrink-0 font-mono text-[11px] text-muted">
+                        {c.hint}
+                      </span>
+                    )}
+                  </button>
+                ))
+              : visibleModels.map((m, idx) => {
+                  const isSettled = m.id === settled;
+                  return (
+                    <button
+                      key={m.id}
+                      data-idx={idx}
+                      data-glide-row
+                      data-glide-active={idx === cursor}
+                      onMouseMove={() => idx !== cursor && setCursor(idx)}
+                      onClick={() => chooseModel(m.id)}
+                      className="relative z-10 flex w-full items-start justify-between gap-4 overflow-hidden rounded-control px-3 py-2.5 text-left"
+                    >
+                      <span className="min-w-0 flex-1">
+                        <span className="flex items-center gap-2">
+                          <span className="truncate text-[13.5px] font-medium text-foreground">
+                            {m.name}
+                          </span>
+                          {m.id === current && (
+                            <span className="flex shrink-0 items-center gap-1 rounded-full bg-foreground px-1.5 py-px text-[10.5px] font-medium text-background">
+                              <svg viewBox="0 0 16 16" className="h-2.5 w-2.5" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                                <path d="m3.5 8.5 3 3 6-6.5" />
+                              </svg>
+                              current
+                            </span>
+                          )}
                         </span>
-                        {m.id === current && (
-                          <span className="shrink-0 font-mono text-[9px] uppercase tracking-wider text-muted">
-                            tuned
+                        <span className="mt-0.5 block truncate font-mono text-[11.5px] text-muted">
+                          {m.id}
+                        </span>
+                        <span className="mt-1.5 flex">
+                          <Chips m={m} />
+                        </span>
+                      </span>
+
+                      <span className="shrink-0 pt-0.5 text-right font-mono text-[11.5px] leading-relaxed tabular-nums text-muted">
+                        <span className="block text-secondary">
+                          {formatPricePerMillion(m.promptPrice)}
+                          {" / "}
+                          {formatPricePerMillion(m.completionPrice)}
+                        </span>
+                        {m.contextLength && (
+                          <span className="block">
+                            {formatContext(m.contextLength)}
                           </span>
                         )}
                       </span>
-                      <span className="mt-0.5 block truncate font-mono text-[11px] text-muted">
-                        {m.id}
-                      </span>
-                      <span className="mt-1 flex">
-                        <Chips m={m} />
-                      </span>
-                    </span>
 
-                    <span className="shrink-0 pt-0.5 text-right font-mono text-[11px] leading-relaxed text-muted">
-                      <span className="block">
-                        {formatPricePerMillion(m.promptPrice)}
-                        {" / "}
-                        {formatPricePerMillion(m.completionPrice)}
-                      </span>
-                      {m.contextLength && (
-                        <span className="block opacity-70">
-                          {formatContext(m.contextLength)}
-                        </span>
+                      {isSettled && (
+                        <motion.span
+                          className="pointer-events-none absolute inset-0 bg-invert-fill"
+                          initial={{ scaleX: 0, opacity: 1 }}
+                          animate={{ scaleX: [1, 1.03, 1], opacity: [1, 1, 0] }}
+                          transition={{
+                            duration: 0.2,
+                            ease: [0.16, 1.4, 0.32, 1],
+                            times: [0, 0.65, 1],
+                          }}
+                          style={{ transformOrigin: "left" }}
+                        />
                       )}
-                    </span>
-
-                    {isSettled && (
-                      <motion.span
-                        className="pointer-events-none absolute inset-0 bg-invert-fill"
-                        initial={{ scaleX: 0, opacity: 1 }}
-                        animate={{ scaleX: [1, 1.03, 1], opacity: [1, 1, 0] }}
-                        transition={{
-                          duration: 0.2,
-                          ease: [0.16, 1.4, 0.32, 1],
-                          times: [0, 0.65, 1],
-                        }}
-                        style={{ transformOrigin: "left" }}
-                      />
-                    )}
-                  </button>
-                );
-              })}
+                    </button>
+                  );
+                })}
+          </GlideMenu>
 
           {!commandMode && models.length === 0 && (
-            <p className="px-4 py-8 text-center font-mono text-xs leading-relaxed text-muted">
-              catalog unavailable
-              <br />
-              <span className="opacity-70">
-                check OPENROUTER_API_KEY in .env.local
+            <div className="flex flex-col items-center gap-1 px-4 py-10 text-center">
+              <span className="text-[13.5px] font-medium text-foreground">
+                Catalog unavailable
               </span>
-            </p>
+              <span className="text-[12.5px] text-muted">
+                OpenRouter&apos;s model list could not be reached — try again in a moment.
+              </span>
+            </div>
           )}
           {rowCount === 0 && (commandMode || models.length > 0) && (
-            <p className="px-4 py-6 text-center font-mono text-xs text-muted">
-              nothing matches “{term}”
-            </p>
+            <div className="flex flex-col items-center gap-1 px-4 py-10 text-center">
+              <span className="text-[13.5px] font-medium text-foreground">No results</span>
+              <span className="text-[12.5px] text-muted">
+                Nothing matches “{term}”.
+              </span>
+            </div>
           )}
           {!commandMode && filteredModels.length > MAX_ROWS && (
-            <p className="py-2 text-center font-mono text-[11px] text-muted">
+            <p className="py-2 text-center text-[12px] text-muted">
               {filteredModels.length - MAX_ROWS} more — keep typing
             </p>
           )}
         </div>
 
-        <div className="flex items-center gap-3 border-t border-hairline px-4 py-2.5 font-mono text-[9px] text-muted sm:px-5">
-          <span>↑↓ move</span>
-          <span>⏎ {commandMode ? "run" : "tune"}</span>
-          <span>&gt; commands</span>
-          <span>esc close</span>
+        <div className="flex items-center gap-4 border-t border-line bg-hover px-4 py-2 text-[11.5px] text-muted">
+          <span className="flex items-center gap-1">
+            <span className="dial-kbd">↑</span>
+            <span className="dial-kbd">↓</span>
+            move
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="dial-kbd">⏎</span>
+            {commandMode ? "run" : "select"}
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="dial-kbd">&gt;</span>
+            commands
+          </span>
+          <span className="ml-auto flex items-center gap-1">
+            <span className="dial-kbd">esc</span>
+            close
+          </span>
         </div>
-      </motion.div>
+      </div>
     </div>
   );
 }

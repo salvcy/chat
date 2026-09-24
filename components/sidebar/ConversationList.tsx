@@ -1,10 +1,11 @@
 "use client";
 
-import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import AccountButton from "./AccountButton";
+import GlideMenu from "@/components/ui/GlideMenu";
+import BrandMark from "@/components/ui/BrandMark";
 import type { SessionUser } from "@/lib/auth-client";
-import type { ConversationMeta } from "@/lib/db";
+import type { ConversationMeta } from "@/lib/store";
 import type { SyncStatus } from "@/lib/session";
 import { formatCost, groupForDate } from "@/lib/format";
 import { shortModelId } from "@/lib/capabilities";
@@ -12,15 +13,51 @@ import { shortModelId } from "@/lib/capabilities";
 /**
  * The conversation rail.
  *
- * It sits on the *same ground* as the transcript, divided only by a hairline —
- * glass is for things that float (the composer, the palette); a rail pinned to
- * the edge should recede. Rows are quiet and the active thread is the single
- * inverted element: state by inversion, never colour.
+ * Structure follows Beautiful UI's SidebarNav (beautifului.dev, MIT): a brand
+ * row, primary actions, then a "Chats" header whose search control grows
+ * right-to-left into a field. It sits directly on the page — no card, no
+ * border — so it recedes behind the chat window, which is the one lifted
+ * surface.
  *
- * Density: each row is two tight lines (title, then model · cost in mono).
- * The action menu overlays the title only while it is needed, so it never
- * reserves a permanent right column or pulls metadata away from the edge.
+ * Rows are one line. They used to be two (title, then model · cost in mono),
+ * which doubled the rail's height for numbers that are one hover away in the
+ * row's tooltip and always visible for the open thread in the status strip.
+ * A single highlight glides between rows on hover rather than each row
+ * painting its own; the open thread keeps a quiet fill of its own. State by
+ * fill, never colour.
  */
+
+const SEARCH_EASE = "cubic-bezier(0.16, 1, 0.3, 1)";
+
+function Glyph({ children }: { children: ReactNode }) {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      {children}
+    </svg>
+  );
+}
+
+const SECTION_LABEL: Record<string, string> = {
+  pinned: "Pinned",
+  today: "Today",
+  yesterday: "Yesterday",
+  "this week": "This week",
+  "this month": "This month",
+};
+
+function sectionLabel(label: string): string {
+  return SECTION_LABEL[label] ?? label.charAt(0).toUpperCase() + label.slice(1);
+}
+
 export default function ConversationList({
   conversations,
   activeId,
@@ -53,6 +90,7 @@ export default function ConversationList({
   const [menuOpen, setMenuOpen] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [filter, setFilter] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -86,6 +124,18 @@ export default function ConversationList({
     setEditing(null);
   };
 
+  const openSearch = () => {
+    setSearchOpen(true);
+    // Focus after the field has started to grow, so the caret lands in it
+    // rather than on a zero-width input.
+    requestAnimationFrame(() => searchRef.current?.focus());
+  };
+
+  const closeSearch = () => {
+    setSearchOpen(false);
+    setFilter("");
+  };
+
   /** Filtered, then split into pinned + date buckets, order preserved. */
   const sections = useMemo(() => {
     const term = filter.trim().toLowerCase();
@@ -110,238 +160,237 @@ export default function ConversationList({
     return out;
   }, [conversations, filter]);
 
-  // The aside owns the rounded border, so it must not be the scroll container:
-  // its track would run the full height and straight into the top corners,
-  // reading as a bar bleeding past the header. Only the list below scrolls.
   return (
-    <aside className="flex h-full w-full flex-col overflow-hidden rounded-[18px] border border-hairline bg-panel shadow-[0_14px_45px_var(--shadow)]">
-      <div className="shrink-0 bg-panel px-2.5 pb-2 pt-2.5">
-        <div className="flex gap-1.5">
-          <button
-            onClick={onNew}
-            title="New chat (⌘⇧K)"
-            className="flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-hairline bg-surface px-3 py-2 text-left text-[12px] text-secondary transition-colors hover:border-hairline-strong hover:bg-surface-strong hover:text-foreground"
-          >
-            <svg viewBox="0 0 16 16" className="h-3 w-3 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
-              <path d="M8 3v10M3 8h10" />
-            </svg>
-            <span className="truncate">new chat</span>
-          </button>
+    <aside className="flex h-full w-full flex-col pr-1">
+      {/* brand */}
+      <div className="flex h-10 shrink-0 items-center px-2.5">
+        <BrandMark />
+      </div>
 
+      {/* primary actions */}
+      <GlideMenu
+        className="mt-1 shrink-0"
+        highlightClassName="inset-x-0 rounded-control bg-hover-2"
+      >
+        <button
+          data-glide-row
+          type="button"
+          onClick={onNew}
+          title="New chat (⌘⇧K)"
+          className="group/new relative z-10 flex h-8 w-full items-center gap-2 rounded-control px-2 text-left text-[13.5px] font-medium text-secondary transition-[color,transform] duration-150 hover:text-foreground active:scale-[0.99]"
+        >
+          <span className="flex size-5 shrink-0 items-center justify-center">
+            <Glyph>
+              <path d="M11.2 2.8a1.7 1.7 0 0 1 2.4 2.4L7.4 11.4l-3.1.8.8-3.1Z" />
+              <path d="M13 9.5V13a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h3.5" />
+            </Glyph>
+          </span>
+          <span className="flex-1 truncate">New chat</span>
+          <span className="hidden font-mono text-[10.5px] text-muted opacity-0 transition-opacity group-hover/new:opacity-100 lg:inline">
+            ⌘⇧K
+          </span>
+        </button>
+      </GlideMenu>
+
+      {/* chats header — label, and a search control that grows into a field */}
+      <div className="relative mx-0 mb-1 mt-4 h-8 shrink-0">
+        <div
+          aria-hidden={searchOpen}
+          className={`absolute inset-0 flex items-center px-2 text-[12px] font-medium text-muted transition-[opacity,transform] duration-200 ${
+            searchOpen ? "pointer-events-none -translate-x-1 opacity-0" : "opacity-100"
+          }`}
+        >
+          Chats
+          {conversations.length > 0 && (
+            <span className="ml-1.5 font-mono text-[10.5px] tabular-nums opacity-60">
+              {conversations.length}
+            </span>
+          )}
+        </div>
+
+        <button
+          type="button"
+          aria-label="Search conversations"
+          aria-expanded={searchOpen}
+          disabled={conversations.length === 0}
+          onClick={openSearch}
+          className={`absolute right-0 top-0 z-10 flex size-8 items-center justify-center rounded-control text-muted transition-[opacity,background-color,color,transform] duration-200 hover:bg-hover-2 hover:text-foreground active:scale-[0.96] disabled:opacity-30 ${
+            searchOpen ? "pointer-events-none opacity-0" : "opacity-100"
+          }`}
+        >
+          <Glyph>
+            <circle cx="7" cy="7" r="4.25" />
+            <path d="m10.25 10.25 3.25 3.25" />
+          </Glyph>
+        </button>
+
+        <div
+          className={`absolute right-0 top-0 z-20 flex h-8 items-center overflow-hidden rounded-control bg-field text-muted shadow-hairline transition-[width,opacity] focus-within:text-secondary ${
+            searchOpen ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"
+          }`}
+          style={{
+            width: searchOpen ? "100%" : 32,
+            transitionDuration: "200ms",
+            transitionTimingFunction: SEARCH_EASE,
+          }}
+        >
+          <span className="ml-2 flex shrink-0">
+            <Glyph>
+              <circle cx="7" cy="7" r="4.25" />
+              <path d="m10.25 10.25 3.25 3.25" />
+            </Glyph>
+          </span>
+          <input
+            ref={searchRef}
+            value={filter}
+            tabIndex={searchOpen ? 0 : -1}
+            onChange={(e) => setFilter(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") closeSearch();
+            }}
+            placeholder="Search chats"
+            aria-label="Search conversations"
+            className="ml-1.5 min-w-0 flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-muted"
+          />
           <button
             type="button"
-            disabled={conversations.length === 0}
-            aria-label={searchOpen ? "Close conversation search" : "Search conversations"}
-            aria-expanded={searchOpen}
-            title="Search conversations"
-            onClick={() => {
-              if (searchOpen) setFilter("");
-              setSearchOpen((open) => !open);
-            }}
-            className={`flex w-9 shrink-0 items-center justify-center rounded-xl border transition-colors disabled:cursor-default disabled:opacity-30 ${
-              searchOpen
-                ? "border-hairline-strong bg-surface-strong text-foreground"
-                : "border-hairline bg-surface text-muted hover:border-hairline-strong hover:bg-surface-strong hover:text-foreground"
-            }`}
+            aria-label="Close search"
+            tabIndex={searchOpen ? 0 : -1}
+            onClick={closeSearch}
+            className="flex size-8 shrink-0 items-center justify-center rounded-control transition-colors hover:bg-hover-2 hover:text-foreground"
           >
-            <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round">
-              <circle cx="6.75" cy="6.75" r="3.75" />
-              <path d="m9.65 9.65 3.1 3.1" />
+            <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden>
+              <path d="m4 4 8 8M12 4l-8 8" />
             </svg>
           </button>
         </div>
-
-        <AnimatePresence initial={false}>
-          {searchOpen && conversations.length > 0 && (
-            <motion.div
-              initial={{ height: 0, opacity: 0, y: -3 }}
-              animate={{ height: "auto", opacity: 1, y: 0 }}
-              exit={{ height: 0, opacity: 0, y: -3 }}
-              transition={{ duration: 0.16, ease: "easeOut" }}
-              className="relative overflow-hidden"
-            >
-              <svg
-                viewBox="0 0 16 16"
-                aria-hidden="true"
-                className="pointer-events-none absolute bottom-2.5 left-2.5 h-3 w-3 text-muted"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.35"
-                strokeLinecap="round"
-              >
-                <circle cx="6.75" cy="6.75" r="3.75" />
-                <path d="m9.65 9.65 3.1 3.1" />
-              </svg>
-              <input
-                autoFocus
-                value={filter}
-                onChange={(e) => setFilter(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key !== "Escape") return;
-                  setFilter("");
-                  setSearchOpen(false);
-                }}
-                aria-label="Search conversations"
-                placeholder="search chats…"
-                className="mt-2 w-full rounded-xl border border-hairline bg-background/35 py-1.5 pl-7 pr-7 font-mono text-[10px] text-foreground outline-none placeholder:text-muted focus:border-hairline-strong"
-              />
-              {filter && (
-                <button
-                  type="button"
-                  aria-label="Clear conversation search"
-                  title="Clear search"
-                  onClick={() => setFilter("")}
-                  className="absolute bottom-1.5 right-1.5 flex h-5 w-5 items-center justify-center rounded-md font-mono text-[12px] text-muted transition-colors hover:bg-surface-strong hover:text-foreground"
-                >
-                  ×
-                </button>
-              )}
-            </motion.div>
-          )}
-        </AnimatePresence>
       </div>
 
-      <div className="dial-scroll-none min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-1.5 pb-6">
+      {/* the list */}
+      <div className="dial-scroll-none min-h-0 flex-1 overflow-y-auto overflow-x-hidden pb-6">
         {conversations.length === 0 && (
-          <div className="flex flex-col items-center px-4 py-10 text-center">
-            <span className="mb-3 flex h-8 w-8 items-center justify-center rounded-xl border border-hairline font-mono text-[11px] text-muted">
-              ◫
-            </span>
-            <p className="text-[11px] text-muted">Your conversations will appear here.</p>
-          </div>
+          <p className="px-2 py-3 text-[12.5px] leading-relaxed text-muted">
+            Your conversations will appear here.
+          </p>
         )}
         {conversations.length > 0 && sections.length === 0 && (
-          <p className="px-2 py-6 text-center font-mono text-[10px] text-muted">
-            nothing matches
+          <p className="px-2 py-3 text-[12.5px] text-muted">
+            Nothing matches “{filter.trim()}”.
           </p>
         )}
 
-        {sections.map((section) => (
-          <div key={section.label}>
-            <p className="truncate px-2.5 pb-1 pt-3.5 font-mono text-[8px] uppercase tracking-[0.16em] text-muted/60">
-              {section.label}
-            </p>
+        <GlideMenu highlightClassName="inset-x-0 rounded-control bg-hover">
+          {sections.map((section, sectionIndex) => (
+            <div key={section.label}>
+              <p
+                className={`truncate px-2 pb-1 text-[11.5px] font-medium text-muted/80 ${
+                  sectionIndex === 0 ? "pt-1" : "pt-4"
+                }`}
+              >
+                {sectionLabel(section.label)}
+              </p>
 
-            {section.rows.map((c) => {
-              const active = c.id === activeId;
-              return (
-                <motion.div
-                  key={c.id}
-                  data-history-row={c.id}
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  className={`group relative ${menuOpen === c.id ? "z-20" : ""}`}
-                >
-                  {editing === c.id ? (
-                    <input
-                      className="w-full rounded-lg border border-hairline bg-transparent px-2 py-1.5 text-[12px] text-foreground outline-none"
-                      value={draft}
-                      onChange={(e) => setDraft(e.target.value)}
-                      onBlur={() => commitRename(c.id)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") commitRename(c.id);
-                        if (e.key === "Escape") setEditing(null);
-                      }}
-                      autoFocus
-                    />
-                  ) : (
-                    <>
-                      <div
-                        className={`relative overflow-hidden rounded-xl border transition-colors ${
-                          active || menuOpen === c.id
-                            ? "border-hairline-strong bg-surface"
-                            : "border-transparent group-hover:border-hairline group-hover:bg-surface"
+              {section.rows.map((c) => {
+                const active = c.id === activeId;
+                const menu = menuOpen === c.id;
+                const tooltip = [
+                  c.title,
+                  shortModelId(c.model),
+                  c.totalCostUsd ? formatCost(c.totalCostUsd) : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ");
+
+                if (editing === c.id) {
+                  return (
+                    <div key={c.id} className="py-px">
+                      <input
+                        className="dial-input h-8! px-2! text-[13.5px]!"
+                        value={draft}
+                        aria-label="Conversation title"
+                        onChange={(e) => setDraft(e.target.value)}
+                        onBlur={() => commitRename(c.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") commitRename(c.id);
+                          if (e.key === "Escape") setEditing(null);
+                        }}
+                        autoFocus
+                      />
+                    </div>
+                  );
+                }
+
+                return (
+                  <div
+                    key={c.id}
+                    data-history-row={c.id}
+                    className={`group relative ${menu ? "z-20" : ""}`}
+                  >
+                    <button
+                      data-glide-row
+                      onClick={() => onSelect(c.id)}
+                      title={tooltip}
+                      aria-current={active ? "page" : undefined}
+                      className={`relative z-10 flex h-8 w-full items-center rounded-control px-2 text-left text-[13.5px] transition-[color,background-color] duration-150 ${
+                        active
+                          ? "bg-hover-2 font-medium text-foreground"
+                          : "text-secondary hover:text-foreground"
+                      }`}
+                    >
+                      <span
+                        className={`min-w-0 flex-1 truncate transition-[padding] duration-150 ${
+                          menu ? "pr-6" : "group-hover:pr-6"
                         }`}
                       >
-                        <button
-                          className={`min-w-0 w-full px-2.5 py-2 text-left transition-colors ${
-                            active ? "text-foreground" : "text-secondary group-hover:text-foreground"
-                          }`}
-                          onClick={() => onSelect(c.id)}
-                          title={c.title}
-                        >
-                          <span
-                            className={`flex items-center gap-1.5 transition-[padding] ${
-                              menuOpen === c.id ? "pr-7" : "group-hover:pr-7"
-                            }`}
-                          >
-                            {c.pinned && (
-                              <span className="shrink-0 text-[7px] leading-none opacity-50">
-                                ●
-                              </span>
-                            )}
-                            <span className="block truncate text-[12px] leading-snug">
-                              {c.title}
-                            </span>
-                          </span>
-                          <span className="flex min-w-0 items-baseline gap-1 font-mono text-[9px] leading-tight text-muted">
-                            <span className="min-w-0 truncate">
-                              {shortModelId(c.model)}
-                            </span>
-                            {c.totalCostUsd ? (
-                              <span className="ml-auto shrink-0 tabular-nums">
-                                {formatCost(c.totalCostUsd)}
-                              </span>
-                            ) : null}
-                          </span>
-                        </button>
+                        {c.title}
+                      </span>
+                    </button>
 
-                        <button
-                          type="button"
-                          aria-label={`Actions for ${c.title}`}
-                          aria-haspopup="menu"
-                          aria-expanded={menuOpen === c.id}
-                          aria-controls={`history-actions-${c.id}`}
-                          onClick={() => {
-                            setConfirmDelete(null);
-                            setMenuOpen((current) =>
-                              current === c.id ? null : c.id,
-                            );
-                          }}
-                          className={`absolute right-1 top-1 flex h-7 w-7 items-center justify-center rounded-lg text-muted transition-all hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover:pointer-events-auto group-hover:opacity-80 ${
-                            menuOpen === c.id
-                              ? "pointer-events-auto opacity-100"
-                              : "pointer-events-none opacity-0"
-                          }`}
-                        >
-                          <svg
-                            viewBox="0 0 16 16"
-                            className="h-3.5 w-3.5"
-                            aria-hidden="true"
-                          >
-                            <circle cx="3.25" cy="8" r="1" fill="currentColor" />
-                            <circle cx="8" cy="8" r="1" fill="currentColor" />
-                            <circle cx="12.75" cy="8" r="1" fill="currentColor" />
-                          </svg>
-                        </button>
-                      </div>
+                    <button
+                      type="button"
+                      aria-label={`Actions for ${c.title}`}
+                      aria-haspopup="menu"
+                      aria-expanded={menu}
+                      aria-controls={`history-actions-${c.id}`}
+                      onClick={() => {
+                        setConfirmDelete(null);
+                        setMenuOpen((current) => (current === c.id ? null : c.id));
+                      }}
+                      className={`absolute right-1 top-1 z-20 flex size-6 items-center justify-center rounded-chip text-muted transition-[opacity,background-color,color] duration-150 hover:bg-hover-2 hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100 ${
+                        menu
+                          ? "pointer-events-auto bg-hover-2 text-foreground opacity-100"
+                          : "pointer-events-none opacity-0"
+                      }`}
+                    >
+                      <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" aria-hidden>
+                        <circle cx="3.25" cy="8" r="1.1" fill="currentColor" />
+                        <circle cx="8" cy="8" r="1.1" fill="currentColor" />
+                        <circle cx="12.75" cy="8" r="1.1" fill="currentColor" />
+                      </svg>
+                    </button>
 
-                      {menuOpen === c.id && (
-                        <motion.div
-                          id={`history-actions-${c.id}`}
-                          role="menu"
-                          aria-label={`Actions for ${c.title}`}
-                          initial={{ opacity: 0, y: -3, scale: 0.98 }}
-                          animate={{ opacity: 1, y: 0, scale: 1 }}
-                          transition={{ duration: 0.12, ease: "easeOut" }}
-                          className="absolute right-0 top-[calc(100%-2px)] z-30 w-36 rounded-xl border border-hairline-strong bg-panel p-1 shadow-[0_14px_40px_var(--shadow)]"
-                        >
+                    {menu && (
+                      <div
+                        id={`history-actions-${c.id}`}
+                        role="menu"
+                        aria-label={`Actions for ${c.title}`}
+                        className="absolute right-0 top-[calc(100%+4px)] z-30 w-44 origin-top-right rounded-card bg-panel p-1 shadow-overlay"
+                        style={{ animation: "dial-pop-in 160ms cubic-bezier(0.23,1,0.32,1) both" }}
+                      >
+                        <GlideMenu highlightClassName="inset-x-0 rounded-chip bg-hover-2">
                           <HistoryAction
-                            label={c.pinned ? "unpin" : "pin"}
+                            label={c.pinned ? "Unpin" : "Pin to top"}
+                            icon={
+                              <path d="M6 2.5h4M6.75 2.5v3.75L4.5 9h7L9.25 6.25V2.5M8 9v4.5" />
+                            }
                             onClick={() => {
                               onTogglePin(c.id);
                               setMenuOpen(null);
                             }}
                           />
                           <HistoryAction
-                            label="export"
-                            onClick={() => {
-                              onExport(c.id);
-                              setMenuOpen(null);
-                            }}
-                          />
-                          <HistoryAction
-                            label="rename"
+                            label="Rename"
+                            icon={<path d="M11.2 2.8a1.7 1.7 0 0 1 2.4 2.4L6 12.8l-3.2.8.8-3.2Z" />}
                             onClick={() => {
                               setDraft(c.title);
                               setEditing(c.id);
@@ -349,8 +398,20 @@ export default function ConversationList({
                             }}
                           />
                           <HistoryAction
-                            label={confirmDelete === c.id ? "delete?" : "delete"}
+                            label="Export Markdown"
+                            icon={<path d="M8 2.5v8M4.75 7.5 8 10.75l3.25-3.25M3 13.5h10" />}
+                            onClick={() => {
+                              onExport(c.id);
+                              setMenuOpen(null);
+                            }}
+                          />
+                          <div className="mx-1 my-1 h-px bg-line" />
+                          <HistoryAction
+                            label={confirmDelete === c.id ? "Click again to delete" : "Delete"}
                             danger={confirmDelete === c.id}
+                            icon={
+                              <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.1a1 1 0 0 0 1 .9h3.8a1 1 0 0 0 1-.9l.6-8.1" />
+                            }
                             onClick={() => {
                               if (confirmDelete !== c.id) {
                                 setConfirmDelete(c.id);
@@ -361,15 +422,15 @@ export default function ConversationList({
                               setMenuOpen(null);
                             }}
                           />
-                        </motion.div>
-                      )}
-                    </>
-                  )}
-                </motion.div>
-              );
-            })}
-          </div>
-        ))}
+                        </GlideMenu>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </GlideMenu>
       </div>
 
       <AccountButton
@@ -383,10 +444,12 @@ export default function ConversationList({
 
 function HistoryAction({
   label,
+  icon,
   danger = false,
   onClick,
 }: {
   label: string;
+  icon: ReactNode;
   danger?: boolean;
   onClick: () => void;
 }) {
@@ -394,13 +457,15 @@ function HistoryAction({
     <button
       type="button"
       role="menuitem"
+      data-glide-row
       onClick={onClick}
-      className={`flex w-full items-center rounded-lg px-2.5 py-1.5 text-left font-mono text-[10px] transition-colors ${
-        danger
-          ? "bg-invert-fill text-invert-text"
-          : "text-muted hover:bg-surface-strong hover:text-foreground"
+      className={`relative z-10 flex h-8 w-full items-center gap-2 rounded-chip px-2 text-left text-[13px] transition-colors ${
+        danger ? "bg-invert-fill text-invert-text" : "text-foreground"
       }`}
     >
+      <span className={danger ? "" : "text-muted"}>
+        <Glyph>{icon}</Glyph>
+      </span>
       {label}
     </button>
   );

@@ -21,6 +21,12 @@ export interface Env {
   /** Per-account R2 ceiling in bytes. Falls back to DEFAULT_BLOB_QUOTA_BYTES. */
   BLOB_QUOTA_BYTES?: string;
 
+  /**
+   * Per-account record rows per day. Falls back to
+   * DEFAULT_DAILY_WRITE_LIMIT. The blob quota bounds R2; this bounds D1.
+   */
+  DAILY_WRITE_LIMIT?: string;
+
   /** Signs session cookies. `wrangler secret put AUTH_SECRET`. */
   AUTH_SECRET: string;
 

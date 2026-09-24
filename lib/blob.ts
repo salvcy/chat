@@ -25,6 +25,20 @@ const MAX_PLAINTEXT_BYTES = 10 * 1024 * 1024;
 
 const encoder = new TextEncoder();
 
+/**
+ * Blob ids are two path segments — `<threadId>/<messageId>.<kind>.<n>.<m>` —
+ * because keying objects under their thread is what lets a deleted
+ * conversation be erased with one R2 prefix delete.
+ *
+ * That slash has to survive into the URL as a slash. Running
+ * `encodeURIComponent` over the whole id would send `%2F`, which proxies and
+ * origins are free to normalise or reject, so each segment is encoded on its
+ * own and the separator is written literally.
+ */
+function blobPath(blobId: string): string {
+  return blobId.split("/").map(encodeURIComponent).join("/");
+}
+
 export type UploadedBlob = {
   id: string;
   /** Present once the R2 bucket has a public custom domain. */
@@ -182,7 +196,7 @@ export async function uploadPayloadBlob(
   payload: string,
 ): Promise<void> {
   const packed = await pack(blobId, encoder.encode(payload), null);
-  const response = await fetch(`${API}/${encodeURIComponent(blobId)}`, {
+  const response = await fetch(`${API}/${blobPath(blobId)}`, {
     method: "PUT",
     credentials: "same-origin",
     headers: { "Content-Type": "application/octet-stream" },
@@ -194,7 +208,7 @@ export async function uploadPayloadBlob(
 export async function downloadPayloadBlob(
   blobId: string,
 ): Promise<string | null> {
-  const response = await fetch(`${API}/${encodeURIComponent(blobId)}`, {
+  const response = await fetch(`${API}/${blobPath(blobId)}`, {
     credentials: "same-origin",
   });
   if (response.status === 404) return null;
@@ -210,7 +224,7 @@ export async function uploadBlob(
   key: CryptoKey | null,
 ): Promise<UploadedBlob> {
   const packed = await pack(blobId, dataUrlBytes(dataUrl), key);
-  const response = await fetch(`${API}/${encodeURIComponent(blobId)}`, {
+  const response = await fetch(`${API}/${blobPath(blobId)}`, {
     method: "PUT",
     credentials: "same-origin",
     headers: { "Content-Type": "application/octet-stream" },
@@ -230,7 +244,7 @@ async function fetchPacked(blobId: string, publicUrl?: string): Promise<Response
       // route remains the correctness fallback until it is ready.
     }
   }
-  return fetch(`${API}/${encodeURIComponent(blobId)}`, {
+  return fetch(`${API}/${blobPath(blobId)}`, {
     credentials: "same-origin",
   });
 }

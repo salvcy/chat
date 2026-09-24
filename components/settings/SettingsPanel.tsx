@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { motion } from "motion/react";
 import Link from "next/link";
+import Button from "@/components/ui/Button";
 import type { SessionUser } from "@/lib/auth-client";
 import { keyFingerprint, looksLikeKey } from "@/lib/credentials";
 import {
@@ -25,9 +25,8 @@ import type { AccountUsage } from "@/lib/settings";
  * custom properties before the network is involved, so they feel instant
  * regardless of connection.
  *
- * State is shown by inversion, never colour: the selected segment is a
- * filled block with the contrast swapped, which is the same language the
- * model switcher and the send button already speak.
+ * State is shown by fill, never colour: the selected segment is a lifted
+ * thumb that slides between peers.
  */
 
 type Section = "account" | "keys" | "appearance";
@@ -40,29 +39,52 @@ const SECTIONS: { id: Section; label: string }[] = [
 
 /* ------------------------------- primitives ---------------------------- */
 
+/**
+ * Equal-width segments with a thumb that slides to the selection — Beautiful
+ * UI's SegmentedControl (beautifului.dev, MIT). The thumb is a lifted
+ * surface, not an inversion: this is a choice among peers, and a filled block
+ * would read as "on".
+ */
 function Segmented<T extends string>({
   value,
   options,
   onChange,
   labels,
+  label,
 }: {
   value: T;
   options: readonly T[];
   onChange: (next: T) => void;
   labels?: Partial<Record<T, string>>;
+  label?: string;
 }) {
+  const index = Math.max(0, options.indexOf(value));
   return (
-    <div className="flex gap-1 rounded-full border border-hairline p-1">
+    <div
+      role="radiogroup"
+      aria-label={label}
+      className="relative grid h-8 select-none rounded-full bg-hover-2 p-0.5"
+      style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}
+    >
+      <span
+        aria-hidden
+        className="absolute inset-y-0.5 left-0.5 rounded-full bg-panel shadow-btn transition-transform duration-200 ease-out-strong"
+        style={{
+          width: `calc((100% - 4px) / ${options.length})`,
+          transform: `translateX(${index * 100}%)`,
+        }}
+      />
       {options.map((option) => {
         const active = option === value;
         return (
           <button
             key={option}
+            type="button"
+            role="radio"
+            aria-checked={active}
             onClick={() => onChange(option)}
-            className={`flex-1 rounded-full px-2.5 py-1 font-mono text-[10px] transition-colors ${
-              active
-                ? "bg-invert-fill text-invert-text"
-                : "text-muted hover:text-foreground"
+            className={`relative z-10 truncate rounded-full px-2 text-[12.5px] font-medium capitalize transition-colors duration-150 ${
+              active ? "text-foreground" : "text-muted hover:text-secondary"
             }`}
           >
             {labels?.[option] ?? option}
@@ -107,10 +129,8 @@ function Meter({
   return (
     <div>
       <div className="flex items-baseline justify-between gap-3">
-        <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
-          {label}
-        </span>
-        <span className="font-mono text-[10px] text-secondary">{detail}</span>
+        <span className="text-[12.5px] font-medium text-foreground">{label}</span>
+        <span className="font-mono text-[11px] tabular-nums text-secondary">{detail}</span>
       </div>
       <div
         role="progressbar"
@@ -118,7 +138,7 @@ function Meter({
         aria-valuemax={100}
         aria-valuenow={Math.round(ratio * 100)}
         aria-label={label}
-        className="mt-2 h-1 w-full overflow-hidden rounded-full bg-hairline"
+        className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-hover-2"
       >
         <div
           className="h-full rounded-full bg-foreground transition-[width] duration-300 ease-out"
@@ -126,9 +146,9 @@ function Meter({
         />
       </div>
       {full && (
-        <p className="mt-1.5 font-mono text-[9px] leading-relaxed text-muted">
-          nearly full — deleting a conversation also deletes its images and
-          attachments
+        <p className="mt-1.5 text-[11.5px] leading-relaxed text-muted">
+          Nearly full — deleting a conversation also deletes its images and
+          attachments.
         </p>
       )}
     </div>
@@ -145,15 +165,11 @@ function Row({
   children: React.ReactNode;
 }) {
   return (
-    <div className="py-3.5">
-      <div className="mb-2 flex items-baseline justify-between gap-3">
-        <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
-          {label}
-        </span>
+    <div className="py-4">
+      <div className="mb-2.5 flex items-baseline justify-between gap-3">
+        <span className="text-[13px] font-medium text-foreground">{label}</span>
         {hint && (
-          <span className="font-mono text-[9px] text-muted opacity-70">
-            {hint}
-          </span>
+          <span className="font-mono text-[11px] text-muted">{hint}</span>
         )}
       </div>
       {children}
@@ -168,6 +184,7 @@ export default function SettingsPanel({
   settings,
   status,
   encrypted,
+  deviceKeyStored,
   onUpdate,
   onSignOut,
   onDestroy,
@@ -181,8 +198,9 @@ export default function SettingsPanel({
   settings: UserSettings;
   status: SyncStatus;
   encrypted: boolean;
+  deviceKeyStored: boolean;
   onUpdate: (patch: Partial<UserSettings>) => void;
-  onSignOut: (wipeDevice: boolean) => Promise<void>;
+  onSignOut: () => Promise<void>;
   onDestroy: () => Promise<void>;
   onSync: () => Promise<void>;
   usage: AccountUsage | null;
@@ -219,100 +237,109 @@ export default function SettingsPanel({
       role="dialog"
       aria-modal="true"
       aria-label="Settings"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-chrome/70 px-6 backdrop-blur-md"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4 backdrop-blur-[2px]"
       onClick={onClose}
+      style={{ animation: "dial-fade-in 150ms ease-out both" }}
     >
-      <motion.div
-        initial={{ opacity: 0, y: 6 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.15, ease: "easeOut" }}
+      <div
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[86vh] w-full max-w-[480px] flex-col overflow-hidden rounded-[18px] border border-hairline bg-background"
+        className="flex max-h-[86vh] w-full max-w-[480px] flex-col overflow-hidden rounded-window bg-panel shadow-overlay"
+        style={{ animation: "dial-pop-in 200ms cubic-bezier(0.23,1,0.32,1) both" }}
       >
         {/* header */}
-        <div className="shrink-0 px-6 pt-5">
-          <div className="flex items-baseline justify-between gap-3">
-            <p className="font-mono text-[10px] uppercase tracking-wider text-muted">
-              settings
-            </p>
+        <div className="shrink-0 border-b border-line px-5 pb-4 pt-4">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-foreground">
+              Settings
+            </h2>
             <button
+              type="button"
               onClick={onClose}
-              className="font-mono text-[10px] text-muted transition-colors hover:text-foreground"
+              aria-label="Close settings"
+              className="flex size-7 items-center justify-center rounded-control text-muted transition-colors hover:bg-hover-2 hover:text-foreground"
             >
-              esc
+              <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden>
+                <path d="m4 4 8 8M12 4l-8 8" />
+              </svg>
             </button>
           </div>
 
-          <div className="mt-4 flex gap-1 border-b border-hairline">
-            {SECTIONS.map((entry) => (
-              <button
-                key={entry.id}
-                onClick={() => setSection(entry.id)}
-                className={`-mb-px border-b px-2.5 pb-2.5 font-mono text-[10px] uppercase tracking-wider transition-colors ${
-                  section === entry.id
-                    ? "border-foreground text-foreground"
-                    : "border-transparent text-muted hover:text-secondary"
-                }`}
-              >
-                {entry.label}
-              </button>
-            ))}
+          <div className="mt-3.5">
+            <Segmented
+              label="Settings section"
+              value={section}
+              options={SECTIONS.map((entry) => entry.id)}
+              onChange={setSection}
+              labels={{ account: "Account", keys: "Keys", appearance: "Appearance" }}
+            />
           </div>
         </div>
 
         {/* body */}
-        <div className="dial-scroll-none min-h-0 flex-1 overflow-y-auto px-6 pb-6">
+        <div className="dial-scroll-none min-h-0 flex-1 overflow-y-auto px-5 pb-5">
           {section === "account" && (
-            <div className="divide-y divide-hairline">
+            <div className="divide-y divide-line">
               {user ? (
                 <>
-                  <div className="py-4">
-                    <p className="text-[14px] text-foreground">{user.name}</p>
-                    <p className="mt-0.5 font-mono text-[11px] text-muted">
-                      {user.email}
-                    </p>
+                  <div className="flex items-center gap-3 py-4">
+                    <span
+                      aria-hidden
+                      className="flex size-10 shrink-0 items-center justify-center rounded-full bg-foreground text-[15px] font-semibold text-background"
+                    >
+                      {(user.name || user.email).trim().charAt(0).toUpperCase()}
+                    </span>
+                    <div className="min-w-0">
+                      <p className="truncate text-[14px] font-medium text-foreground">{user.name}</p>
+                      <p className="mt-0.5 truncate font-mono text-[11.5px] text-muted">
+                        {user.email}
+                      </p>
+                    </div>
                   </div>
 
                   {usage && (
-                    <Row label="storage">
+                    <Row label="Storage">
                       <div className="space-y-3.5">
                         <Meter
-                          label="files"
+                          label="Files"
                           used={usage.blobBytes}
                           total={usage.blobQuota}
                           detail={`${formatBytes(usage.blobBytes)} of ${formatBytes(usage.blobQuota)}`}
                         />
-                        <div className="flex items-baseline justify-between gap-3 font-mono text-[10px] text-muted">
+                        <div className="flex items-baseline justify-between gap-3 font-mono text-[11px] text-muted">
                           <span>
                             {usage.blobCount === 1
                               ? "1 image or attachment"
                               : `${usage.blobCount} images and attachments`}
                           </span>
                           <span>
-                            {usage.records === 1
-                              ? "1 synced record"
-                              : `${usage.records} synced records`}
+                            {usage.threads === 1
+                              ? "1 conversation"
+                              : `${usage.threads} conversations`}
+                            {" · "}
+                            {usage.messages === 1
+                              ? "1 message"
+                              : `${usage.messages} messages`}
                           </span>
                         </div>
                       </div>
                     </Row>
                   )}
 
-                  <Row label="chat history">
-                    <p className="text-[12px] leading-relaxed text-secondary">
+                  <Row label="Chat history">
+                    <p className="text-[12.5px] leading-relaxed text-secondary">
                       {encrypted
                         ? "End-to-end encrypted. Your password derives the key, so the server stores ciphertext it cannot read."
                         : "Stored in your account. This sign-in method supplies no key, so the server can read it."}
                     </p>
                     <div className="mt-2.5 flex items-center gap-2">
-                      <button
+                      <Button
+                        size="xs"
                         onClick={() => void onSync()}
                         disabled={status.state === "syncing"}
-                        className="rounded-full border border-hairline px-3 py-1.5 font-mono text-[10px] text-secondary transition-colors hover:border-hairline-strong hover:text-foreground disabled:opacity-40"
                       >
-                        {status.state === "syncing" ? "syncing…" : "sync now"}
-                      </button>
-                      <span className="font-mono text-[10px] text-muted">
+                        {status.state === "syncing" ? "Syncing…" : "Sync now"}
+                      </Button>
+                      <span className="font-mono text-[11px] text-muted">
                         {status.state === "error"
                           ? status.message
                           : status.state === "idle" && status.at
@@ -322,62 +349,71 @@ export default function SettingsPanel({
                     </div>
                   </Row>
 
-                  <Row label="session">
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        onClick={() => void onSignOut(true).then(onClose)}
-                        className="rounded-full border border-hairline px-3 py-1.5 font-mono text-[10px] text-secondary transition-colors hover:border-hairline-strong hover:text-foreground"
-                      >
-                        sign out
-                      </button>
-                      <button
-                        onClick={() => void onSignOut(false).then(onClose)}
-                        className="rounded-full border border-hairline px-3 py-1.5 font-mono text-[10px] text-muted transition-colors hover:text-foreground"
-                      >
-                        sign out, keep local copy
-                      </button>
-                    </div>
-                    <p className="mt-2 font-mono text-[10px] leading-relaxed text-muted">
-                      signing out clears this device by default — your history
-                      stays in your account
+                  {encrypted && (
+                    <Row
+                      label="Device unlock"
+                      hint={deviceKeyStored ? "saved here" : "session only"}
+                    >
+                      <p className="mb-2.5 text-[12.5px] leading-relaxed text-secondary">
+                        {settings.rememberDeviceKey
+                          ? "This browser keeps a non-exportable unlock key, so refreshes do not ask for your password."
+                          : "The unlock key stays in memory only. Closing or refreshing the app requires your password again."}
+                      </p>
+                      <Segmented
+                        label="Device unlock"
+                        value={settings.rememberDeviceKey ? "remember" : "lock"}
+                        options={["remember", "lock"] as const}
+                        onChange={(next) =>
+                          onUpdate({ rememberDeviceKey: next === "remember" })
+                        }
+                        labels={{ remember: "Remember browser", lock: "Lock on exit" }}
+                      />
+                      <p className="mt-2 text-[11.5px] leading-relaxed text-muted">
+                        A synced preference — the key itself never leaves this browser.
+                      </p>
+                    </Row>
+                  )}
+
+                  <Row label="Session">
+                    <Button size="xs" onClick={() => void onSignOut().then(onClose)}>
+                      Sign out
+                    </Button>
+                    <p className="mt-2 text-[11.5px] leading-relaxed text-muted">
+                      Removes this browser&apos;s unlock key. Your history stays in
+                      your account.
                     </p>
                   </Row>
 
                   <div className="pt-4">
                     {confirmDestroy ? (
                       <div className="flex items-center justify-between gap-3">
-                        <p className="font-mono text-[10px] leading-relaxed text-muted">
-                          deletes your account and every conversation. no
-                          recovery.
+                        <p className="text-[12px] leading-relaxed text-secondary">
+                          Deletes your account and every conversation. There is
+                          no recovery.
                         </p>
-                        <div className="flex shrink-0 gap-2">
-                          <button
-                            onClick={() => setConfirmDestroy(false)}
-                            className="rounded-full border border-hairline px-3 py-1.5 font-mono text-[10px] text-secondary"
-                          >
-                            cancel
-                          </button>
-                          <button
-                            onClick={() => void onDestroy().then(onClose)}
-                            className="rounded-full bg-foreground px-3 py-1.5 font-mono text-[10px] text-background"
-                          >
-                            delete
-                          </button>
+                        <div className="flex shrink-0 gap-1.5">
+                          <Button size="xs" variant="quiet" onClick={() => setConfirmDestroy(false)}>
+                            Cancel
+                          </Button>
+                          <Button size="xs" variant="primary" onClick={() => void onDestroy().then(onClose)}>
+                            Delete forever
+                          </Button>
                         </div>
                       </div>
                     ) : (
                       <div className="flex items-center justify-between gap-3">
                         <Link
                           href="/privacy"
-                          className="font-mono text-[10px] text-muted underline decoration-hairline underline-offset-2 transition-colors hover:text-foreground"
+                          className="text-[12px] text-muted transition-colors hover:text-foreground"
                         >
-                          privacy policy
+                          <span className="dial-underline">Privacy policy</span>
                         </Link>
                         <button
+                          type="button"
                           onClick={() => setConfirmDestroy(true)}
-                          className="shrink-0 font-mono text-[10px] text-muted underline decoration-hairline underline-offset-2 transition-colors hover:text-foreground"
+                          className="shrink-0 text-[12px] text-muted transition-colors hover:text-foreground"
                         >
-                          delete account
+                          <span className="dial-underline">Delete account</span>
                         </button>
                       </div>
                     )}
@@ -386,8 +422,8 @@ export default function SettingsPanel({
               ) : (
                 <div className="py-4">
                   <p className="text-[13px] leading-relaxed text-secondary">
-                    You are not signed in. Conversations stay on this device
-                    only, and are lost if you clear the browser.
+                    Sign in is required because conversations live in the
+                    encrypted cloud store, not in this browser.
                   </p>
                   <button
                     onClick={onSignInRequested}
@@ -396,8 +432,8 @@ export default function SettingsPanel({
                     Sign in or create an account
                   </button>
                   <p className="mt-3 font-mono text-[10px] leading-relaxed text-muted">
-                    your key and appearance below are saved on this device
-                    either way — an account carries them everywhere
+                    account settings carry your key and preferences between
+                    devices
                   </p>
                 </div>
               )}
@@ -405,16 +441,16 @@ export default function SettingsPanel({
           )}
 
           {section === "keys" && (
-            <div className="divide-y divide-hairline">
+            <div className="divide-y divide-line">
               <Row
-                label="openrouter key"
+                label="OpenRouter key"
                 hint={
                   settings.openrouterKey
                     ? keyFingerprint(settings.openrouterKey)
                     : "not set"
                 }
               >
-                <p className="mb-2.5 text-[12px] leading-relaxed text-secondary">
+                <p className="mb-3 text-[12.5px] leading-relaxed text-secondary">
                   Requests go from your browser straight to OpenRouter, so the
                   key is only ever used here.
                   {user
@@ -426,16 +462,13 @@ export default function SettingsPanel({
 
                 {settings.openrouterKey ? (
                   <div className="flex items-center gap-2">
-                    <code className="flex-1 truncate rounded-full border border-hairline bg-surface px-3 py-1.5 font-mono text-[11px] text-secondary">
+                    <code className="flex h-[30px] flex-1 items-center truncate rounded-control bg-field px-3 font-mono text-[12px] text-secondary shadow-hairline">
                       sk-or-v1-{"…"}
                       {settings.openrouterKey.slice(-6)}
                     </code>
-                    <button
-                      onClick={() => onUpdate({ openrouterKey: null })}
-                      className="shrink-0 rounded-full border border-hairline px-3 py-1.5 font-mono text-[10px] text-muted transition-colors hover:text-foreground"
-                    >
-                      remove
-                    </button>
+                    <Button onClick={() => onUpdate({ openrouterKey: null })}>
+                      Remove
+                    </Button>
                   </div>
                 ) : (
                   <div className="flex gap-2">
@@ -450,57 +483,53 @@ export default function SettingsPanel({
                       placeholder="sk-or-v1-…"
                       autoComplete="off"
                       spellCheck={false}
-                      className="min-w-0 flex-1 rounded-full border border-hairline bg-surface px-3.5 py-2 font-mono text-xs text-foreground placeholder:text-muted focus:outline-none"
+                      aria-label="OpenRouter API key"
+                      className="dial-input h-[34px]! min-w-0 flex-1 font-mono text-[12.5px]!"
                     />
-                    <button
-                      onClick={saveKey}
-                      disabled={!keyDraft.trim()}
-                      className="shrink-0 rounded-full border border-hairline px-3.5 py-2 font-mono text-[10px] text-secondary transition-colors hover:border-hairline-strong hover:text-foreground disabled:opacity-40"
-                    >
-                      save
-                    </button>
+                    <Button variant="primary" onClick={saveKey} disabled={!keyDraft.trim()} className="h-[34px]!">
+                      Save
+                    </Button>
                   </div>
                 )}
                 {keyError && (
-                  <p className="mt-2 font-mono text-[10px] text-foreground">
-                    {keyError}
-                  </p>
+                  <p className="mt-2 text-[12px] text-foreground">{keyError}</p>
                 )}
               </Row>
             </div>
           )}
 
           {section === "appearance" && (
-            <div className="divide-y divide-hairline">
-              <Row label="theme">
+            <div className="divide-y divide-line">
+              <Row label="Theme">
                 <Segmented
+                  label="Theme"
                   value={settings.theme}
                   options={THEMES}
                   onChange={(theme) => onUpdate({ theme })}
                 />
               </Row>
-              <Row label="typeface" hint="system uses no webfont">
+              <Row label="Typeface" hint="system uses no webfont">
                 <Segmented
                   value={settings.font}
                   options={FONTS}
                   onChange={(font) => onUpdate({ font })}
                 />
               </Row>
-              <Row label="text size">
+              <Row label="Text size">
                 <Segmented
                   value={settings.textSize}
                   options={TEXT_SIZES}
                   onChange={(textSize) => onUpdate({ textSize })}
                 />
               </Row>
-              <Row label="column width">
+              <Row label="Column width">
                 <Segmented
                   value={settings.width}
                   options={WIDTHS}
                   onChange={(width) => onUpdate({ width })}
                 />
               </Row>
-              <Row label="density">
+              <Row label="Density">
                 <Segmented
                   value={settings.density}
                   options={DENSITIES}
@@ -524,7 +553,7 @@ export default function SettingsPanel({
             </div>
           )}
         </div>
-      </motion.div>
+      </div>
     </div>
   );
 }

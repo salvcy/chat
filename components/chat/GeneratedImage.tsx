@@ -3,6 +3,8 @@
 import Image from "next/image";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useState } from "react";
+import Button from "@/components/ui/Button";
+import { Elapsed, PixelGrid } from "@/components/ui/Loader";
 import { shortModelId } from "@/lib/capabilities";
 import { formatCost, formatDuration } from "@/lib/format";
 import type { GeneratedImageData } from "@/lib/types";
@@ -36,7 +38,7 @@ function GeneratedAsset({
 
   if (!asset.url) {
     return (
-      <div className="flex min-h-28 w-full max-w-[560px] items-center justify-center rounded-[18px] border border-hairline px-5 text-center font-mono text-[10px] leading-relaxed text-muted">
+      <div className="flex min-h-28 w-full max-w-[560px] items-center justify-center rounded-card bg-field px-5 text-center font-mono text-[11px] leading-relaxed text-muted shadow-hairline">
         image pixels are unavailable on this device
       </div>
     );
@@ -44,14 +46,14 @@ function GeneratedAsset({
 
   return (
     <figure
-      className="group/image relative max-w-full overflow-hidden rounded-[18px]"
+      className="group/image relative max-w-full overflow-hidden rounded-card"
       style={{ width: `min(100%, ${layout.width}px)` }}
     >
       <button
         type="button"
         onClick={onExpand}
         aria-label={`View generated image ${index + 1}`}
-        className="relative block w-full overflow-hidden rounded-[18px]"
+        className="relative block w-full overflow-hidden rounded-card"
         style={{ aspectRatio: layout.aspectRatio }}
       >
         <Image
@@ -119,26 +121,23 @@ export default function GeneratedImage({
       <div
         role="status"
         aria-label="Generating image"
-        className="mb-3 flex w-fit max-w-full items-center gap-2.5 rounded-2xl border border-hairline bg-surface py-2 pl-2 pr-3.5"
+        className="mb-3 flex w-fit max-w-full items-center gap-3 rounded-card bg-panel py-2 pl-2 pr-3.5 shadow-card"
       >
-        <motion.span
+        <span
           aria-hidden
-          animate={{ opacity: [0.45, 1, 0.45] }}
-          transition={{ duration: 1.6, repeat: Infinity, ease: "easeInOut" }}
-          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-invert-fill text-invert-text"
+          className="flex size-9 shrink-0 items-center justify-center rounded-control bg-field shadow-hairline"
         >
-          <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="2.5" y="3" width="11" height="10" rx="2" />
-            <circle cx="10.5" cy="6" r="1" />
-            <path d="m4.5 11 2.6-2.6 1.7 1.7 1-1 1.7 1.9" />
-          </svg>
-        </motion.span>
+          <PixelGrid />
+        </span>
 
-        <span className="flex min-w-0 flex-col">
-          <span className="dial-shimmer font-mono text-[11px] leading-tight">
-            rendering image…
+        <span className="flex min-w-0 flex-col gap-0.5">
+          <span className="flex items-center gap-2">
+            <span className="dial-shimmer text-[13px] font-medium leading-tight">
+              Rendering image
+            </span>
+            <Elapsed />
           </span>
-          <span className="truncate font-mono text-[9px] leading-tight text-muted">
+          <span className="truncate font-mono text-[11px] leading-tight text-muted">
             @image · {shortModelId(data.model)}
           </span>
         </span>
@@ -148,21 +147,17 @@ export default function GeneratedImage({
 
   if (data.status === "error") {
     return (
-      <div className="mb-3 max-w-[560px] rounded-[18px] border border-hairline bg-surface px-4 py-3">
-        <p className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted">
-          image generation failed
+      <div className="mb-3 max-w-[560px] rounded-card bg-panel px-4 py-3.5 shadow-card">
+        <p className="text-[13.5px] font-medium text-foreground">
+          Image generation failed
         </p>
-        <p className="mt-1.5 text-[13px] leading-relaxed text-secondary">
+        <p className="mt-1 text-[13px] leading-relaxed text-secondary">
           {data.error ?? "The image model did not return an image."}
         </p>
         {onRetry && (
-          <button
-            type="button"
-            onClick={onRetry}
-            className="mt-3 rounded-full border border-hairline px-3 py-1.5 font-mono text-[10px] text-muted transition-colors hover:border-hairline-strong hover:text-foreground"
-          >
-            retry image
-          </button>
+          <Button size="xs" onClick={onRetry} className="mt-3">
+            Retry image
+          </Button>
         )}
       </div>
     );
@@ -202,7 +197,7 @@ export default function GeneratedImage({
           <span>image</span>
           {summary.map((item) => (
             <span key={item} className="flex items-center gap-2">
-              <span className="text-hairline">·</span>
+              <span className="opacity-40">·</span>
               <span>{item}</span>
             </span>
           ))}

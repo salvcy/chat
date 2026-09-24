@@ -1,9 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { motion } from "motion/react";
-import { isAdult } from "@/lib/auth-client";
 import Link from "next/link";
+import { isAdult } from "@/lib/auth-client";
+import Button from "@/components/ui/Button";
+import { GateCard } from "./FrontDoor";
 
 /**
  * Sign in, or create an account.
@@ -31,7 +32,16 @@ export default function AuthPanel({
   }) => Promise<{ verificationRequired: boolean }>;
   onVerifyEmail: (email: string, otp: string) => Promise<void>;
   onResendEmail: (email: string) => Promise<void>;
-  onClose: () => void;
+  /**
+   * Absent when this is the front door rather than a panel.
+   *
+   * Signing in used to be two clicks deep behind the account button, because
+   * the app worked perfectly well without an account. It does not any more —
+   * there is no local store to fall back on — so this is the first thing an
+   * unauthenticated visitor sees, and a front door with a dismiss button
+   * would dismiss to nothing.
+   */
+  onClose?: () => void;
 }) {
   const [mode, setMode] = useState<"in" | "up">("in");
   const [email, setEmail] = useState("");
@@ -65,7 +75,7 @@ export default function AuthPanel({
       } else {
         await onSignIn(email, password);
       }
-      onClose();
+      onClose?.();
     } catch (err) {
       setBusy(false);
       setError(
@@ -80,7 +90,7 @@ export default function AuthPanel({
     setError(null);
     try {
       await onVerifyEmail(verificationFor, otp);
-      onClose();
+      onClose?.();
     } catch (err) {
       setBusy(false);
       setError(
@@ -89,192 +99,244 @@ export default function AuthPanel({
     }
   };
 
-  const field =
-    "w-full rounded-xl border border-hairline bg-surface px-3.5 py-2.5 text-[13px] text-foreground placeholder:text-muted focus:outline-none";
+  const gate = onClose === undefined;
+
+  const card = (
+    <GateCard>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-[19px] font-semibold tracking-[-0.02em] text-foreground">
+            {verificationFor
+              ? "Check your email"
+              : creating
+                ? "Create your account"
+                : "Welcome back"}
+          </h1>
+          <p className="mt-1 text-[13px] leading-relaxed text-secondary">
+            {verificationFor
+              ? `We sent a six-digit code to ${verificationFor}.`
+              : creating
+                ? "Your conversations, encrypted, on every device."
+                : "Sign in to pick up where you left off."}
+          </p>
+        </div>
+        {!gate && (
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="dial-kbd shrink-0 transition-colors hover:text-foreground"
+          >
+            esc
+          </button>
+        )}
+      </div>
+
+      {verificationFor ? (
+        <>
+          <input
+            value={otp}
+            onChange={(event) =>
+              setOtp(event.target.value.replace(/\D/g, "").slice(0, 6))
+            }
+            onKeyDown={(event) => event.key === "Enter" && void verify()}
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            autoFocus
+            aria-label="Verification code"
+            placeholder="000000"
+            className="dial-input mt-6 h-12! text-center font-mono text-[20px]! tracking-[0.32em]"
+          />
+          <Button
+            variant="primary"
+            size="md"
+            onClick={() => void verify()}
+            disabled={otp.length !== 6 || busy}
+            className="mt-3 w-full"
+          >
+            {busy ? "Verifying…" : "Verify email"}
+          </Button>
+          <Button
+            variant="quiet"
+            size="sm"
+            onClick={() =>
+              void onResendEmail(verificationFor).catch((err) =>
+                setError(err instanceof Error ? err.message : "could not resend code"),
+              )
+            }
+            disabled={busy}
+            className="mt-2 w-full"
+          >
+            Resend code
+          </Button>
+        </>
+      ) : (
+        <>
+          <form
+            className="mt-6 space-y-2.5"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submit();
+            }}
+          >
+            {creating && (
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Name"
+                aria-label="Name"
+                autoComplete="name"
+                className="dial-input"
+              />
+            )}
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="Email"
+              aria-label="Email"
+              autoComplete="email"
+              className="dial-input"
+            />
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Password"
+              aria-label="Password"
+              autoComplete={creating ? "new-password" : "current-password"}
+              className="dial-input"
+            />
+            {creating && (
+              <div className="pt-1">
+                <label
+                  htmlFor="auth-dob"
+                  className="mb-1.5 block text-[12px] font-medium text-secondary"
+                >
+                  Date of birth
+                </label>
+                <input
+                  id="auth-dob"
+                  type="date"
+                  value={dob}
+                  onChange={(e) => setDob(e.target.value)}
+                  className="dial-input font-mono text-[12.5px]!"
+                />
+                <p className="mt-1.5 text-[11.5px] leading-relaxed text-muted">
+                  {dobProblem
+                    ? "You must be 18 or older to create an account."
+                    : "This service is for adults only (18+)."}
+                </p>
+              </div>
+            )}
+
+            <Button
+              type="submit"
+              variant="primary"
+              size="md"
+              disabled={!complete || busy}
+              className="mt-4! w-full"
+            >
+              {busy ? (
+                <span className="flex items-center gap-2">
+                  <span
+                    aria-hidden
+                    className="size-3 rounded-full border-[1.5px] border-current border-t-transparent"
+                    style={{ animation: "dial-spin 700ms linear infinite" }}
+                  />
+                  Securing your password…
+                </span>
+              ) : creating ? (
+                "Create account"
+              ) : (
+                "Sign in"
+              )}
+            </Button>
+          </form>
+
+          <div className="mt-5 flex items-center gap-3">
+            <span className="h-px flex-1 bg-line" />
+            <span className="text-[11px] text-muted">or</span>
+            <span className="h-px flex-1 bg-line" />
+          </div>
+
+          <Button
+            variant="secondary"
+            size="md"
+            disabled
+            className="mt-5 w-full"
+            title="Google sign-in is not available yet"
+          >
+            <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" aria-hidden fill="currentColor">
+              <path d="M15.2 8.2c0-.5 0-1-.1-1.5H8v2.9h4a3.4 3.4 0 0 1-1.5 2.2v1.8h2.4c1.4-1.3 2.3-3.2 2.3-5.4Z" />
+              <path d="M8 15.4c2 0 3.7-.7 4.9-1.8l-2.4-1.8c-.7.4-1.5.7-2.5.7a4.3 4.3 0 0 1-4-3H1.5v1.9A7.4 7.4 0 0 0 8 15.4Z" opacity=".7" />
+              <path d="M4 9.5a4.4 4.4 0 0 1 0-2.9V4.7H1.5a7.4 7.4 0 0 0 0 6.7L4 9.5Z" opacity=".5" />
+              <path d="M8 3.6c1.1 0 2.1.4 2.9 1.1L13 2.6A7.2 7.2 0 0 0 8 .6a7.4 7.4 0 0 0-6.5 4.1L4 6.6a4.3 4.3 0 0 1 4-3Z" opacity=".85" />
+            </svg>
+            Continue with Google
+            <span className="font-normal text-muted">· soon</span>
+          </Button>
+        </>
+      )}
+
+      {error && (
+        <p
+          role="alert"
+          className="mt-4 rounded-control bg-hover px-3 py-2 text-[12.5px] leading-relaxed text-foreground"
+          style={{ animation: "dial-fade-up 200ms cubic-bezier(0.23,1,0.32,1) both" }}
+        >
+          {error}
+        </p>
+      )}
+
+      {!verificationFor && (
+        <p className="mt-6 text-center text-[12.5px] text-secondary">
+          {creating ? "Already have an account? " : "New here? "}
+          <button
+            type="button"
+            onClick={() => {
+              setMode(creating ? "in" : "up");
+              setError(null);
+            }}
+            className="font-medium text-foreground"
+          >
+            <span className="dial-underline">
+              {creating ? "Sign in" : "Create an account"}
+            </span>
+          </button>
+        </p>
+      )}
+
+      <p className="mt-5 border-t border-line pt-4 text-[11.5px] leading-relaxed text-muted">
+        {verificationFor
+          ? "The code expires in 10 minutes. You have five attempts."
+          : "Your password is stretched on this device and never sent. It also derives the key that encrypts your chats."}{" "}
+        {!verificationFor && (
+          <>
+            By continuing you agree to the{" "}
+            <Link href="/privacy" className="text-secondary transition-colors hover:text-foreground">
+              <span className="dial-underline">privacy policy</span>
+            </Link>
+            .
+          </>
+        )}
+      </p>
+    </GateCard>
+  );
+
+  if (gate) return card;
 
   return (
     <div
       role="dialog"
-      aria-modal="true"
+      aria-modal
       aria-label="Account"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-chrome/70 px-6 backdrop-blur-md"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-[2px]"
       onClick={onClose}
     >
-      <motion.div
-        initial={{ opacity: 0, y: 6 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.15, ease: "easeOut" }}
-        onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-[400px] rounded-[18px] border border-hairline bg-background p-6"
-      >
-        <div className="flex items-baseline justify-between gap-3">
-          <p className="font-mono text-[10px] uppercase tracking-wider text-muted">
-            {verificationFor ? "verify email" : creating ? "create account" : "sign in"}
-          </p>
-          <button
-            onClick={onClose}
-            className="font-mono text-[10px] text-muted transition-colors hover:text-foreground"
-          >
-            esc
-          </button>
-        </div>
-
-        <h2 className="mt-2 text-[15px] leading-relaxed text-foreground">
-          {verificationFor
-            ? `We sent a six-digit code to ${verificationFor}.`
-            : creating
-            ? "Your conversations, on every device."
-            : "Welcome back."}
-        </h2>
-
-        {verificationFor ? (
-          <>
-            <input
-              value={otp}
-              onChange={(event) =>
-                setOtp(event.target.value.replace(/\D/g, "").slice(0, 6))
-              }
-              onKeyDown={(event) => event.key === "Enter" && void verify()}
-              inputMode="numeric"
-              autoComplete="one-time-code"
-              autoFocus
-              aria-label="Verification code"
-              placeholder="000000"
-              className={`${field} mt-5 text-center font-mono text-[20px] tracking-[0.28em]`}
-            />
-            <button
-              onClick={() => void verify()}
-              disabled={otp.length !== 6 || busy}
-              className="mt-3 w-full rounded-full bg-foreground px-4 py-2.5 text-[13px] font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-30"
-            >
-              {busy ? "verifying…" : "Verify email"}
-            </button>
-            <button
-              onClick={() =>
-                void onResendEmail(verificationFor).catch((err) =>
-                  setError(err instanceof Error ? err.message : "could not resend code"),
-                )
-              }
-              disabled={busy}
-              className="mt-3 w-full text-center font-mono text-[10px] text-muted transition-colors hover:text-foreground disabled:opacity-40"
-            >
-              resend code
-            </button>
-          </>
-        ) : (
-          <>
-        <button
-          disabled
-          className="mt-5 w-full cursor-not-allowed rounded-full border border-hairline px-4 py-2.5 text-[13px] text-muted opacity-55"
-        >
-          Google · coming soon
-        </button>
-
-        <div className="mt-5 flex items-center gap-3">
-          <span className="h-px flex-1 bg-hairline" />
-          <span className="font-mono text-[9px] uppercase tracking-wider text-muted">
-            or
-          </span>
-          <span className="h-px flex-1 bg-hairline" />
-        </div>
-
-        <div className="mt-4 space-y-2.5">
-          {creating && (
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Name"
-              autoComplete="name"
-              className={field}
-            />
-          )}
-          <input
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && void submit()}
-            placeholder="Email"
-            autoComplete="email"
-            className={field}
-          />
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && void submit()}
-            placeholder="Password"
-            autoComplete={creating ? "new-password" : "current-password"}
-            className={field}
-          />
-          {creating && (
-            <div>
-              <label className="mb-1.5 block font-mono text-[10px] uppercase tracking-wider text-muted">
-                date of birth
-              </label>
-              <input
-                type="date"
-                value={dob}
-                onChange={(e) => setDob(e.target.value)}
-                className={`${field} font-mono text-[12px]`}
-              />
-              <p className="mt-1.5 font-mono text-[10px] leading-relaxed text-muted">
-                {dobProblem
-                  ? "you must be 18 or older to create an account"
-                  : "this service is for adults only · 18+"}
-              </p>
-            </div>
-          )}
-        </div>
-
-        <button
-          onClick={() => void submit()}
-          disabled={!complete || busy}
-          className="mt-5 w-full rounded-full bg-foreground px-4 py-2.5 text-[13px] font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-30"
-        >
-          {busy
-            ? "securing your password…"
-            : creating
-              ? "Create account"
-              : "Sign in"}
-        </button>
-
-          </>
-        )}
-
-        {error && (
-          <p className="mt-3.5 font-mono text-[11px] leading-relaxed text-foreground">
-            {error}
-          </p>
-        )}
-
-        {!verificationFor && <button
-          onClick={() => {
-            setMode(creating ? "in" : "up");
-            setError(null);
-          }}
-          className="mt-5 w-full text-center font-mono text-[10px] text-muted transition-colors hover:text-foreground"
-        >
-          {creating
-            ? "already have an account? sign in"
-            : "no account yet? create one"}
-        </button>}
-
-        <p className="mt-5 font-mono text-[10px] leading-relaxed text-muted">
-          {verificationFor
-            ? "the code expires in 10 minutes · five attempts"
-            : "your password is stretched on this device and never sent · it also derives the key that encrypts your chats"}
-        </p>
-        <p className="mt-3 text-center font-mono text-[9px] text-muted">
-          By continuing, you agree to the{" "}
-          <Link
-            href="/privacy"
-            className="underline decoration-hairline underline-offset-2 transition-colors hover:text-foreground"
-          >
-            privacy policy
-          </Link>
-          .
-        </p>
-      </motion.div>
+      <div onClick={(e) => e.stopPropagation()} className="contents">
+        {card}
+      </div>
     </div>
   );
 }

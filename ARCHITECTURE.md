@@ -12,25 +12,25 @@ path, and nothing unbounded is billable.*
 
 ## 1. The shape of the system
 
-There are three programs and three stores.
+Two programs, one store, and a browser that keeps nothing.
 
 ```
    Browser (the whole app)                    Cloudflare
-  ┌─────────────────────────────┐            ┌──────────────────────────┐
+  ┌─────────────────────────────┐            ┌───────────────────────────┐
   │  Next.js static export      │            │  Worker  (chat.belayet.co)│
   │                             │            │   /v1/auth/*   Better Auth│
-  │  ┌───────────────────────┐  │  session   │   /v1/sync     records    │
-  │  │ inference (streamText)├──┼──cookie───▶│   /v1/state    settings   │
-  │  └───────┬───────────────┘  │            │   /v1/blobs/*  bytes      │
-  │          │ user's own key   │            │   /v1/live     websocket  │
-  │          ▼                  │            │   /v1/me       delete     │
+  │  ┌───────────────────────┐  │  session   │   /v1/threads  the data   │
+  │  │ inference (streamText)├──┼──cookie───▶│   /v1/delta    what moved │
+  │  └───────┬───────────────┘  │            │   /v1/state    settings   │
+  │          │ user's own key   │            │   /v1/blobs/*  bytes      │
+  │          ▼                  │            │   /v1/live     websocket  │
   │   openrouter.ai  ◀──────────┼────────────┼──(never)                  │
   │                             │            └────┬────────┬────────┬────┘
-  │  ┌───────────────────────┐  │                 │        │        │
-  │  │ Dexie (IndexedDB)     │  │                 ▼        ▼        ▼
-  │  │ source of truth       │  │                D1       R2    Durable
-  │  └───────────────────────┘  │            (records) (bytes)  Object
-  └─────────────────────────────┘                                (fanout)
+  │  in memory only:            │                 │        │        │
+  │   · the sidebar             │                 ▼        ▼        ▼
+  │   · the open thread         │                D1       R2    Durable
+  │  on disk: a theme, a key    │          (threads +   (bytes)  Object
+  └─────────────────────────────┘           messages)            (fanout)
 ```
 
 **The frontend is a static export.** `next.config.ts` sets
@@ -47,7 +47,11 @@ in the billing path at any volume, a long reasoning answer cannot hit a
 function timeout because there is no function, and a generated image travels
 once instead of twice.
 
-**The Worker is the only server, and it cannot read what it stores.**
+**The Worker is the only server, and it holds the only copy.** It cannot read
+the contents of what it stores — titles, messages, prompts and settings are
+sealed in the browser — but it can see the shape: which messages belong to
+which conversation, how many, in what order, and when. §12 states that
+boundary precisely.
 
 ---
 
@@ -59,18 +63,23 @@ once instead of twice.
 | Model inference | — | User's key, browser→OpenRouter. Operator cost is structurally zero. |
 | Worker CPU | 10 ms/request | Password stretching moved to the browser; sessions read from a signed cookie for 5 min. |
 | D1 rows written | 100k/day | Only changed messages are pushed; streaming pushes are throttled. See §6.4. |
-| D1 rows read | 5M/day | One indexed lookup per sync. |
+| D1 rows read | 5M/day | One or two indexed lookups per read. |
 | R2 storage | 10 GB | **Per-account quota**, §8. The only cumulative surface. |
 | Durable Objects | SQLite-backed, free tier | Hibernating sockets; idle accounts consume nothing. |
 
 Measured on the deployed Worker with `wrangler tail`:
 
 ```
-/v1/sync   GET     2 ms CPU
+/v1/sync   GET     2 ms CPU   ← retired; the phase-13 routes replace it
 /v1/sync   POST    1 ms CPU
 /v1/me     DELETE  6 ms CPU
 /v1/auth/sign-up   44 ms CPU   ← 4.4x the free-tier limit, not throttled
 ```
+
+**The data-route numbers above are pre-phase-13 and need re-measuring.** The
+shapes did not get heavier — every read is one or two indexed queries and
+every write is a single `batch()` — but that is a prediction, and the standing
+rule in §15 is not to believe one without `wrangler tail` in front of it.
 
 Signup is the one outlier. It is Better Auth's own work plus D1 writes plus
 the database-backed rate limiter, not instance construction — caching the auth
@@ -78,30 +87,39 @@ instance per isolate was tried and did not move it.
 
 ---
 
-## 3. Three stores, and which one is the truth
+## 3. One store, and it is not in the browser
 
-**Dexie (IndexedDB) is the source of truth.** The cloud is a replica of it,
-never the other way round. The app is fully usable with no account; anything
-that turns sync into a login wall is a regression.
+**D1 is the source of truth.** The browser holds the sidebar and the open
+thread in memory and nothing on disk. This is the inversion of phase 13, and
+it is the single most important fact about the current design: there is no
+second copy, so there is nothing to reconcile.
+
+The previous arrangement — Dexie as the truth, the cloud as a replica —
+produced three separate silent data-loss bugs, and all three were the same
+bug: two stores, a cursor, and a merge rule that had to be exactly right.
+See §15.
 
 | Store | Holds | Readable by us? |
 |---|---|---|
-| Dexie | conversations, messages, tombstones, vault key | n/a — it is the user's device |
-| D1 `record` | one opaque payload per conversation/message | **No** for password accounts |
+| D1 `thread` | one row per conversation; sealed `meta`, plaintext sort keys | Titles/model/prompt **no**; shape **yes** |
+| D1 `message` | one row per message; sealed `payload`, plaintext `thread_id`/`seq` | Content **no**; position **yes** |
 | D1 `user_state` | settings blob, encryption mode, revision, storage totals | Settings blob is always encrypted |
 | R2 | images, attachments, spilled payloads | **No** for password accounts |
 
-Dexie schema is at **v4** (`lib/db.ts`):
+**What the browser keeps**, and the reason each one survived:
 
-- `conversations` — id, updatedAt, pinned, dirty
-- `messages` — id, conversationId, `[conversationId+seq]`, dirty
-  (IndexedDB guarantees no insertion order, so thread order is stored)
-- `tombstones` — deletions not yet pushed
-- `vault` — the non-extractable `CryptoKey`; the token itself is never stored
+| Where | What | Why it is allowed to exist |
+|---|---|---|
+| `localStorage["dial:appearance"]` | appearance, rail geometry, remember/lock device preference | The pre-paint script runs before any request and the locked screen needs the non-sensitive key-retention choice before sealed settings can open. |
+| IndexedDB `dial-vault` | an optional, account-scoped, non-extractable `CryptoKey` | It is the only web storage that can hold one without exporting raw bytes. “Lock on exit” deletes it and keeps the key in memory only. |
+| Cache API `dial-catalog-v1` | OpenRouter's public model list | An HTTP response with a TTL. Nothing here is the user's. |
 
-Every synced row carries three local-only columns that never leave:
-`dirty` (needs pushing), `stamp` (a monotonic write marker), `rev` (the
-server revision it came from).
+Nothing else. No conversations, no messages, no thread ids, no model
+credentials. Both
+legacy stores — the `dial` database and the eight `dial:*` keys — are deleted
+on load (`discardLegacyStores`, `purgeLegacyLocal`), because two of those keys
+held the user's OpenRouter key in the clear and the database held a full
+plaintext copy of their history.
 
 ---
 
@@ -154,66 +172,104 @@ The server's `encryption` field is the authority, never the local key.
 `locked` state first. `locked` has its own UI (`UnlockBar`) because an empty
 transcript reads as lost data.
 
----
-
-## 5. Never sync an encrypted account without its key
-
-`runSync` throws `LockedError`. An earlier version pulled ciphertext, failed
-to read every record, and **still advanced the cursor past all of it** —
-leaving a signed-in user with an empty history sitting above a revision the
-device would never ask for again. `unlock` also calls `clearCursor()`,
-because regaining a key means you do not know what you missed.
+Remembered keys are scoped by account id. A legacy unscoped key is accepted
+only long enough to try opening the sealed settings; failure deletes it and
+returns to `locked` before any content write can happen. Remembering is the
+default, while the synced “lock on exit” preference removes the IndexedDB key
+and requires the password again after a refresh.
 
 ---
 
-## 6. The sync protocol
+## 5. Never read or write an encrypted account without its key
 
-### 6.1 Revisions and the cursor
+`assertUnlocked` throws `LockedError` before any request leaves. There is no
+persisted pull cursor any more: D1 is authoritative and unlocking starts with
+a full thread list. The in-memory revision is only a freshness hint, and local
+commits advance it so the browser cannot mistake its own checkpoint for a
+remote edit.
 
-Every account has one monotonic integer `rev`. Pulling means "give me
-everything above N"; pushing means "here are rows, stamp them". No vector
-clocks, no CRDTs, no merge UI — messages are append-only and the only mutable
-object is a conversation's own metadata being edited by one person across
-their own devices.
+---
 
-**Order matters: pull, then push.** Applying the server's view first and
-writing local changes over it is what makes a local edit win on the device
-being typed on.
+## 6. The data protocol
 
-**Revisions are allocated by the database**, not derived from a read:
+### 6.1 One request per turn, one query per read
 
-```sql
-UPDATE user_state SET rev = rev + 1, updated_at = ? WHERE user_id = ? RETURNING rev
-```
+There is no reconciliation any more. A write is a request, a read is a
+request, and what the server returns *is* the state.
 
-Computing `state.rev + 1` from a row read earlier in the request meant two
-devices pushing at once wrote the same revision — and a third device that
-pulled between the two writes advanced its cursor past it and never asked for
-the second batch again. Silent loss. Realtime is what turned this from
-theoretical into routine, by making two devices online at once normal.
+- **Reading the sidebar** — `GET /v1/threads`, one indexed query, `ETag` on
+  the account revision so an unchanged list comes back as a 304.
+- **Opening a thread** — `GET /v1/threads/:id`, two indexed queries. Paged by
+  `seq`, resumed from the last seq seen rather than an offset, because the
+  server also ends a page early when payloads reach its byte budget: **a short
+  page is not the last page.**
+- **Writing a turn** — `PUT /v1/threads/:id`, one `batch()`. It can create the
+  thread, truncate a tail, and write messages together, because a turn is one
+  atomic thing and splitting it would mean a visible half-applied state and
+  three round trips on the hottest path in the app.
+- **Catching up** — `GET /v1/delta?since=N&thread=ID`. The client holds
+  exactly two things, so this answers exactly two questions: which thread rows
+  moved, and did anything inside the open thread move. The second is a boolean
+  rather than a list, because the client's response either way is to re-read
+  the whole thread in one query.
 
-**`PAGE_SIZE` (250) must stay strictly greater than `MAX_PUSH_RECORDS`
-(100).** The cursor advances to the last row's revision, so every record
-sharing a revision has to fit in one page or the remainder is unreachable for
-ever. One push allocates one revision and carries at most 100 records, so 100
-is the largest possible group and the gap is the safety margin.
+The account still has one monotonic integer `rev`, but its job has shrunk. It
+is no longer a cursor whose correctness data depends on; it is a freshness
+hint, held in memory, never persisted. Losing it costs one redundant delta.
+
+**Statement order inside the write batch is load-bearing.** Thread upsert
+first, so a new thread and its first message land in the same transaction and
+the message's `WHERE EXISTS` guard is satisfied. Then the truncate. Then the
+inserts — an edit-and-resend truncates from seq 3 and immediately writes a new
+message at seq 3, and the other order deletes what it just wrote.
+
+**The revision is allocated inside that batch**, by the `UPDATE … RETURNING`
+that is its first statement, with the inserts reading it back through a
+subquery. Deriving it from a row read earlier in the request let two devices
+write the same revision; fixing that with `UPDATE … RETURNING` but leaving it
+a separate statement left a narrower window with the same shape — the revision
+visible to a concurrent reader before its rows existed. The same statement
+advances the daily write counter, so bounding D1 spend costs no extra round
+trip.
+
+**A message insert is guarded by `WHERE EXISTS` on a live thread.** One device
+deleting a thread while another streams into it is a real race; without the
+guard those rows land pointing at nothing, invisible to every read because
+reads go through the thread, and therefore never cleaned up.
+
+**A checkpoint does not touch the thread row.** `touch` is what a streaming
+save omits — bumping the thread alongside every checkpoint would double the
+rows written for a long answer to announce something no reader needs.
+
+### 6.1a Tombstones are gone
+
+A deletion is a `DELETE`. `thread.deleted` survives only long enough for a
+connected device to notice, and is swept lazily inside the next delete's
+batch. A device that misses that window needs nothing: it stores nothing, so
+its next list simply will not contain the thread.
+
+Under the old design a deletion had to be recorded in a `tombstones` table, or
+deleting a conversation on one device looked exactly like that device not
+having it yet, and the next pull helpfully restored it.
 
 ### 6.2 What a payload is
 
-```
-Envelope = { kind: "conversation", data } | { kind: "message", data }
-```
+A thread's `meta` seals its title, model, reasoning effort, search flag,
+system prompt and rolling totals. A message's `payload` seals the whole
+`UIMessage` — parts, metadata, flight recorder.
 
-The `kind` tag lives **inside** the ciphertext rather than in a column, so
-the database cannot tell a conversation from a message. It holds an opaque
-string under an opaque id and nothing more. `worker/schema-app.sql`
-deliberately has no `kind` column, no parent id, no sequence number, no
-title — a full database dump reveals account count, record count, and record
-sizes.
+There is no `kind` tag any more, because the table says which is which. That
+is the trade phase 13 made: the old store could not tell a conversation from a
+message, and consequently could not render a sidebar without sending the
+entire account to the browser to be decrypted. The structural columns around
+the seal — `thread_id`, `seq`, `pinned`, `updated_at`, `deleted` — are what
+make a page load one indexed query. `worker/schema-app.sql` states exactly
+what they disclose, and §12 states it again in the words the privacy policy
+uses.
 
-**`payload` is never parsed, indexed, or logged.** Wanting to know something
-about a record's contents means the client should send that fact explicitly,
-as a deliberate decision to leak it.
+**`meta` and `payload` are never parsed, indexed, or logged.** Wanting to know
+something about a record's contents means the client should send that fact
+explicitly, as a deliberate decision to disclose it.
 
 ### 6.3 Heavy things go to R2
 
@@ -261,11 +317,15 @@ Both are fixed:
   `contentKey`. This also preserves the R2 blob references the sync engine
   writes back into those rows, which is what stopped images being
   re-uploaded for ever.
-- **Local durability and cloud freshness are different clocks.** The snapshot
-  stays at `STREAM_SAVE_MS` (1.2 s) — that is what stops a closed tab losing
-  a long answer, and it is a *local* concern. Pushing to D1 at that rate is a
-  separate question: `DRAFT_SYNC_MS` (5 s) throttles streaming pushes, which
-  still reads as live on another device.
+- **The cloud checkpoint is the durability clock.** `ChatView` offers the
+  current stream every 1.2 s; `saveTurn` writes the first useful checkpoint
+  immediately and throttles later ones to 5 s. Closing a tab therefore loses
+  about a second early in a turn and at most five seconds later in one.
+- **Writes are serialized per thread.** Sealing and R2 spilling are async. A
+  half-answer checkpoint previously could arrive after the final save and win
+  simply because it was last; the per-thread promise chain makes arrival order
+  equal transcript order, and `onFinish` closes the draft interval
+  synchronously so a late timer cannot queue after the final answer.
 
 `contentKey` hashes text **in full** — keying on length would have silently
 skipped an edit that preserved it ("Hello there" → "Hello Peter") — but reads
@@ -273,22 +333,29 @@ only the *size* of attachments. Hashing megabytes of base64 every 1.2 s would
 cost more than the writes it saves, and reaching into those parts would pick
 up the very blob ids that must not count as a change.
 
-### 6.5 Getting a pull onto the screen
+### 6.5 Getting a remote change onto the screen
 
-`applyRecords` writes straight into Dexie, and Dexie is not React. For a
-while the rail refreshed (it reloads when a sync settles) and the open
-transcript did not — which is the entire reason cross-device sync *looked*
-broken while it was working perfectly.
+For a while the rail refreshed and the open transcript did not — which is the
+entire reason cross-device sync *looked* broken while it was working
+perfectly.
 
-`ChatView` now adopts remote changes, with three guards, each protecting
+The delta now returns the changed thread rows themselves, so the rail is
+patched in place rather than re-queried, and `pulled` increments **only** when
+the delta says the *open* thread moved. A write to some other conversation
+must not make the transcript in front of the reader re-read itself.
+
+`ChatView` now adopts remote changes, with four guards, each protecting
 local work:
 
-1. **Never while busy.** A stream in progress is authoritative; the version
-   is re-checked when it settles.
-2. **Never twice for the same version.** This keeps the `busy` dependency
-   from re-reading Dexie the instant a stream finishes and racing the
-   `onFinish` save that has not landed yet.
-3. **Never when the stored copy is missing a message we are holding.** That
+1. **Never while busy or while a save is pending.** The stream and its final
+   unsaved snapshot are authoritative; the version is re-checked when both
+   settle.
+2. **Never after a failed save.** The complete in-memory answer stays visible
+   until retry succeeds instead of being replaced by the last cloud draft.
+3. **Never twice for the same version.** This keeps the dependencies
+   from re-reading the instant a stream finishes and racing the `onFinish`
+   save that has not landed yet.
+4. **Never when the stored copy is missing a message we are holding.** That
    means our own save is still in flight and the read is stale.
 
 The cost of guard 3 is that a *truncation* made on another device (an edit or
@@ -340,6 +407,25 @@ maintained on every put and delete.
 `GET /v1/state` reports bytes, object count, quota and record count; the
 settings panel draws it as a monochrome bar. There is no colour vocabulary in
 this interface to borrow for "nearly full", so it says so in words.
+
+### 8.1 The D1 side of the same idea
+
+R2 needed a ceiling and got one. D1 needed one too and did not have it: every
+other limit in the Worker is per request, which bounds a single push and
+nothing cumulative, so one authenticated client looping a write could spend
+the deployment's entire daily row-write allowance in minutes.
+
+`user_state.writes_day` / `writes_today` are a per-day counter, reset lazily by
+comparing the stored day to today's. They are advanced by the **same** UPDATE
+that allocates the revision, and enforced against the state row the request has
+already loaded — so the ceiling costs no extra statement, no extra round trip
+and no extra CPU. Default **10,000 rows per account per day**, overridable with
+`DAILY_WRITE_LIMIT`; over it, pushes are refused with **429**. A long streaming
+answer costs about twenty rows, so nothing legitimate comes close.
+
+Enforcing against the already-loaded row lets a burst overshoot by at most one
+push. That is the right trade for a spend guard: the alternative is a D1 round
+trip on the hottest write path to make a number nobody reaches exact.
 
 ---
 
@@ -394,13 +480,29 @@ cross-site cookie configuration.
 | Route | Method | Notes |
 |---|---|---|
 | `/v1/auth/*` | — | Better Auth. Rate limited; see below. |
-| `/v1/sync` | GET | `?since=N` → records above N, page of 250 |
-| `/v1/sync` | POST | ≤100 records, ≤128 KB payload each; allocates one revision |
+| `/v1/threads` | GET | the sidebar. `ETag` = account rev, so an unchanged list is a 304 |
+| `/v1/threads/:id` | GET | thread + messages by `seq`; paged by row count *and* a byte budget |
+| `/v1/threads/:id` | PUT | one turn: optional `meta`, optional `truncateFrom`, ≤50 messages, one `batch()` |
+| `/v1/threads/:id` | DELETE | soft-delete thread, hard-delete messages, sweep old tombstones, purge the R2 prefix |
+| `/v1/delta` | GET | `?since=N&thread=ID` → changed thread rows + "did the open thread move" |
 | `/v1/state` | GET | settings blob, encryption mode, usage |
 | `/v1/state` | PUT | replace settings; `encryption` may never move back to `none` |
-| `/v1/blobs/:id` | PUT / GET / DELETE | quota-enforced; id must match `BLOB_ID` |
+| `/v1/blobs/:id` | PUT / GET / DELETE | quota-enforced; id must match `BLOB_ID` (two segments: `<thread>/<message>.…`) |
 | `/v1/live` | GET (upgrade) | websocket to the account's Durable Object |
-| `/v1/me` | DELETE | erase account, records, settings, and the R2 prefix |
+| `/v1/me` | DELETE | erase the D1 identity, then the R2 prefix in `waitUntil` |
+
+**Account state is loaded per route, not up front.** Every request used to pay
+`getSession` + `loadState` before the router had looked at the path, so a 404
+and a WebSocket upgrade cost the same D1 read as a write did. Fetching an
+image is now one R2 get and no D1 at all — which is exactly the request a page
+full of generated images repeats.
+
+**`MAX_MESSAGES_PER_WRITE × MAX_PAYLOAD_CHARS` must stay under
+`MAX_BODY_BYTES`.** The old pair did not: 100 records at 128 KB was 12.8 MB
+against an 8 MB body cap, so a batch satisfying every documented per-record
+limit could still be rejected — with the wrong status and a message about body
+size rather than the 413 the limits promised. 50 × 128 KB = 6.4 MB now.
+Changing either number means re-checking this relationship.
 
 **A cookie-cached session outlives the account it belongs to.** Sessions are
 read from a signed cookie for five minutes, so a deleted user's cookie stays
@@ -415,7 +517,10 @@ isolates, keyed on `cf-connecting-ip`):
 - OTP send, password reset — 3 per 60 s
 - everything else under `/v1/auth` — 100 per 60 s
 
-**Nothing outside `/v1/auth` is rate limited.** See §14.
+**Nothing outside `/v1/auth` is rate limited per unit time.** The daily
+row-write ceiling (§8.1) bounds cumulative D1 spend, which is the thing that
+actually costs money, but there is still no per-second limit on the data
+routes. See §14.
 
 ---
 
@@ -434,10 +539,30 @@ isolates, keyed on `cf-connecting-ip`):
 
 ```sql
 user_state(user_id PK, rev, encryption, settings, updated_at,
-           blob_bytes, blob_count)
-record(user_id, id, rev, deleted, payload, PRIMARY KEY (user_id, id))
-CREATE INDEX record_cursor ON record(user_id, rev);   -- the only query shape
+           blob_bytes, blob_count, writes_day, writes_today)
+
+thread(user_id, id, rev, meta, pinned, deleted, created_at, updated_at,
+       PRIMARY KEY (user_id, id))
+CREATE INDEX thread_list ON thread(user_id, deleted, pinned DESC, updated_at DESC);
+CREATE INDEX thread_rev  ON thread(user_id, rev);
+
+message(user_id, id, thread_id, seq, rev, payload, updated_at,
+        PRIMARY KEY (user_id, id))
+CREATE INDEX message_thread ON message(user_id, thread_id, seq);
+CREATE INDEX message_rev    ON message(user_id, rev);
 ```
+
+`meta` and `payload` are sealed. Everything else is in the clear, and is in
+the clear on purpose: sorting and grouping cannot be done through a seal.
+`thread_list` leads with `(user_id, deleted)` so the sidebar query and the
+settings count are index ranges rather than scans — the equivalent COUNT on
+the old `record` table could not use its index for the `deleted` predicate and
+read every row on the account.
+
+There is no `deleted` column on `message`. A truncation hard-deletes the tail
+and bumps the owning thread's `rev`, which is what tells a live device to
+re-read. A soft delete would buy nothing, because the client cannot be holding
+a stale copy of a message it never persisted.
 
 `encryption` is one of `none` | `password` | `passphrase`.
 
@@ -451,13 +576,20 @@ image.
 
 ## 12. What the operator can and cannot see
 
-**Cannot**, for an email/password account: message text, titles, prompts,
-reasoning traces, images, attachments, the OpenRouter key, or anything about
-a record beyond its id, size and revision.
+**Cannot**, for an email/password account: message text, conversation titles,
+system prompts, reasoning traces, model choices, images, attachments, the
+OpenRouter key, or any setting.
 
 **Can**: that an account exists, its email, name, date of birth, session and
-IP metadata, how many records it has, how large they are, and when they
-changed.
+IP metadata — and, since phase 13, the *shape* of the account's usage: how
+many conversations it has, how many messages are in each, their order, when
+each was last touched, which are pinned, and how large each sealed payload is.
+
+That last group is a genuine widening and it was a deliberate trade. The
+opaque store disclosed strictly less, and cost a full download-and-decrypt of
+the account to render a sidebar. The privacy policy states the new boundary in
+these words rather than claiming we see nothing: **a complete database dump
+shows that you had a conversation, and nothing about what it was.**
 
 **E2EE means our server cannot read it — not that nobody can.** OpenRouter
 and the upstream provider see every prompt in the clear. Say it that way; the
@@ -495,14 +627,35 @@ destination.
 
 ## 14. Known gaps
 
-- **No rate limit outside `/v1/auth`.** `/v1/sync`, `/v1/state`, `/v1/blobs`
-  and `/v1/live` are bounded per request but not per unit time.
+- **No rate limit outside `/v1/auth` per unit time.** The data routes are
+  bounded per request and per account per day (§8.1), but not per second.
+- **There is no offline mode, at all.** This is a deliberate consequence of
+  §3, not an oversight, but it is a real capability loss: no network means no
+  app. Inference is browser-to-OpenRouter direct, so a Worker outage stops
+  *persistence* rather than the answer — `ChatView` shows a "not saved" notice
+  with a retry, and the reply on screen is the only copy until it lands.
+- **Orphaned R2 objects from the phase-13 reset.** Three objects written under
+  the old per-message key scheme are unreachable by the thread-prefixed one.
+  The counters were zeroed so the quota readout is honest about what the app
+  can see, and the self-heal that would have re-measured them was removed —
+  but roughly 1.5 MB of undecryptable ciphertext still occupies the bucket.
+  Clearing it needs a bucket-level delete.
+- **A PDF is re-parsed on every turn of its thread.** `hasPdf` is true for the
+  whole conversation, so the file-parser plugin runs again on each message.
+  Free on `native` and `cloudflare-ai`, but it is latency on every turn;
+  OpenRouter's documented fix is to cache the returned annotations and send
+  those back instead of the file.
 - **Signup costs 44 ms CPU**, 4.4× the free-tier limit. Not throttled so far;
   watch for 1027s.
-- **Email OTP is wired but inert.** Two blockers before switching it on:
-  Cloudflare's `send_email` binding cannot reach arbitrary addresses until a
-  sending domain is onboarded, and `requireEmailVerification` would lock out
-  every existing account until `emailVerified` is backfilled.
+- **Email OTP is wired but inert.** `createAuth` gates both
+  `requireEmailVerification` and the whole `emailOTP` plugin on
+  `Boolean(env.EMAIL && env.EMAIL_FROM)`, and neither binding is configured,
+  so turning it on is configuration rather than code. Two things to know
+  first: Cloudflare Email Service requires the **Workers Paid** plan to send
+  to arbitrary recipients (free sends only to verified destination addresses),
+  and the moment both bindings exist `requireEmailVerification` flips on and
+  locks out every account whose `emailVerified` is still 0 — backfill that
+  column before adding the binding, not after.
 - **Google is a disabled placeholder** — no secret set, no redirect URI
   registered.
 - **R2 custom domain** (`BLOB_PUBLIC_ORIGIN` + CORS) would remove Worker
@@ -528,5 +681,12 @@ The three that recur:
 2. **Measure before believing.** `getClientRects()` reports rectangles the
    browser never paints; `wrangler tail` reports the CPU your reasoning
    predicted wrong.
-3. **Dexie is not React.** Anything written behind React's back needs an
-   explicit signal, or it exists and is invisible.
+3. **A store is not React.** Anything written behind React's back needs an
+   explicit signal, or it exists and is invisible. This was about Dexie; it is
+   now about the delta, and the rule survived the store it was learned on.
+4. **Two copies of the truth cost more than the feature they enable.** Every
+   silent data loss in this project came from reconciling a local store with
+   a remote one, and each fix was correct and revealed the next one. Phase 13
+   deleted the second copy instead. When something proposes bringing it back
+   — for offline, for speed — the question to answer first is not "how do we
+   cache this" but "what happens when the two disagree".

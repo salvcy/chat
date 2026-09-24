@@ -1,6 +1,12 @@
 "use client";
 
 import { sealRecord, openRecord } from "./crypto";
+import {
+  DEFAULT_SETTINGS as DEFAULT_CHAT_SETTINGS,
+  MODEL_ID_PATTERN,
+  REASONING_EFFORTS,
+  type ReasoningEffort,
+} from "./types";
 
 /**
  * Account settings — the things that should follow a person to any device
@@ -28,24 +34,73 @@ export type TextSize = (typeof TEXT_SIZES)[number];
 export type Width = (typeof WIDTHS)[number];
 export type Density = (typeof DENSITIES)[number];
 
-export type UserSettings = {
-  /** The user's own OpenRouter key. Null when they have not connected one. */
-  openrouterKey: string | null;
+/**
+ * The part of the settings that has to be readable before first paint.
+ *
+ * It is split out because it is the only part with a device-local mirror. A
+ * theme cannot wait for a network round trip and a decryption without the
+ * page visibly flashing the wrong one, and the cloud copy is sealed — it is
+ * not readable at all until after sign-in. Nothing in here identifies anyone
+ * or costs anything if read: five enums and a sidebar width.
+ */
+export type Appearance = {
   theme: Theme;
   font: Font;
   textSize: TextSize;
   width: Width;
   density: Density;
+  /** Rail geometry, in pixels. Clamped to the drag handle's own bounds. */
+  railWidth: number;
+  railCollapsed: boolean;
 };
 
-export const DEFAULT_SETTINGS: UserSettings = {
-  openrouterKey: null,
+export type UserSettings = Appearance & {
+  /**
+   * Keep the non-extractable vault key in this browser between visits.
+   * False is the high-privacy mode: the key stays in memory for this tab only
+   * and the password is required again after a reload.
+   */
+  rememberDeviceKey: boolean;
+  /** The user's own OpenRouter key. Null when they have not connected one. */
+  openrouterKey: string | null;
+  /** What a new chat inherits — the knobs last used, not hard defaults. */
+  defaults: {
+    model: string;
+    reasoning: ReasoningEffort;
+    search: boolean;
+  };
+  /** Most-recently-picked models, newest first, for the palette. */
+  recentModels: string[];
+  /** The thread that was open last, so a new device lands where you left. */
+  activeThread: string | null;
+};
+
+export const DEFAULT_APPEARANCE: Appearance = {
   theme: "dark",
   font: "geist",
   textSize: "medium",
   width: "medium",
   density: "comfortable",
+  railWidth: 272,
+  railCollapsed: false,
 };
+
+export const DEFAULT_SETTINGS: UserSettings = {
+  ...DEFAULT_APPEARANCE,
+  rememberDeviceKey: true,
+  openrouterKey: null,
+  defaults: {
+    model: DEFAULT_CHAT_SETTINGS.model,
+    reasoning: DEFAULT_CHAT_SETTINGS.reasoning,
+    search: DEFAULT_CHAT_SETTINGS.search,
+  },
+  recentModels: [],
+  activeThread: null,
+};
+
+/** The rail's own bounds, shared with the drag handle. */
+export const RAIL_MIN = 180;
+export const RAIL_MAX = 460;
 
 /** Narrow an untrusted blob to the current shape, field by field. */
 function coerce<T extends string>(
@@ -58,18 +113,59 @@ function coerce<T extends string>(
     : fallback;
 }
 
+function clampRail(value: unknown): number {
+  const width = Number(value);
+  if (!Number.isFinite(width)) return DEFAULT_APPEARANCE.railWidth;
+  return Math.min(RAIL_MAX, Math.max(RAIL_MIN, Math.round(width)));
+}
+
+export function normalizeAppearance(raw: unknown): Appearance {
+  const input = (raw ?? {}) as Partial<Appearance>;
+  return {
+    theme: coerce(input.theme, THEMES, DEFAULT_APPEARANCE.theme),
+    font: coerce(input.font, FONTS, DEFAULT_APPEARANCE.font),
+    textSize: coerce(input.textSize, TEXT_SIZES, DEFAULT_APPEARANCE.textSize),
+    width: coerce(input.width, WIDTHS, DEFAULT_APPEARANCE.width),
+    density: coerce(input.density, DENSITIES, DEFAULT_APPEARANCE.density),
+    railWidth: clampRail(input.railWidth),
+    railCollapsed: input.railCollapsed === true,
+  };
+}
+
 export function normalizeSettings(raw: unknown): UserSettings {
   const input = (raw ?? {}) as Partial<UserSettings>;
+  const defaults = (input.defaults ?? {}) as Partial<UserSettings["defaults"]>;
   return {
+    ...normalizeAppearance(input),
+    rememberDeviceKey: input.rememberDeviceKey !== false,
     openrouterKey:
       typeof input.openrouterKey === "string" && input.openrouterKey
         ? input.openrouterKey
         : null,
-    theme: coerce(input.theme, THEMES, DEFAULT_SETTINGS.theme),
-    font: coerce(input.font, FONTS, DEFAULT_SETTINGS.font),
-    textSize: coerce(input.textSize, TEXT_SIZES, DEFAULT_SETTINGS.textSize),
-    width: coerce(input.width, WIDTHS, DEFAULT_SETTINGS.width),
-    density: coerce(input.density, DENSITIES, DEFAULT_SETTINGS.density),
+    defaults: {
+      model:
+        typeof defaults.model === "string" && MODEL_ID_PATTERN.test(defaults.model)
+          ? defaults.model
+          : DEFAULT_SETTINGS.defaults.model,
+      reasoning: coerce(
+        defaults.reasoning,
+        REASONING_EFFORTS,
+        DEFAULT_SETTINGS.defaults.reasoning,
+      ),
+      search: defaults.search === true,
+    },
+    recentModels: Array.isArray(input.recentModels)
+      ? input.recentModels
+          .filter(
+            (id): id is string =>
+              typeof id === "string" && MODEL_ID_PATTERN.test(id),
+          )
+          .slice(0, 6)
+      : [],
+    activeThread:
+      typeof input.activeThread === "string" && input.activeThread
+        ? input.activeThread
+        : null,
   };
 }
 
@@ -108,12 +204,17 @@ const ROW_GAP: Record<Density, string> = {
   compact: "1.5rem",
 };
 
-export function applyAppearance(settings: UserSettings): void {
+export function applyAppearance(settings: Appearance): void {
   const root = document.documentElement;
   root.style.setProperty("--dial-font", FONT_STACKS[settings.font]);
   root.style.setProperty("--dial-text-scale", TEXT_SCALE[settings.textSize]);
   root.style.setProperty("--dial-column", COLUMN_WIDTH[settings.width]);
   root.style.setProperty("--dial-row-gap", ROW_GAP[settings.density]);
+  // Rail geometry travels with the account now, but it is still written as a
+  // custom property rather than React state: width in state would re-render
+  // the whole list on every pointer move during a drag.
+  root.style.setProperty("--dial-rail-w", `${settings.railWidth}px`);
+  root.classList.toggle("dial-rail-collapsed", settings.railCollapsed);
   applyTheme(settings.theme);
 }
 
@@ -134,34 +235,96 @@ export function applyTheme(theme: Theme): void {
 
 /* -------------------------------- storage ------------------------------ */
 
-const LOCAL_KEY = "dial:settings";
-
 /**
- * A device-local mirror, so appearance survives a reload without waiting on
- * the network and the app never flashes the wrong theme while a request is
- * in flight. The cloud copy is authoritative on conflict.
+ * The one key this app keeps in `localStorage`.
+ *
+ * Everything else that used to live there — the OpenRouter key, the sync
+ * cursor, the open thread, the session defaults, the recent models, the rail
+ * geometry, the model catalog — is either in the sealed cloud blob or gone.
+ * `dial:credential` and the old `dial:settings` both held the user's
+ * OpenRouter key in the clear on disk, which is the single worst thing that
+ * was in there and the reason this cleanup was worth doing.
+ *
+ * What remains is appearance plus one non-sensitive device-security choice.
+ * Appearance is needed because the pre-paint script in `app/layout.tsx` runs
+ * before any network request and before the vault key exists; without a local
+ * hint every load paints the default theme and then snaps to the real one.
+ * `rememberDeviceKey` is mirrored so the locked screen can accurately explain
+ * whether this browser is meant to retain its non-extractable key before the
+ * sealed cloud settings can be opened.
+ *
+ * `PURGED` are the keys previous builds wrote. They are removed on load
+ * rather than left to rot, because two of them are credentials.
  */
-export function readLocal(): UserSettings {
-  if (typeof window === "undefined") return { ...DEFAULT_SETTINGS };
+const LOCAL_KEY = "dial:appearance";
+
+const PURGED = [
+  "dial:settings",
+  "dial:credential",
+  "dial:sync-cursor",
+  "dial:active",
+  "dial:defaults",
+  "dial:rail",
+  "dial:theme",
+  "dial:recent-models",
+  "dial:catalog",
+];
+
+export type LocalPreferences = Appearance & {
+  rememberDeviceKey: boolean;
+};
+
+function normalizeLocal(raw: unknown): LocalPreferences {
+  const input = (raw ?? {}) as Partial<LocalPreferences>;
+  return {
+    ...normalizeAppearance(input),
+    rememberDeviceKey: input.rememberDeviceKey !== false,
+  };
+}
+
+export function readLocal(): LocalPreferences {
+  if (typeof window === "undefined") {
+    return {
+      ...DEFAULT_APPEARANCE,
+      rememberDeviceKey: DEFAULT_SETTINGS.rememberDeviceKey,
+    };
+  }
   try {
     const raw = localStorage.getItem(LOCAL_KEY);
-    return normalizeSettings(raw ? JSON.parse(raw) : null);
+    return normalizeLocal(raw ? JSON.parse(raw) : null);
   } catch {
-    return { ...DEFAULT_SETTINGS };
+    return {
+      ...DEFAULT_APPEARANCE,
+      rememberDeviceKey: DEFAULT_SETTINGS.rememberDeviceKey,
+    };
   }
 }
 
-export function writeLocal(settings: UserSettings): void {
+/** Mirror appearance and the device-key policy; no content or credential. */
+export function writeLocal(
+  settings: UserSettings | LocalPreferences,
+): void {
   try {
-    localStorage.setItem(LOCAL_KEY, JSON.stringify(settings));
+    const local = normalizeLocal(settings);
+    localStorage.setItem(LOCAL_KEY, JSON.stringify(local));
   } catch {
-    // Storage disabled — settings live for this session only.
+    // Storage disabled — both preferences live for this session only.
   }
 }
 
 export function clearLocal(): void {
   try {
     localStorage.removeItem(LOCAL_KEY);
+  } catch {
+    // Nothing to do.
+  }
+}
+
+/** Delete what earlier builds left behind. Idempotent, runs once per load. */
+export function purgeLegacyLocal(): void {
+  if (typeof window === "undefined") return;
+  try {
+    for (const key of PURGED) localStorage.removeItem(key);
   } catch {
     // Nothing to do.
   }
@@ -178,6 +341,14 @@ export type RemoteState = {
   rev: number;
 };
 
+/** A supplied key exists, but it cannot open this account's settings blob. */
+export class SettingsDecryptError extends Error {
+  constructor(readonly encryption: RemoteState["encryption"]) {
+    super("this browser's saved key does not unlock this account");
+    this.name = "SettingsDecryptError";
+  }
+}
+
 /**
  * Read settings from the account.
  *
@@ -190,7 +361,9 @@ export type AccountUsage = {
   blobBytes: number;
   blobCount: number;
   blobQuota: number;
-  records: number;
+  /** Live conversations, and messages across all of them. */
+  threads: number;
+  messages: number;
 };
 
 /** Storage totals only. Cheap enough to call whenever settings is opened. */
@@ -239,8 +412,9 @@ export async function fetchRemote(kek: CryptoKey | null): Promise<RemoteState> {
     SETTINGS_RECORD_ID,
     payload.settings,
   );
+  if (!opened) throw new SettingsDecryptError(payload.encryption);
   return {
-    settings: opened ? normalizeSettings(opened) : null,
+    settings: normalizeSettings(opened),
     encryption: payload.encryption,
     rev: payload.rev,
   };

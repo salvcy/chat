@@ -18,11 +18,22 @@ const sections = [
           of birth is used to enforce the 18+ requirement.
         </p>
         <p>
-          Conversations, app settings, and your OpenRouter key sync only when
-          you sign in. Email-and-password accounts encrypt that material in
-          your browser before it is sent. Generated images and attachments are
-          likewise encrypted in the browser and stored as opaque R2 objects.
-          Without an account, chat history remains in your browser only.
+          An account is required to use the app. Conversations, app settings,
+          and your OpenRouter key are stored on our servers, and for
+          email-and-password accounts every one of them is encrypted in your
+          browser before it is sent — using a key derived from your password,
+          which we never receive. Generated images and attachments are
+          encrypted the same way and stored as opaque objects.
+        </p>
+        <p>
+          What is <em>not</em> encrypted is the shape of your usage, because
+          the service has to sort and group it to show you a conversation
+          list: how many conversations you have, how many messages are in
+          each, their order, when each was last changed, and which are
+          pinned. Conversation titles, message contents, system prompts, model
+          choices, and settings are never visible to us. A complete copy of
+          our database would show that you had a conversation, and nothing
+          about what it was.
         </p>
       </>
     ),
@@ -70,11 +81,11 @@ const sections = [
     body: (
       <p>
         Account data is retained while your account exists. Choosing “delete
-        account” removes the account, sessions, synchronized records,
-        settings, and R2 blobs associated with it. Copies already sent to
-        OpenRouter or a model provider are governed by those providers. Local
-        browser data can be removed by signing out with device wipe enabled or
-        by clearing this site&apos;s storage.
+        account” removes the account, sessions, conversations, messages,
+        settings, and stored files associated with it. Deleting a single
+        conversation removes its messages and files immediately. Copies
+        already sent to OpenRouter or a model provider are governed by those
+        providers.
       </p>
     ),
   },
@@ -82,11 +93,11 @@ const sections = [
     title: "Your choices",
     body: (
       <p>
-        You can use the app without an account, remove your OpenRouter key,
-        sign out and wipe a device, export individual conversations, or delete
-        your account. Depending on where you live, you may also have rights to
-        access, correct, or erase personal information and to object to or
-        restrict certain processing.
+        You can remove your OpenRouter key, sign out, export individual
+        conversations as Markdown or JSON, delete a conversation, or delete
+        your account outright. Depending on where you live, you may also have
+        rights to access, correct, or erase personal information and to object
+        to or restrict certain processing.
       </p>
     ),
   },
@@ -94,11 +105,15 @@ const sections = [
     title: "Cookies, local storage, and age",
     body: (
       <p>
-        Authentication uses secure, HTTP-only session cookies. IndexedDB and
-        local storage hold local conversations, a non-extractable encryption
-        key, interface preferences, sync cursors, and—if you choose—your
-        OpenRouter credential. The service is intended only for people who are
-        at least 18 years old.
+        Authentication uses secure, HTTP-only session cookies. Your
+        conversations are not stored in this browser. What is kept here is a
+        non-extractable encryption key by default, held so you do not have to
+        re-enter your password on every visit; you can instead choose “lock on
+        exit,” which keeps that key in memory only. A single preferences entry
+        holds your appearance, sidebar geometry, and that device-security
+        choice, and the browser cache may hold OpenRouter&apos;s public model list.
+        Your OpenRouter key is not written to browser storage. The service is
+        intended only for people who are at least 18 years old.
       </p>
     ),
   },

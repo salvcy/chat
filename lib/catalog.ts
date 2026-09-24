@@ -51,7 +51,22 @@ type RawModel = {
 };
 
 const CATALOG_URL = "https://openrouter.ai/api/v1/models";
-const CACHE_KEY = "dial:catalog";
+
+/**
+ * The Cache API, not `localStorage`.
+ *
+ * This is ~220KB of public data from openrouter.ai — an HTTP response with a
+ * time-to-live, which is precisely what the Cache API is for and precisely
+ * what `localStorage` is not. The old version serialised the parsed catalog
+ * back to a JSON string and wrote it synchronously on the main thread; this
+ * stores the response itself, asynchronously, off the critical path.
+ *
+ * It is also the reason stripping local storage did not cost a fetch on
+ * every load. Nothing here is the user's: no key, no ids, no history.
+ */
+const CACHE_NAME = "dial-catalog-v1";
+const CACHE_REQUEST = "https://dial.local/catalog";
+const FETCHED_AT_HEADER = "x-dial-fetched-at";
 
 /** Cache the catalog for an hour — it changes on the order of days. */
 const MAX_AGE_MS = 60 * 60 * 1000;
@@ -143,32 +158,44 @@ type CacheEntry = { fetchedAt: number; models: OpenRouterModel[] };
 /** Session-lifetime copy, so a remount never re-reads or re-parses. */
 let memory: CacheEntry | null = null;
 
-function readCache(): CacheEntry | null {
+function cacheAvailable(): boolean {
+  // Absent in non-secure contexts and in some private modes. The memory copy
+  // above still works, so this only costs one fetch per load.
+  return typeof caches !== "undefined";
+}
+
+async function readCache(): Promise<CacheEntry | null> {
   if (memory) return memory;
+  if (!cacheAvailable()) return null;
   try {
-    const raw = localStorage.getItem(CACHE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<CacheEntry>;
-    if (
-      typeof parsed.fetchedAt !== "number" ||
-      !Array.isArray(parsed.models) ||
-      parsed.models.length === 0
-    ) {
-      return null;
-    }
-    memory = { fetchedAt: parsed.fetchedAt, models: parsed.models };
+    const store = await caches.open(CACHE_NAME);
+    const hit = await store.match(CACHE_REQUEST);
+    if (!hit) return null;
+    const fetchedAt = Number(hit.headers.get(FETCHED_AT_HEADER));
+    if (!Number.isFinite(fetchedAt)) return null;
+    const models = (await hit.json()) as OpenRouterModel[];
+    if (!Array.isArray(models) || models.length === 0) return null;
+    memory = { fetchedAt, models };
     return memory;
   } catch {
     return null;
   }
 }
 
-function writeCache(entry: CacheEntry): void {
+async function writeCache(entry: CacheEntry): Promise<void> {
   memory = entry;
+  if (!cacheAvailable()) return;
   try {
-    // ~220KB. Written once an hour rather than per load, because
-    // localStorage writes are synchronous and this one is not small.
-    localStorage.setItem(CACHE_KEY, JSON.stringify(entry));
+    const store = await caches.open(CACHE_NAME);
+    await store.put(
+      CACHE_REQUEST,
+      new Response(JSON.stringify(entry.models), {
+        headers: {
+          "Content-Type": "application/json",
+          [FETCHED_AT_HEADER]: String(entry.fetchedAt),
+        },
+      }),
+    );
   } catch {
     // Quota or private mode — the session cache above still holds.
   }
@@ -211,14 +238,14 @@ async function fetchFresh(signal?: AbortSignal): Promise<OpenRouterModel[]> {
 export async function fetchCatalog(
   signal?: AbortSignal,
 ): Promise<OpenRouterModel[]> {
-  const cached = readCache();
+  const cached = await readCache();
   if (cached && Date.now() - cached.fetchedAt < MAX_AGE_MS) {
     return cached.models;
   }
 
   try {
     const models = await fetchFresh(signal);
-    writeCache({ fetchedAt: Date.now(), models });
+    void writeCache({ fetchedAt: Date.now(), models });
     return models;
   } catch (error) {
     if (cached) return cached.models;

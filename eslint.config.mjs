@@ -12,6 +12,11 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Wrangler writes its dev and deploy bundles here. They are generated,
+    // gitignored, and megabytes of someone else's transpiled output — linting
+    // them buries this project's own findings under hundreds of warnings.
+    ".wrangler/**",
+    "worker/node_modules/**",
   ]),
 ]);
 

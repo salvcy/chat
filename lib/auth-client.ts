@@ -1,7 +1,5 @@
 "use client";
 
-import { db } from "./db";
-
 /**
  * The browser half of authentication.
  *
@@ -204,7 +202,6 @@ export async function signUp({
     name: name.trim(),
     dateOfBirth,
   });
-  await rememberKey(credential.kek);
   return credential;
 }
 
@@ -217,7 +214,6 @@ export async function signIn(
     email: email.trim().toLowerCase(),
     password: credential.authHash,
   });
-  await rememberKey(credential.kek);
   return credential;
 }
 
@@ -258,47 +254,5 @@ export async function signInWithGoogle(): Promise<void> {
 }
 
 export async function signOut(): Promise<void> {
-  try {
-    await call("/sign-out", {});
-  } finally {
-    // Drop the key even if the request failed: leaving it behind after the
-    // user asked to leave is worse than a stale server session.
-    await forgetKey();
-  }
-}
-
-/* ------------------------------- key store ----------------------------- */
-
-/**
- * The vault key outlives a reload; the password does not.
- *
- * A session cookie keeps someone signed in for thirty days, but the key can
- * only be derived from a password they typed once. Storing the
- * `CryptoKey` object itself in IndexedDB is what bridges that: structured
- * clone preserves it, the browser hands it back usable, and because it is
- * non-extractable there is no byte sequence for anything to steal.
- */
-async function rememberKey(kek: CryptoKey): Promise<void> {
-  try {
-    await db.vault.put({ id: "session", dek: kek });
-  } catch {
-    // Storage refused. Encryption still works this session; the next reload
-    // will fall back to reading records it cannot decrypt, which is handled.
-  }
-}
-
-export async function recallKey(): Promise<CryptoKey | null> {
-  try {
-    return (await db.vault.get("session"))?.dek ?? null;
-  } catch {
-    return null;
-  }
-}
-
-export async function forgetKey(): Promise<void> {
-  try {
-    await db.vault.delete("session");
-  } catch {
-    // Nothing to do.
-  }
+  await call("/sign-out", {});
 }

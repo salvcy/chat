@@ -51,7 +51,169 @@ export function inferRequestStatus(message: Message): RequestStatusData["kind"] 
 
 /* --------------------------- wire formatting --------------------------- */
 
-type DialMessage = UIMessage<DialMetadata, DialDataParts>;
+export type DialMessage = UIMessage<DialMetadata, DialDataParts>;
+
+/**
+ * Finish reasons that mean the reasoning was cut short or handed off, not
+ * that it was the whole reply. A trace that stopped at the length cap is a
+ * half-finished thought, and promoting it would present it as an answer.
+ */
+const NOT_A_FINISHED_REPLY = new Set([
+  "length",
+  "error",
+  "tool-calls",
+  "content-filter",
+  "abort",
+  "empty",
+]);
+
+/**
+ * An answer that arrived entirely on the reasoning channel, moved to where
+ * it belongs.
+ *
+ * Some models stream their whole reply as reasoning tokens and leave the
+ * content channel empty — Kimi K2.5 does it routinely, and OpenRouter's
+ * provider relays it faithfully (OpenRouterTeam/ai-sdk-provider#426). The
+ * transcript then showed "Thought for 40s" over nothing, with the answer
+ * folded inside the collapsed trace. When a turn *finishes normally* with
+ * reasoning and no text, the reasoning was the reply: it becomes one text
+ * part at the position of the first reasoning part, and the metadata says so.
+ *
+ * Returns null when there is nothing to promote, so callers can keep the
+ * original object (and its identity) in the common case.
+ */
+export function promoteReasoningAnswer(message: DialMessage): DialMessage | null {
+  if (message.role !== "assistant") return null;
+  if (message.metadata?.answerInReasoning) return null;
+  const hasText = message.parts.some(
+    (part) => part.type === "text" && part.text.trim().length > 0,
+  );
+  if (hasText) return null;
+  if (
+    message.parts.some(
+      (part) => part.type === "data-image" || part.type === "data-requestStatus",
+    )
+  ) {
+    return null;
+  }
+  const reason = message.metadata?.finishReason;
+  if (reason && NOT_A_FINISHED_REPLY.has(reason)) return null;
+  // Never reached its finish event: the tab closed mid-thought.
+  if (streamNeverFinished(message)) return null;
+
+  const reasoning = message.parts
+    .map((part) => (part.type === "reasoning" ? part.text.trim() : ""))
+    .filter(Boolean)
+    .join("\n\n");
+  if (!reasoning) return null;
+
+  const parts: DialMessage["parts"] = [];
+  let placed = false;
+  for (const part of message.parts) {
+    if (part.type === "reasoning") {
+      if (!placed) {
+        parts.push({ type: "text", text: reasoning, state: "done" });
+        placed = true;
+      }
+      continue;
+    }
+    // Empty text parts from a content channel that opened and said nothing.
+    if (part.type === "text") continue;
+    parts.push(part);
+  }
+
+  const metadata: DialMetadata = { ...message.metadata, answerInReasoning: true };
+  // "Thought for" would now describe the answer itself.
+  delete metadata.thinkingMs;
+  return { ...message, parts, metadata };
+}
+
+function renderableWeight(message: DialMessage): number {
+  let weight = 0;
+  for (const part of message.parts) {
+    if (part.type === "text" || part.type === "reasoning") {
+      weight += part.text.length;
+    } else if (
+      part.type === "source-url" ||
+      part.type === "file" ||
+      part.type === "data-image"
+    ) {
+      weight += 1;
+    }
+  }
+  return weight;
+}
+
+function trailingAssistant(messages: readonly DialMessage[]): DialMessage | null {
+  let lastUser = -1;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index].role === "user") {
+      lastUser = index;
+      break;
+    }
+  }
+  for (let index = messages.length - 1; index > lastUser; index--) {
+    if (messages[index].role === "assistant") return messages[index];
+  }
+  return null;
+}
+
+/**
+ * Reconcile the three snapshots available when useChat finishes a request.
+ *
+ * The SDK's `message`, its `messages` history, and React's last rendered
+ * history normally agree. A state replacement caused by realtime sync can
+ * make one lag behind the other two, though, and trusting the empty one tags
+ * a response the reader just watched stream as "No response was returned."
+ * Pick the richest renderable copy belonging to this turn, then make sure it
+ * is the copy that gets persisted.
+ */
+export function reconcileFinishedResponse(
+  streamed: DialMessage,
+  finished: readonly DialMessage[],
+  observed: readonly DialMessage[],
+): { messages: DialMessage[]; response: DialMessage | null } {
+  const exact = [
+    streamed,
+    ...finished.filter(
+      (message) => message.id === streamed.id && message.role === "assistant",
+    ),
+    ...observed.filter(
+      (message) => message.id === streamed.id && message.role === "assistant",
+    ),
+  ].filter(hasRenderableResponse);
+
+  // Some SDK transitions replace the provisional assistant id at the last
+  // render. Only fall back to the assistant after the latest user turn when
+  // no renderable exact-id copy exists, so an older answer can never satisfy
+  // a genuinely empty new request.
+  const candidates =
+    exact.length > 0
+      ? exact
+      : [trailingAssistant(finished), trailingAssistant(observed)].filter(
+          (message): message is DialMessage =>
+            message !== null && hasRenderableResponse(message),
+        );
+  const response =
+    candidates.sort((a, b) => renderableWeight(b) - renderableWeight(a))[0] ?? null;
+
+  if (!response) return { messages: [...finished], response: null };
+
+  const messages = [...finished];
+  const exactIndex = messages.findIndex((message) => message.id === response.id);
+  if (exactIndex >= 0) {
+    messages[exactIndex] = response;
+  } else {
+    // Replace the empty provisional assistant for this turn when its id moved;
+    // otherwise append the rendered response after its user prompt.
+    const provisional = messages.findIndex(
+      (message) => message.id === streamed.id && message.role === "assistant",
+    );
+    if (provisional >= 0) messages[provisional] = response;
+    else messages.push(response);
+  }
+  return { messages, response };
+}
 
 function isImageReference(part: DialMessage["parts"][number]): boolean {
   if (part.type !== "file") return false;
@@ -70,7 +232,11 @@ function isImageReference(part: DialMessage["parts"][number]): boolean {
  * either way, which is why it lives here rather than in the view.
  */
 export function messagesForTextModel(messages: DialMessage[]): DialMessage[] {
-  return messages.flatMap((message) => {
+  return messages.flatMap((raw) => {
+    // Turns stored before promotion existed still carry their answer as
+    // reasoning, which many models strip from history — the next turn would
+    // lose the very reply it follows.
+    const message = promoteReasoningAnswer(raw) ?? raw;
     const parts = message.parts.flatMap((part) => {
       if (isImageReference(part)) return [];
       if (part.type === "data-requestStatus") return [];

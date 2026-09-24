@@ -14,6 +14,7 @@ import type { OpenRouterProviderOptions } from "@openrouter/ai-sdk-provider";
 import { currentKey } from "./credentials";
 import { MissingKeyError, providerFor } from "./openrouter-client";
 import { messagesForTextModel } from "./messages";
+import { reviveLateReasoning } from "./reasoning-stream";
 import type {
   ChatSettings,
   DialDataParts,
@@ -162,6 +163,7 @@ export class OpenRouterChatTransport implements ChatTransport<DialMessage> {
     let generationStartedAt: number | null = null;
     // The reasoning→answer boundary, for the "thought for N" readout.
     let reasoningFirstAt: number | null = null;
+    let reasoningLastAt: number | null = null;
     let textFirstAt: number | null = null;
 
     const result = streamText({
@@ -178,6 +180,9 @@ export class OpenRouterChatTransport implements ChatTransport<DialMessage> {
         : {}),
       providerOptions: { openrouter: openrouterOpts },
       abortSignal,
+      // Needed by reviveLateReasoning; raw parts are consumed there and never
+      // reach the UI stream.
+      includeRawChunks: true,
     });
 
     /**
@@ -200,6 +205,7 @@ export class OpenRouterChatTransport implements ChatTransport<DialMessage> {
         case "reasoning-delta": {
           const now = Date.now();
           if (reasoningFirstAt === null) reasoningFirstAt = now;
+          reasoningLastAt = now;
           if (firstDeltaAt !== null) return undefined;
           firstDeltaAt = now;
           generationStartedAt = now;
@@ -209,7 +215,9 @@ export class OpenRouterChatTransport implements ChatTransport<DialMessage> {
         case "text-delta": {
           const now = Date.now();
           const meta: DialMetadata = {};
-          if (textFirstAt === null) {
+          // Whitespace is not the answer starting: a model can emit a bare
+          // newline mid-thought and go on reasoning for a long time.
+          if (textFirstAt === null && part.text.trim()) {
             textFirstAt = now;
             // Thinking ends the moment the answer starts.
             if (reasoningFirstAt !== null) {
@@ -245,12 +253,16 @@ export class OpenRouterChatTransport implements ChatTransport<DialMessage> {
 
         case "finish": {
           const endedAt = Date.now();
-          // Reasoned but never answered (length cap, tool-only step): close
-          // the thinking window at the end rather than reporting nothing.
+          // The whole think, first reasoning token to last — reasoning can
+          // resume after the answer begins, and a turn that reasoned but never
+          // answered (length cap, tool-only step) thought until the end.
           const thinkingMs =
-            reasoningFirstAt !== null && textFirstAt === null
-              ? endedAt - reasoningFirstAt
-              : undefined;
+            reasoningFirstAt === null
+              ? undefined
+              : textFirstAt === null
+                ? endedAt - reasoningFirstAt
+                : Math.max(reasoningLastAt ?? textFirstAt, textFirstAt) -
+                  reasoningFirstAt;
           const completionTokens = part.totalUsage.outputTokens;
           // Measure throughput over generation only — including the wait for
           // the first token would understate a fast model behind a slow queue.
@@ -276,7 +288,7 @@ export class OpenRouterChatTransport implements ChatTransport<DialMessage> {
     };
 
     return toUIMessageStream<ToolSet, DialMessage>({
-      stream: result.fullStream,
+      stream: result.fullStream.pipeThrough(reviveLateReasoning()),
       sendSources: true,
       sendReasoning: true,
       messageMetadata,

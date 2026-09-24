@@ -4,7 +4,7 @@ import { AnimatePresence, motion } from "motion/react";
 import type { RefObject } from "react";
 import { useMemo, useState } from "react";
 import type { DialMessage } from "@/lib/conversations";
-import { textOf } from "@/lib/db";
+import { textOf } from "@/lib/store";
 
 type NavigatorItem = {
   id: string;
@@ -181,9 +181,9 @@ export default function MessageNavigator({
                     animate={{ opacity: 1, x: 0, scale: 1 }}
                     exit={{ opacity: 0, x: 4, scale: 0.98 }}
                     transition={{ duration: 0.12, ease: "easeOut" }}
-                    className={`pointer-events-none absolute right-12 flex w-72 flex-col rounded-2xl border border-hairline-strong bg-panel/95 p-3.5 text-left shadow-[0_16px_44px_var(--shadow)] backdrop-blur-xl ${previewPosition}`}
+                    className={`pointer-events-none absolute right-12 flex w-72 flex-col rounded-card bg-panel p-3.5 text-left shadow-overlay ${previewPosition}`}
                   >
-                    <span className="mb-1.5 flex items-center justify-between gap-3 font-mono text-[9px] uppercase tracking-[0.12em] text-muted">
+                    <span className="mb-1.5 flex items-center justify-between gap-3 font-mono text-[10.5px] text-muted">
                       <span>{item.role === "user" ? "you" : "model"}</span>
                       <span>{index + 1} / {items.length}</span>
                     </span>

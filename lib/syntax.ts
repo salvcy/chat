@@ -107,3 +107,82 @@ export function normalizeLanguage(lang: string | undefined): string {
   const key = lang.toLowerCase();
   return ALIASES[key] ?? key;
 }
+
+/* ----------------------------- the grammars ---------------------------- */
+
+/**
+ * Which Prism grammars are actually shipped.
+ *
+ * `react-syntax-highlighter`'s default `Prism` export imports `refractor/all`:
+ * 297 grammars, 1.87 MB raw and 557 KB gzipped, eagerly loaded before
+ * hydration. That was three quarters of this app's first-load JavaScript, and
+ * it bought the ability to colour COBOL. A chat answer writes in a much
+ * smaller set, so the set is enumerated here.
+ *
+ * Each module registers its own dependencies (`typescript` pulls `javascript`,
+ * which pulls `clike` and `markup`) and declares its own aliases, so only the
+ * top-level languages need naming. Anything not listed falls through
+ * react-syntax-highlighter's own try/catch and renders as plain monospace —
+ * the same result an unrecognised fence has always produced.
+ *
+ * Adding one is a single line. Adding all of them again is 550 KB.
+ */
+const GRAMMARS = [
+  () => import("refractor/bash"),
+  () => import("refractor/c"),
+  () => import("refractor/cpp"),
+  () => import("refractor/csharp"),
+  () => import("refractor/css"),
+  () => import("refractor/diff"),
+  () => import("refractor/docker"),
+  () => import("refractor/go"),
+  () => import("refractor/graphql"),
+  () => import("refractor/ini"),
+  () => import("refractor/java"),
+  () => import("refractor/javascript"),
+  () => import("refractor/json"),
+  () => import("refractor/jsx"),
+  () => import("refractor/kotlin"),
+  () => import("refractor/lua"),
+  () => import("refractor/markdown"),
+  () => import("refractor/markup"),
+  () => import("refractor/php"),
+  () => import("refractor/powershell"),
+  () => import("refractor/python"),
+  () => import("refractor/r"),
+  () => import("refractor/ruby"),
+  () => import("refractor/rust"),
+  () => import("refractor/scss"),
+  () => import("refractor/sql"),
+  () => import("refractor/swift"),
+  () => import("refractor/toml"),
+  () => import("refractor/tsx"),
+  () => import("refractor/typescript"),
+  () => import("refractor/yaml"),
+] as const;
+
+let registered = false;
+
+/**
+ * Register the shipped grammars exactly once.
+ *
+ * Deliberately asynchronous. Highlighting is the last thing a code block
+ * needs and the first thing that can wait: a grammar arriving a tick after
+ * first paint costs an unstyled frame nobody sees, while importing them
+ * synchronously would put every byte back in the eager bundle and undo the
+ * entire saving. `PrismLight` renders plain monospace until a grammar is
+ * there, so there is no failure mode — only a slightly later colour.
+ */
+export function registerSyntaxLanguages(
+  register: (name: string, language: unknown) => void,
+): void {
+  if (registered || typeof window === "undefined") return;
+  registered = true;
+  for (const load of GRAMMARS) {
+    void load()
+      .then((module) => register("", module.default))
+      .catch(() => {
+        // One grammar failing to load must never take the transcript with it.
+      });
+  }
+}

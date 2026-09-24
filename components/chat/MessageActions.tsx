@@ -26,7 +26,7 @@ function Action({
       onClick={onClick}
       title={title}
       aria-label={title}
-      className="flex h-6 w-6 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface hover:text-foreground"
+      className="flex size-7 items-center justify-center rounded-control text-muted transition-[background-color,color,transform] duration-150 hover:bg-hover-2 hover:text-foreground active:scale-[0.94]"
     >
       {children}
     </button>

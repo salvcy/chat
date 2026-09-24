@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { motion } from "motion/react";
+import Button from "@/components/ui/Button";
+import Loader from "@/components/ui/Loader";
+import { GateCard } from "./FrontDoor";
 import { fetchKeyStatus } from "@/lib/account";
 import {
   looksLikeKey,
@@ -131,98 +133,103 @@ export default function KeyGate({
   /* ------------------------------- render ------------------------------ */
 
   return (
-    <div className="flex flex-1 items-center justify-center px-6">
-      <motion.div
-        initial={{ opacity: 0, y: 4 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.15, ease: "easeOut" }}
-        className="w-full max-w-[420px]"
-      >
-        <p className="font-mono text-[10px] uppercase tracking-wider text-muted">
-          {returning ? "connecting" : "openrouter"}
-        </p>
-        <h1 className="mt-2 text-[15px] leading-relaxed text-foreground">
-          Connect your OpenRouter key to start.
-        </h1>
-        <p className="mt-2 text-[13px] leading-relaxed text-secondary">
-          Requests go from this browser straight to OpenRouter — no server of
-          ours sits in the path.{" "}
-          {signedIn
-            ? encrypted
-              ? "The key is saved to your account, encrypted with your password so we cannot read it."
-              : "The key is saved to your account so it follows you between devices."
-            : "The key stays on this device."}
-        </p>
+    <GateCard className="max-w-[400px]">
+      <span className="flex size-9 items-center justify-center rounded-card bg-field shadow-hairline">
+        <svg viewBox="0 0 16 16" className="h-4 w-4 text-secondary" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <circle cx="5.5" cy="10.5" r="2.75" />
+          <path d="m7.5 8.5 5.25-5.25M11 5l1.75 1.75M9.5 6.5l1.25 1.25" />
+        </svg>
+      </span>
+      <h1 className="mt-4 text-[19px] font-semibold tracking-[-0.02em] text-foreground">
+        {returning ? "Connecting to OpenRouter" : "Connect your OpenRouter key"}
+      </h1>
+      <p className="mt-1 text-[13px] leading-relaxed text-secondary">
+        Requests go from this browser straight to OpenRouter — no server of ours
+        sits in the path.{" "}
+        {signedIn
+          ? encrypted
+            ? "The key is saved to your account, encrypted with your password so we cannot read it."
+            : "The key is saved to your account so it follows you between devices."
+          : "The key stays on this device."}
+      </p>
 
-        {returning ? (
-          <p className="mt-6 font-mono text-xs text-muted">
-            finishing the handshake…
-          </p>
-        ) : (
-          <>
-            <button
-              onClick={() => void startOauth()}
-              disabled={busy}
-              className="mt-6 w-full rounded-full bg-foreground px-4 py-2.5 text-[13px] font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-50"
-            >
-              Connect with OpenRouter
-            </button>
-
-            <div className="mt-6 flex items-center gap-3">
-              <span className="h-px flex-1 bg-hairline" />
-              <span className="font-mono text-[9px] uppercase tracking-wider text-muted">
-                or paste one
-              </span>
-              <span className="h-px flex-1 bg-hairline" />
-            </div>
-
-            <div className="mt-4 flex gap-2">
-              <input
-                type="password"
-                value={manual}
-                onChange={(e) => {
-                  setManual(e.target.value);
-                  setError(null);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") void submitManual();
-                }}
-                placeholder="sk-or-v1-…"
-                autoComplete="off"
-                spellCheck={false}
-                className="min-w-0 flex-1 rounded-full border border-hairline bg-surface px-3.5 py-2 font-mono text-xs text-foreground placeholder:text-muted focus:outline-none"
-              />
-              <button
-                onClick={() => void submitManual()}
-                disabled={busy || !manual.trim()}
-                className="shrink-0 rounded-full border border-hairline px-3.5 py-2 font-mono text-[11px] text-secondary transition-colors hover:border-hairline-strong hover:text-foreground disabled:opacity-40"
-              >
-                use
-              </button>
-            </div>
-          </>
-        )}
-
-        {error && (
-          <p className="mt-4 font-mono text-[11px] leading-relaxed text-foreground">
-            {error}
-          </p>
-        )}
-
-        <p className="mt-8 font-mono text-[10px] leading-relaxed text-muted">
-          {signedIn
-            ? "signed in · history syncs to your account · "
-            : "history stays in this browser · "}
-          <a
-            href="https://openrouter.ai/keys"
-            target="_blank"
-            rel="noreferrer noopener"
-            className="underline decoration-hairline underline-offset-2 transition-colors hover:text-foreground"
+      {returning ? (
+        <Loader label="Finishing the handshake" className="mt-6" />
+      ) : (
+        <>
+          <Button
+            variant="primary"
+            size="md"
+            onClick={() => void startOauth()}
+            disabled={busy}
+            className="mt-6 w-full"
           >
-            openrouter.ai/keys
-          </a>
+            Connect with OpenRouter
+            <span aria-hidden className="opacity-60">→</span>
+          </Button>
+
+          <div className="mt-5 flex items-center gap-3">
+            <span className="h-px flex-1 bg-line" />
+            <span className="text-[11px] text-muted">or paste a key</span>
+            <span className="h-px flex-1 bg-line" />
+          </div>
+
+          <form
+            className="mt-5 flex gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitManual();
+            }}
+          >
+            <input
+              type="password"
+              value={manual}
+              onChange={(e) => {
+                setManual(e.target.value);
+                setError(null);
+              }}
+              placeholder="sk-or-v1-…"
+              aria-label="OpenRouter API key"
+              autoComplete="off"
+              spellCheck={false}
+              className="dial-input min-w-0 flex-1 font-mono text-[12.5px]!"
+            />
+            <Button
+              type="submit"
+              variant="secondary"
+              size="md"
+              disabled={busy || !manual.trim()}
+            >
+              Use key
+            </Button>
+          </form>
+        </>
+      )}
+
+      {error && (
+        <p
+          role="alert"
+          className="mt-3 rounded-control bg-hover px-3 py-2 text-[12.5px] leading-relaxed text-foreground"
+          style={{ animation: "dial-fade-up 200ms cubic-bezier(0.23,1,0.32,1) both" }}
+        >
+          {error}
         </p>
-      </motion.div>
-    </div>
+      )}
+
+      <p className="mt-5 border-t border-line pt-4 text-[11.5px] leading-relaxed text-muted">
+        {signedIn
+          ? "Signed in — your history syncs to your account. "
+          : "History stays in this browser. "}
+        Manage keys at{" "}
+        <a
+          href="https://openrouter.ai/keys"
+          target="_blank"
+          rel="noreferrer noopener"
+          className="font-mono text-secondary transition-colors hover:text-foreground"
+        >
+          <span className="dial-underline">openrouter.ai/keys</span>
+        </a>
+      </p>
+    </GateCard>
   );
 }

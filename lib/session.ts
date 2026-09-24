@@ -2,9 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  forgetKey,
   getSession,
-  recallKey,
   signIn as apiSignIn,
   signInWithGoogle as apiGoogle,
   signOut as apiSignOut,
@@ -13,25 +11,37 @@ import {
   verifyEmailOTP as apiVerifyEmailOTP,
   type SessionUser,
 } from "./auth-client";
-import { localCredentialStore } from "./credentials";
+import { setCredential } from "./credentials";
+import {
+  discardLegacyStores,
+  forgetKey,
+  recallKey,
+  rememberKey,
+} from "./keystore";
 import {
   applyAppearance,
   clearLocal,
   fetchRemote,
   fetchUsage,
+  purgeLegacyLocal,
   pushRemote,
   readLocal,
+  SettingsDecryptError,
   writeLocal,
+  DEFAULT_SETTINGS,
   type AccountUsage,
   type UserSettings,
 } from "./settings";
 import {
-  clearCursor,
-  clearLocalData,
   deleteAccount,
-  runSync,
+  forgetUploads,
+  readDelta,
+  setEncryption,
   setLiveConnectionId,
-} from "./sync";
+  setRevisionObserver,
+  setVaultKey,
+  type ConversationMeta,
+} from "./store";
 import { deriveCredential } from "./auth-client";
 
 /**
@@ -49,18 +59,39 @@ import { deriveCredential } from "./auth-client";
  *    overwrite a working configuration with defaults.
  */
 
-/** Wait this long after the last change before writing to the cloud. */
-const DEBOUNCE_MS = 1500;
-
 export type SyncStatus =
   | { state: "offline" }
   | { state: "idle"; at: number | null }
   | { state: "syncing" }
   | { state: "error"; message: string };
 
-export function useAccount(changeSignal: unknown) {
+export type AccountOptions = {
+  /**
+   * The thread this device has open, as a ref rather than a value.
+   *
+   * The account and the conversation store need each other — a delta has to
+   * know which thread to ask about, and the answer has to land back in the
+   * sidebar — and a value would make that a cycle React cannot express. The
+   * ref is read at delta time, which is also the only moment it matters. It
+   * is the same reason `lib/transport.ts` takes the settings ref instead of
+   * closing over the settings.
+   */
+  openThreadRef: { current: string | null };
+  /** Fold changed threads into the sidebar. Must be stable. */
+  onThreads?: (threads: ConversationMeta[], removed: string[]) => void;
+};
+
+export function useAccount({ openThreadRef, onThreads }: AccountOptions) {
   const [user, setUser] = useState<SessionUser | null>(null);
-  const [settings, setSettings] = useState<UserSettings>(readLocal);
+  /**
+   * Appearance seeds from the local mirror; everything else waits for the
+   * account. The mirror holds five enums and a rail width — it cannot supply
+   * an OpenRouter key or a thread id, and must not pretend to.
+   */
+  const [settings, setSettings] = useState<UserSettings>(() => ({
+    ...DEFAULT_SETTINGS,
+    ...readLocal(),
+  }));
   const [status, setStatus] = useState<SyncStatus>({ state: "offline" });
   /** False until the session has been resolved, so nothing flashes. */
   const [ready, setReady] = useState(false);
@@ -71,6 +102,8 @@ export function useAccount(changeSignal: unknown) {
    * about where the user's chats can be read.
    */
   const [encrypted, setEncrypted] = useState(false);
+  /** Whether this account's non-extractable key is stored in this browser. */
+  const [deviceKeyStored, setDeviceKeyStored] = useState(false);
   /**
    * Signed in, with an encrypted account, but without the key to read it.
    *
@@ -85,10 +118,9 @@ export function useAccount(changeSignal: unknown) {
   /**
    * Bumped whenever a reconciliation actually applied remote records.
    *
-   * The shell watches this to re-read the open thread. A pull writes into
-   * Dexie behind React's back, so without a signal the rail refreshed and
-   * the transcript in front of you did not — which is what made cross-device
-   * sync look broken while it was in fact working.
+   * The shell watches this to re-read the open thread. A delta patches the
+   * rail, but useChat owns the transcript in memory; without a signal the
+   * sidebar refreshed and the conversation in front of you did not.
    */
   const [pulled, setPulled] = useState(0);
   /** Storage totals, fetched on demand rather than kept live. */
@@ -115,13 +147,41 @@ export function useAccount(changeSignal: unknown) {
   /** A realtime invalidation that arrived while reconciliation was running. */
   const pendingSyncRef = useRef(false);
   const syncRef = useRef<() => Promise<void>>(async () => undefined);
+  /** The account revision this device has already seen. Never persisted. */
+  const revRef = useRef(0);
+  const onThreadsRef = useRef(onThreads);
+  /** Key derived during signup while an optional OTP gate is still pending. */
+  const pendingSignupKeyRef = useRef<CryptoKey | null>(null);
 
   useEffect(() => {
     userRef.current = user;
     settingsRef.current = settings;
     lockedRef.current = locked;
     encryptedRef.current = encrypted;
+    onThreadsRef.current = onThreads;
   });
+
+  /* A local commit is already a revision this device has seen. */
+  useEffect(() => {
+    setRevisionObserver((revision) => {
+      revRef.current = Math.max(revRef.current, revision);
+    });
+    return () => setRevisionObserver(null);
+  }, []);
+
+  /**
+   * Clear what the local-first build left on this device.
+   *
+   * The `dial` IndexedDB database held every conversation this browser had
+   * ever seen, and `dial:credential` held the OpenRouter key as plaintext.
+   * Neither is read any more, so leaving them would mean quietly retaining a
+   * full plaintext copy of someone's history and a billable credential for as
+   * long as the profile lives.
+   */
+  useEffect(() => {
+    purgeLegacyLocal();
+    discardLegacyStores();
+  }, []);
 
   /* ------------------------------ appearance ---------------------------- */
 
@@ -131,7 +191,21 @@ export function useAccount(changeSignal: unknown) {
 
   /* --------------------------------- sync ------------------------------- */
 
-  const sync = useCallback(async () => {
+  /**
+   * Ask what changed and fold it in.
+   *
+   * This replaces the pull-then-push reconciliation entirely. There is
+   * nothing to push — a write went straight to the server when it happened —
+   * so all that is left is discovering writes made *elsewhere*. That is one
+   * request answering two questions: which thread rows moved, and did
+   * anything inside the thread this device has open move.
+   *
+   * The revision cursor lives in a ref and is never persisted. The old one
+   * was in `localStorage` and had to be exactly right or rows were skipped
+   * for good; this one is a latency optimisation, and losing it costs a
+   * single redundant delta.
+   */
+  const refresh = useCallback(async () => {
     const current = userRef.current;
     if (!current || lockedRef.current) return;
     if (runningRef.current) {
@@ -141,17 +215,24 @@ export function useAccount(changeSignal: unknown) {
     runningRef.current = true;
     setStatus({ state: "syncing" });
     try {
-      const outcome = await runSync({
-        userId: current.id,
-        dek: kekRef.current,
-        encrypted: encryptedRef.current,
-      });
-      if (outcome.pulled > 0) setPulled((count) => count + 1);
+      const delta = await readDelta(revRef.current, openThreadRef.current);
+      // A local commit can land while this read is in flight. Never let the
+      // older response move the cursor backwards and make our own checkpoint
+      // look like a remote edit on the next refresh.
+      revRef.current = Math.max(revRef.current, delta.rev);
+      if (delta.threads.length > 0 || delta.removed.length > 0) {
+        onThreadsRef.current?.(delta.threads, delta.removed);
+      }
+      // ChatView watches this to re-read the open transcript. Bumping it for
+      // every delta would make an unrelated thread's write re-read the one in
+      // front of the reader, which is exactly the churn the scoped delta
+      // exists to avoid.
+      if (delta.threadChanged) setPulled((count) => count + 1);
       setStatus({ state: "idle", at: Date.now() });
     } catch (error) {
       setStatus({
         state: "error",
-        message: error instanceof Error ? error.message : "sync failed",
+        message: error instanceof Error ? error.message : "could not reach the account",
       });
     } finally {
       runningRef.current = false;
@@ -160,7 +241,8 @@ export function useAccount(changeSignal: unknown) {
         queueMicrotask(() => void syncRef.current());
       }
     }
-  }, []);
+  }, [openThreadRef]);
+  const sync = refresh;
 
   useEffect(() => {
     syncRef.current = sync;
@@ -177,6 +259,7 @@ export function useAccount(changeSignal: unknown) {
     async (next: SessionUser, kek: CryptoKey | null) => {
       userRef.current = next;
       kekRef.current = kek;
+      setVaultKey(kek);
       setUser(next);
 
       // Remote settings are authoritative when readable. When they are not —
@@ -193,8 +276,13 @@ export function useAccount(changeSignal: unknown) {
         const accountEncrypted = remote.encryption !== "none";
         setEncrypted(accountEncrypted);
         encryptedRef.current = accountEncrypted;
+        setEncryption(remote.encryption);
+        // Everything this device has seen. Deltas start from here, so a
+        // reload asks for what changed rather than for the whole account.
+        revRef.current = remote.rev;
 
         if (accountEncrypted && !kek) {
+          setDeviceKeyStored(false);
           setLocked(true);
           lockedRef.current = true;
           setStatus({ state: "error", message: "locked on this device" });
@@ -203,18 +291,21 @@ export function useAccount(changeSignal: unknown) {
         setLocked(false);
         lockedRef.current = false;
 
+        const adoptedSettings = remote.settings ?? settingsRef.current;
         if (remote.settings) {
-          setSettings(remote.settings);
-          writeLocal(remote.settings);
-          settingsRef.current = remote.settings;
-          if (remote.settings.openrouterKey) {
-            localCredentialStore.write({
-              key: remote.settings.openrouterKey,
-              source: "manual",
-              label: null,
-              connectedAt: Date.now(),
-            });
-          }
+          setSettings(adoptedSettings);
+          writeLocal(adoptedSettings);
+          settingsRef.current = adoptedSettings;
+          setCredential(
+            adoptedSettings.openrouterKey
+              ? {
+                  key: adoptedSettings.openrouterKey,
+                  source: "manual",
+                  label: null,
+                  connectedAt: Date.now(),
+                }
+              : null,
+          );
         } else {
           // Nothing stored yet: this device's configuration becomes the
           // account's. Mirror it locally too, so the next load paints the
@@ -222,9 +313,37 @@ export function useAccount(changeSignal: unknown) {
           await pushRemote(settingsRef.current, kek, accountEncrypted);
           writeLocal(settingsRef.current);
         }
-      } catch {
+
+        if (kek) {
+          if (adoptedSettings.rememberDeviceKey) {
+            setDeviceKeyStored(await rememberKey(next.id, kek));
+          } else {
+            await forgetKey(next.id);
+            setDeviceKeyStored(false);
+          }
+        }
+      } catch (error) {
+        if (error instanceof SettingsDecryptError) {
+          // Never let an old, unscoped key write. Remove it and return to the
+          // explicit unlock state, where the password verifies itself by
+          // opening the account's settings before any write is possible.
+          await forgetKey(next.id);
+          kekRef.current = null;
+          setVaultKey(null);
+          setEncryption(error.encryption);
+          setEncrypted(true);
+          encryptedRef.current = true;
+          setDeviceKeyStored(false);
+          setLocked(true);
+          lockedRef.current = true;
+          setStatus({ state: "error", message: "locked on this device" });
+          return;
+        }
         // Settings are a convenience; failing to reach them must not stop
         // someone from using the app they just signed in to.
+        if (kek && settingsRef.current.rememberDeviceKey) {
+          setDeviceKeyStored(await rememberKey(next.id, kek));
+        }
       }
 
       await sync();
@@ -243,8 +362,9 @@ export function useAccount(changeSignal: unknown) {
         setReady(true);
         return;
       }
-      const kek = await recallKey();
+      const kek = await recallKey(existing.id);
       if (cancelled) return;
+      setDeviceKeyStored(kek !== null);
       await adopt(existing, kek);
       if (!cancelled) setReady(true);
     })();
@@ -256,11 +376,17 @@ export function useAccount(changeSignal: unknown) {
 
   /* ---------------------------- sync triggers --------------------------- */
 
-  useEffect(() => {
-    if (!user) return;
-    const timer = setTimeout(() => void sync(), DEBOUNCE_MS);
-    return () => clearTimeout(timer);
-  }, [user, changeSignal, sync]);
+  /*
+   * There is deliberately no "something changed locally, schedule a sync"
+   * effect any more.
+   *
+   * That debounce existed because a local write only reached D1 when the
+   * engine got round to pushing it. A write is a request now, so by the time
+   * anything could observe the change it is already durable — scheduling a
+   * reconciliation on top of it would spend a request to be told nothing
+   * happened. What is left is discovering writes made elsewhere, which is
+   * what the socket and the focus handler below are for.
+   */
 
   useEffect(() => {
     if (!user) return;
@@ -326,8 +452,16 @@ export function useAccount(changeSignal: unknown) {
       };
       socket.onmessage = (event) => {
         try {
-          const payload = JSON.parse(String(event.data)) as { rev?: unknown };
-          if (typeof payload.rev === "number") void sync();
+          const payload = JSON.parse(String(event.data)) as {
+            rev?: unknown;
+            thread?: unknown;
+          };
+          // A revision we already hold is the hub catching a device up on
+          // connect, or a duplicate fan-out. Either way there is nothing to
+          // ask for, and asking anyway would spend a request to be told so.
+          if (typeof payload.rev !== "number") return;
+          if (payload.rev <= revRef.current) return;
+          void sync();
         } catch {
           // Forward compatibility: unknown hub messages are ignored.
         }
@@ -363,6 +497,16 @@ export function useAccount(changeSignal: unknown) {
   /* -------------------------------- actions ----------------------------- */
 
   const updateSettings = useCallback((patch: Partial<UserSettings>) => {
+    if (patch.rememberDeviceKey !== undefined) {
+      const current = userRef.current;
+      const key = kekRef.current;
+      if (patch.rememberDeviceKey && current && key) {
+        void rememberKey(current.id, key).then(setDeviceKeyStored);
+      } else if (current) {
+        void forgetKey(current.id).then(() => setDeviceKeyStored(false));
+      }
+    }
+
     setSettings((current) => {
       const next = { ...current, ...patch };
       settingsRef.current = next;
@@ -372,16 +516,16 @@ export function useAccount(changeSignal: unknown) {
       // credential store, so a change here has to reach it immediately —
       // not after the next reload.
       if (patch.openrouterKey !== undefined) {
-        if (patch.openrouterKey) {
-          localCredentialStore.write({
-            key: patch.openrouterKey,
-            source: "manual",
-            label: null,
-            connectedAt: Date.now(),
-          });
-        } else {
-          localCredentialStore.clear();
-        }
+        setCredential(
+          patch.openrouterKey
+            ? {
+                key: patch.openrouterKey,
+                source: "manual",
+                label: null,
+                connectedAt: Date.now(),
+              }
+            : null,
+        );
       }
 
       if (userRef.current) {
@@ -417,7 +561,15 @@ export function useAccount(changeSignal: unknown) {
       // Verify by trying to actually read something with it. Accepting a
       // wrong password here would leave the app looking unlocked while every
       // record silently failed to decrypt.
-      const remote = await fetchRemote(kek);
+      let remote;
+      try {
+        remote = await fetchRemote(kek);
+      } catch (error) {
+        if (error instanceof SettingsDecryptError) {
+          throw new Error("that password does not unlock this account");
+        }
+        throw error;
+      }
       if (!remote.settings && remote.encryption !== "none") {
         throw new Error("that password does not unlock this account");
       }
@@ -425,27 +577,35 @@ export function useAccount(changeSignal: unknown) {
       kekRef.current = kek;
       setLocked(false);
       lockedRef.current = false;
+      setEncrypted(remote.encryption !== "none");
+      encryptedRef.current = remote.encryption !== "none";
+      setEncryption(remote.encryption);
 
-      // Start the next pull from zero.
-      //
-      // A device that regained its key does not know what it missed while it
-      // did not have one, and an older build could advance the cursor past
-      // records it failed to decrypt — leaving them on the server, above no
-      // revision this device will ever ask for again. Re-reading everything
-      // is cheap (records upsert by id) and it is the only thing that heals
-      // a cursor that has already moved too far.
-      clearCursor();
+      // The state read includes the account's current revision. The full
+      // thread list that mounts after unlock is the authoritative repair;
+      // starting deltas here avoids replaying this account's entire history.
+      revRef.current = remote.rev;
+      setVaultKey(kek);
       if (remote.settings) {
         setSettings(remote.settings);
         writeLocal(remote.settings);
         settingsRef.current = remote.settings;
-        if (remote.settings.openrouterKey) {
-          localCredentialStore.write({
-            key: remote.settings.openrouterKey,
-            source: "manual",
-            label: null,
-            connectedAt: Date.now(),
-          });
+        setCredential(
+          remote.settings.openrouterKey
+            ? {
+                key: remote.settings.openrouterKey,
+                source: "manual",
+                label: null,
+                connectedAt: Date.now(),
+              }
+            : null,
+        );
+
+        if (remote.settings.rememberDeviceKey) {
+          setDeviceKeyStored(await rememberKey(current.id, kek));
+        } else {
+          await forgetKey(current.id);
+          setDeviceKeyStored(false);
         }
       }
       await sync();
@@ -461,9 +621,11 @@ export function useAccount(changeSignal: unknown) {
       dateOfBirth: string;
     }) => {
       const credential = await apiSignUp(input);
+      pendingSignupKeyRef.current = credential.kek;
       const next = await getSession();
       if (!next) return { verificationRequired: true };
       await adopt(next, credential.kek);
+      pendingSignupKeyRef.current = null;
       return { verificationRequired: false };
     },
     [adopt],
@@ -474,9 +636,10 @@ export function useAccount(changeSignal: unknown) {
       await apiVerifyEmailOTP(email, otp);
       const next = await getSession();
       if (!next) throw new Error("verified, but no session was returned");
-      const key = await recallKey();
+      const key = pendingSignupKeyRef.current ?? (await recallKey(next.id));
       if (!key) throw new Error("verified, but this device lost its vault key");
       await adopt(next, key);
+      pendingSignupKeyRef.current = null;
     },
     [adopt],
   );
@@ -491,42 +654,50 @@ export function useAccount(changeSignal: unknown) {
     [adopt],
   );
 
-  const signOut = useCallback(
-    async (wipeDevice: boolean) => {
+  const signOut = useCallback(async () => {
+    const accountId = userRef.current?.id;
+    try {
       await apiSignOut();
-      // Local conversations are a cache of the account. Leaving them on a
-      // shared machine after someone signs out would be a real leak, so the
-      // default is to clear them; the cloud copy is the durable one.
-      if (wipeDevice) {
-        await clearLocalData();
-        localCredentialStore.clear();
-        clearLocal();
-      }
-      clearCursor();
-      await forgetKey();
+    } finally {
+      // There is no local conversation copy any more. Signing out removes the
+      // device key and the small preference mirror; the cloud account remains
+      // the only copy of the history.
+      clearLocal();
+      forgetUploads();
+      setCredential(null);
+      setVaultKey(null);
+      setEncryption("none");
+      revRef.current = 0;
+      if (accountId) await forgetKey(accountId);
       userRef.current = null;
       kekRef.current = null;
+      pendingSignupKeyRef.current = null;
       setUser(null);
       setEncrypted(false);
+      setDeviceKeyStored(false);
       setLocked(false);
       lockedRef.current = false;
       setStatus({ state: "offline" });
-    },
-    [],
-  );
+    }
+  }, []);
 
   const destroy = useCallback(async () => {
+    const accountId = userRef.current?.id;
     await deleteAccount();
-    await clearLocalData();
-    localCredentialStore.clear();
+    forgetUploads();
+    setCredential(null);
+    setVaultKey(null);
+    setEncryption("none");
     clearLocal();
-    clearCursor();
-    await forgetKey();
+    revRef.current = 0;
+    if (accountId) await forgetKey(accountId);
     userRef.current = null;
     kekRef.current = null;
+    pendingSignupKeyRef.current = null;
     setUser(null);
     setEncrypted(false);
-    setSettings(readLocal());
+    setDeviceKeyStored(false);
+    setSettings({ ...DEFAULT_SETTINGS, ...readLocal() });
     setStatus({ state: "offline" });
   }, []);
 
@@ -537,6 +708,8 @@ export function useAccount(changeSignal: unknown) {
     status,
     /** True when this account's records are end-to-end encrypted. */
     encrypted,
+    /** True when this browser actually retained the non-extractable key. */
+    deviceKeyStored,
     /** Signed in but missing the key — the UI must ask for the password. */
     locked,
     unlock,

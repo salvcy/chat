@@ -4,16 +4,11 @@ import type { SessionUser } from "@/lib/auth-client";
 import type { SyncStatus } from "@/lib/session";
 
 /**
- * The rail's footer: who you are, and the way into settings.
+ * The rail's footer: who you are, whether your history is in step with the
+ * account, and the way into settings.
  *
- * It sits below the scrolling list as a `shrink-0` sibling for the same
- * reason the header does — the aside owns the rounded border, so anything
- * that scrolls has to be strictly between them or the scrollbar track runs
- * into the corners.
- *
- * Signed out, this is the only prompt to sign in anywhere in the app. That is
- * deliberate: the app works without an account, so the invitation belongs
- * somewhere quiet and permanent rather than in front of the transcript.
+ * It sits below the scrolling list as a `shrink-0` sibling, so the list can
+ * scroll without carrying the footer with it.
  */
 export default function AccountButton({
   user,
@@ -25,44 +20,57 @@ export default function AccountButton({
   onOpen: () => void;
 }) {
   const initial = (user?.name || user?.email || "?").trim().charAt(0).toUpperCase();
+  const syncing = status.state === "syncing";
+  const failed = status.state === "error";
 
   return (
-    <div className="shrink-0 border-t border-hairline bg-panel p-1.5">
+    <div className="shrink-0 border-t border-line pt-1.5">
       <button
         onClick={onOpen}
         title={user ? "Account and settings" : "Sign in"}
-        className="group flex w-full items-center gap-2.5 rounded-xl px-2 py-2 text-left transition-colors hover:bg-surface"
+        className="group flex h-11 w-full items-center gap-2.5 rounded-control px-2 text-left transition-[background-color,transform] duration-150 hover:bg-hover-2 active:scale-[0.99]"
       >
         <span
           aria-hidden
-          className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-medium ${
-            user
-              ? "bg-invert-fill text-invert-text"
-              : "border border-hairline text-muted"
-          }`}
+          className="flex size-7 shrink-0 items-center justify-center rounded-full bg-foreground text-[11.5px] font-semibold text-background"
         >
           {user ? initial : "+"}
         </span>
 
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-[12px] leading-tight text-foreground">
+          <span className="block truncate text-[13px] font-medium leading-tight text-foreground">
             {user ? user.name || user.email : "Sign in"}
           </span>
-          <span className="mt-0.5 block truncate font-mono text-[9px] leading-tight text-muted">
+          <span className="mt-0.5 flex items-center gap-1.5 truncate font-mono text-[10.5px] leading-tight text-muted">
+            <span
+              aria-hidden
+              className={`size-1.5 shrink-0 rounded-full ${
+                failed
+                  ? "border border-foreground"
+                  : syncing
+                    ? "bg-muted"
+                    : "bg-foreground/70"
+              }`}
+              style={
+                syncing
+                  ? { animation: "dial-breathe 1.1s ease-in-out infinite" }
+                  : undefined
+              }
+            />
             {user
-              ? status.state === "syncing"
-                ? "syncing…"
-                : status.state === "error"
+              ? syncing
+                ? "syncing"
+                : failed
                   ? "sync failed"
                   : "synced"
-              : "saved on this device only"}
+              : "sign in required"}
           </span>
         </span>
 
         <svg
           viewBox="0 0 16 16"
           aria-hidden
-          className="h-3.5 w-3.5 shrink-0 text-muted transition-colors group-hover:text-foreground"
+          className="h-4 w-4 shrink-0 text-muted transition-[color,transform] duration-300 group-hover:rotate-45 group-hover:text-foreground"
           fill="none"
           stroke="currentColor"
           strokeWidth="1.3"

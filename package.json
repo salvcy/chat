@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --no-warnings --test --experimental-strip-types tests/*.test.ts"
   },
   "dependencies": {
     "@ai-sdk/react": "^4.0.80",

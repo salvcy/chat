@@ -9,6 +9,13 @@
 # per-request nonce and Next inlines its bootstrap. Blocking foreign script
 # *origins* is still worth having; treat the inline allowance as the reason
 # connect-src has to be strict rather than as a reason to relax it.
+#
+# NOTE FOR THE R2 CUSTOM DOMAIN: serving ciphertext straight from R2 instead
+# of through the Worker needs its origin added to connect-src as well as
+# BLOB_PUBLIC_ORIGIN being set. `downloadBlob` fetches that URL with
+# `mode: "cors"`, so without it the browser blocks the request before it is
+# made and every image silently falls back to the billable Worker path — the
+# optimisation would look like it had simply not worked.
 
 /*
   Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://openrouter.ai; form-action 'none'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'
@@ -16,3 +23,15 @@
   X-Content-Type-Options: nosniff
   Cross-Origin-Opener-Policy: same-origin
   Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+
+# Everything under /_next/static carries a content hash in its filename, so a
+# changed file is a changed URL and a cached copy can never be stale. Without
+# this they were served `max-age=0, must-revalidate`, which made every repeat
+# visit re-validate all nine entry scripts — nine conditional round trips
+# before hydration, for bytes the browser already had.
+#
+# Scoped to the hashed directory on purpose: the HTML documents must keep
+# revalidating, or a deploy would never reach anyone holding a cached page.
+/_next/static/*
+  Cache-Control: public, max-age=31536000, immutable

@@ -1,6 +1,6 @@
 "use client";
 
-import { motion } from "motion/react";
+import Button from "@/components/ui/Button";
 import { useEffect, useRef, useState } from "react";
 
 /** A few starting points — cheaper than staring at an empty box. */
@@ -59,24 +59,31 @@ export default function SystemPrompt({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-chrome/70 px-3 pt-[12vh] backdrop-blur-md sm:px-4"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 px-3 pt-[12vh] backdrop-blur-[2px] sm:px-4"
       onClick={onClose}
+      style={{ animation: "dial-fade-in 150ms ease-out both" }}
     >
-      <motion.div
-        initial={{ opacity: 0, y: -8, scale: 0.985 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        transition={{ duration: 0.16, ease: "easeOut" }}
+      <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="conversation-prompt-title"
-        className="w-full max-w-[580px] overflow-hidden rounded-[24px] border border-hairline-strong bg-panel/95 shadow-[0_28px_100px_var(--shadow)] backdrop-blur-[28px]"
+        className="w-full max-w-[580px] overflow-hidden rounded-window bg-panel shadow-overlay"
+        style={{
+          animation: "dial-pop-in 200ms cubic-bezier(0.23,1,0.32,1) both",
+          transformOrigin: "top center",
+        }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-baseline justify-between border-b border-hairline px-4 py-3">
-          <span id="conversation-prompt-title" className="text-sm font-medium text-foreground">
-            Conversation prompt
-          </span>
-          <span className="font-mono text-[10px] text-muted">
+        <div className="flex items-center justify-between border-b border-line px-4 py-3">
+          <div>
+            <h2 id="conversation-prompt-title" className="text-[14px] font-semibold text-foreground">
+              Conversation prompt
+            </h2>
+            <p className="mt-0.5 text-[12px] text-muted">
+              Standing guidance, sent with every turn in this conversation.
+            </p>
+          </div>
+          <span className="font-mono text-[11px] tabular-nums text-muted">
             {draft.length}/{MAX}
           </span>
         </div>
@@ -85,49 +92,50 @@ export default function SystemPrompt({
           ref={ref}
           value={draft}
           maxLength={MAX}
+          aria-label="Conversation prompt"
           onChange={(e) => setDraft(e.target.value)}
           placeholder="Give the model standing guidance for this conversation…"
-          className="dial-scroll h-56 w-full resize-none bg-transparent px-4 py-4 text-[15px] leading-relaxed text-foreground outline-none placeholder:text-muted"
+          className="dial-scroll block h-56 w-full resize-none bg-transparent px-4 py-4 text-[15px] leading-relaxed text-foreground outline-none placeholder:text-muted"
         />
 
-        <div className="flex flex-wrap items-center gap-1.5 border-t border-hairline px-4 py-2.5">
-          <span className="font-mono text-[10px] text-muted">presets</span>
+        <div className="flex flex-wrap items-center gap-1.5 border-t border-line px-4 py-2.5">
+          <span className="mr-1 text-[12px] font-medium text-muted">Presets</span>
           {PRESETS.map((p) => (
             <button
               key={p.label}
+              type="button"
               onClick={() => setDraft(p.text)}
-              className="rounded-full border border-hairline px-2 py-0.5 font-mono text-[10px] text-muted transition-colors hover:bg-surface hover:text-foreground"
+              className="h-6 rounded-full bg-hover px-2.5 text-[12px] text-secondary transition-[background-color,color,transform] duration-150 hover:bg-hover-2 hover:text-foreground active:scale-[0.97]"
             >
               {p.label}
             </button>
           ))}
         </div>
 
-        <div className="flex items-center justify-between border-t border-hairline px-4 py-2.5">
-          <button
+        <div className="flex items-center justify-between border-t border-line bg-hover px-4 py-2.5">
+          <Button
+            variant="quiet"
+            size="xs"
             onClick={() => setDraft("")}
             disabled={draft.length === 0}
-            className="font-mono text-[11px] text-muted transition-colors hover:text-foreground disabled:opacity-30 disabled:hover:text-muted"
           >
-            clear
-          </button>
-          <div className="flex items-center gap-3">
-            <span className="font-mono text-[10px] text-muted">⌘⏎ save</span>
-            <button
-              onClick={onClose}
-              className="rounded-full px-3 py-1 font-mono text-[11px] text-muted transition-colors hover:text-foreground"
-            >
-              cancel
-            </button>
-            <button
-              onClick={commit}
-            className="rounded-full bg-invert-fill px-4 py-1.5 font-mono text-[10px] text-invert-text"
-            >
+            Clear
+          </Button>
+          <div className="flex items-center gap-1.5">
+            <span className="mr-1.5 hidden items-center gap-1 text-[11.5px] text-muted sm:flex">
+              <span className="dial-kbd">⌘</span>
+              <span className="dial-kbd">⏎</span>
               save
-            </button>
+            </span>
+            <Button variant="quiet" size="xs" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button variant="primary" size="xs" onClick={commit}>
+              Save
+            </Button>
           </div>
         </div>
-      </motion.div>
+      </div>
     </div>
   );
 }

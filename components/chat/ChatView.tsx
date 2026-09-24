@@ -15,12 +15,16 @@ import Composer from "./Composer";
 import EmptyState from "./EmptyState";
 import MessageBubble from "./MessageBubble";
 import MessageNavigator from "./MessageNavigator";
+import SelectionActions from "./SelectionActions";
+import Button from "@/components/ui/Button";
+import Loader from "@/components/ui/Loader";
 import SystemPrompt from "./SystemPrompt";
 import type { DialMessage } from "@/lib/conversations";
 import { capabilitiesFor } from "@/lib/capabilities";
 import { currentKey } from "@/lib/credentials";
 import { generateImage } from "@/lib/image";
-import { hasRenderableResponse } from "@/lib/messages";
+import { promoteReasoningAnswer, reconcileFinishedResponse } from "@/lib/messages";
+import { isStreamingRollback } from "@/lib/message-sync";
 import { OpenRouterChatTransport } from "@/lib/transport";
 import {
   DEFAULT_IMAGE_MODEL,
@@ -30,7 +34,7 @@ import {
   type RequestStatusData,
 } from "@/lib/types";
 
-/** How often a mid-stream snapshot is written to IndexedDB. */
+/** How often the latest stream is offered to the cloud checkpoint throttle. */
 const STREAM_SAVE_MS = 1200;
 /** Distance from the bottom that still counts as "following the stream". */
 const STICK_THRESHOLD_PX = 80;
@@ -144,6 +148,7 @@ export default function ChatView({
   loadMessages,
   remoteVersion,
   setActiveId,
+  userName,
 }: {
   conversationId: string;
   settings: ChatSettings;
@@ -163,10 +168,34 @@ export default function ChatView({
   /** Increments when a sync applied remote records. See the effect below. */
   remoteVersion: number;
   setActiveId: (id: string) => void;
+  /** For the empty state's greeting. */
+  userName?: string;
 }) {
   const [input, setInput] = useState("");
+  /** Bumped to hand the caret back to the composer (after quoting). */
+  const [composerFocus, setComposerFocus] = useState(0);
   const [attachments, setAttachments] = useState<FileUIPart[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  /**
+   * A save that did not reach the server.
+   *
+   * This failure mode is new. Writes used to land in IndexedDB and could not
+   * realistically fail, so nothing needed to report it; they are requests
+   * now, and there is no local copy behind them. Silently swallowing one
+   * would mean the transcript on screen is the only copy in existence and
+   * the user has no idea. So it is shown, with a retry.
+   */
+  const [saveError, setSaveError] = useState<string | null>(null);
+  /** Remote reads wait until every local checkpoint/final save has settled. */
+  const [pendingWrites, setPendingWrites] = useState(0);
+  /** The last failed save, kept so `retry` can run exactly that write again. */
+  const pendingSaveRef = useRef<(() => Promise<void>) | null>(null);
+  /**
+   * Closed synchronously by onFinish, before React publishes `status=ready`.
+   * This prevents an interval callback already waiting in the event loop from
+   * queueing a stale draft after the final answer.
+   */
+  const streamSettledRef = useRef(true);
   const [systemOpen, setSystemOpen] = useState(false);
   const [atBottom, setAtBottom] = useState(true);
   const [imageMode, setImageMode] = useState(false);
@@ -175,6 +204,8 @@ export default function ChatView({
   const setChatMessagesRef = useRef<((messages: DialMessage[]) => void) | null>(
     null,
   );
+  /** Last transcript React rendered, used to settle SDK/realtime races. */
+  const latestRef = useRef<DialMessage[]>(initialMessages);
 
   // The shell mints the id, including for unsaved threads, so this stays
   // stable across the moment the conversation first becomes "active".
@@ -213,33 +244,109 @@ export default function ChatView({
       messages: initialMessages,
       transport,
       onFinish: ({ message, messages: finished, isAbort }) => {
+        streamSettledRef.current = true;
+        const reconciled = reconcileFinishedResponse(
+          message,
+          finished,
+          latestRef.current,
+        );
+        // A model that answered on the reasoning channel: move the reply out
+        // of the trace before it is saved, so the stored turn — and the
+        // context the next request carries — has the answer as text.
+        const promoted =
+          !isAbort && reconciled.response
+            ? promoteReasoningAnswer(reconciled.response)
+            : null;
+        if (promoted) {
+          reconciled.messages = reconciled.messages.map((entry) =>
+            entry.id === promoted.id ? promoted : entry,
+          );
+          reconciled.response = promoted;
+        }
         const requestStatus = isAbort
           ? "interrupted"
-          : hasRenderableResponse(message)
+          : reconciled.response
             ? null
             : "empty";
         const settled = requestStatus
-          ? withRequestStatus(finished, message, requestStatus)
-          : finished;
+          ? withRequestStatus(
+              reconciled.messages,
+              reconciled.response ?? message,
+              requestStatus,
+            )
+          : reconciled.messages;
 
-        if (settled !== finished) {
+        if (settled !== finished || reconciled.response !== message) {
           setChatMessagesRef.current?.(settled);
         }
         // Write BEFORE announcing the thread. Flipping activeId first made
-        // the shell read this conversation out of Dexie while the save was
+        // the shell read this conversation from D1 while the save was
         // still in flight, get nothing back, and blank the transcript — the
         // first exchange of a new thread vanished a beat after it arrived.
-        void saveTurn({
-          id: threadId,
-          settings: settingsRef.current,
-          messages: settled,
-        }).then(() => setActiveId(threadId));
+        void persist(
+          {
+            id: threadId,
+            settings: settingsRef.current,
+            messages: settled,
+          },
+          () => setActiveId(threadId),
+        );
       },
     });
 
   useEffect(() => {
     setChatMessagesRef.current = setMessages;
   }, [setMessages]);
+
+  /**
+   * Save, and remember how to do it again if it fails.
+   *
+   * `after` runs only on success — for the first turn of a thread that is
+   * `setActiveId`, and announcing a thread the server does not have would
+   * put a row in the rail that opens to nothing.
+   */
+  const persist = useCallback(
+    async (
+      input: Parameters<typeof saveTurn>[0],
+      after?: () => void,
+    ): Promise<void> => {
+      const run = async () => {
+        setPendingWrites((count) => count + 1);
+        try {
+          await saveTurn(input);
+          if (pendingSaveRef.current === run) {
+            pendingSaveRef.current = null;
+            setSaveError(null);
+          }
+          after?.();
+        } finally {
+          setPendingWrites((count) => Math.max(0, count - 1));
+        }
+      };
+      pendingSaveRef.current = run;
+      try {
+        await run();
+      } catch (error) {
+        if (pendingSaveRef.current === run) {
+          setSaveError(
+            error instanceof Error ? error.message : "could not reach the server",
+          );
+        }
+      }
+    },
+    [saveTurn],
+  );
+
+  const retrySave = useCallback(() => {
+    const run = pendingSaveRef.current;
+    if (!run) return;
+    setSaveError(null);
+    void run().catch((error: unknown) => {
+      setSaveError(
+        error instanceof Error ? error.message : "could not reach the server",
+      );
+    });
+  }, []);
 
   const chatBusy = status === "streaming" || status === "submitted";
   const busy = chatBusy || imageBusy;
@@ -255,7 +362,6 @@ export default function ChatView({
   // what lets the timer depend only on `busy`: an effect that depended on
   // `messages` was torn down and rebuilt on every token, so its cleanup
   // cleared the pending timeout each time and the snapshot never fired.
-  const latestRef = useRef(messages);
   useEffect(() => {
     latestRef.current = messages;
   });
@@ -263,10 +369,11 @@ export default function ChatView({
   useEffect(() => {
     if (!chatBusy) return;
     const timer = setInterval(() => {
+      if (streamSettledRef.current) return;
       const snapshot = latestRef.current;
       if (snapshot.length === 0) return;
       // naming:false — a half-written thread isn't worth naming yet.
-      void saveTurn({
+      void persist({
         id: threadId,
         settings: settingsRef.current,
         messages: snapshot,
@@ -275,24 +382,24 @@ export default function ChatView({
       });
     }, STREAM_SAVE_MS);
     return () => clearInterval(timer);
-  }, [chatBusy, saveTurn, threadId]);
+  }, [chatBusy, persist, threadId]);
 
   /* --------------------------- remote changes --------------------------- */
 
   /**
    * Adopt what another device wrote into this thread.
    *
-   * A realtime invalidation makes `runSync` pull and write into Dexie — but
-   * Dexie is not React, so before this the rail refreshed and the transcript
-   * in front of the reader did not. That is the whole reason cross-device
-   * sync looked broken: the data had already arrived and nothing re-read it.
+   * A realtime invalidation patches the rail, but useChat still owns the open
+   * transcript in memory. Before this, cross-device sync looked broken because
+   * nothing re-read the conversation in front of the reader.
    *
    * Three guards, each protecting against losing local work:
    *
-   *  - Never while busy. A stream in progress is authoritative here; the
-   *    version is re-checked when it settles, so nothing is dropped.
+   *  - Never while busy or while a save is in flight. A stream and its final
+   *    unsaved snapshot are authoritative here; the version is re-checked
+   *    when both settle, so nothing is dropped.
    *  - Never twice for the same version, which is what keeps the `busy`
-   *    dependency from re-reading Dexie the instant a stream finishes and
+   *    dependency from re-reading D1 the instant a stream finishes and
    *    racing the `onFinish` save that has not landed yet.
    *  - Never when the stored copy is missing a message we are holding. That
    *    means our own save is still in flight and the read is stale. The cost
@@ -302,16 +409,20 @@ export default function ChatView({
    */
   const appliedRemoteRef = useRef(0);
   useEffect(() => {
-    if (remoteVersion === 0 || busy) return;
+    if (remoteVersion === 0 || busy || pendingWrites > 0 || saveError) return;
     if (remoteVersion === appliedRemoteRef.current) return;
 
     let cancelled = false;
-    void loadMessages(threadId).then((fresh) => {
+    void loadMessages(threadId).catch(() => [] as DialMessage[]).then((fresh) => {
       if (cancelled || fresh.length === 0) return;
 
       const local = latestRef.current;
       const stored = new Set(fresh.map((message) => message.id));
       if (local.some((message) => !stored.has(message.id))) return;
+      // A delayed checkpoint has the same message id and is a strict prefix
+      // of the answer already on screen. Never let it roll a completed parent
+      // device back to the child's partial cloud snapshot.
+      if (isStreamingRollback(local, fresh)) return;
       if (fingerprint(fresh) === fingerprint(local)) {
         appliedRemoteRef.current = remoteVersion;
         return;
@@ -324,7 +435,7 @@ export default function ChatView({
     return () => {
       cancelled = true;
     };
-  }, [remoteVersion, busy, loadMessages, threadId, setMessages]);
+  }, [remoteVersion, busy, pendingWrites, saveError, loadMessages, threadId, setMessages]);
 
   /* ------------------------------ scroll ------------------------------- */
 
@@ -567,6 +678,18 @@ export default function ChatView({
     setInput(value);
   };
 
+  /** Quote a selection from an answer into the composer, ahead of any draft. */
+  const quoteSelection = (text: string) => {
+    const quoted = text
+      .split("\n")
+      .map((line) => `> ${line}`.trimEnd())
+      .join("\n");
+    setInput((current) =>
+      current.trim() ? `${quoted}\n\n${current}` : `${quoted}\n\n`,
+    );
+    setComposerFocus((n) => n + 1);
+  };
+
   const selectImageTool = () => {
     setImageMode(true);
     setAttachmentError(null);
@@ -719,20 +842,22 @@ export default function ChatView({
       );
       latestRef.current = finalMessages;
       setMessages(finalMessages);
-      await saveTurn({
-        id: threadId,
-        settings: settingsRef.current,
-        messages: finalMessages,
-      });
-      setActiveId(threadId);
+      await persist(
+        {
+          id: threadId,
+          settings: settingsRef.current,
+          messages: finalMessages,
+        },
+        () => setActiveId(threadId),
+      );
     },
     [
       attachments,
       activeImageModel,
       busy,
+      persist,
       clearError,
       messages,
-      saveTurn,
       selectedImageModel,
       setActiveId,
       setMessages,
@@ -766,6 +891,7 @@ export default function ChatView({
     clearError();
     setAttachmentError(null);
     stickRef.current = true;
+    streamSettledRef.current = false;
     if (text) {
       sendMessage({ text, ...(attachments.length ? { files: attachments } : {}) });
     } else {
@@ -831,6 +957,7 @@ export default function ChatView({
     if (busy) return;
     clearError();
     stickRef.current = true;
+    streamSettledRef.current = false;
     setMessages(messages.slice(0, index));
     sendMessage({ text, ...(files.length ? { files } : {}) });
   };
@@ -839,6 +966,7 @@ export default function ChatView({
     if (busy) return;
     clearError();
     stickRef.current = true;
+    streamSettledRef.current = false;
     void regenerate({ messageId });
   };
 
@@ -900,6 +1028,7 @@ export default function ChatView({
               <EmptyState
                 settings={settings}
                 models={models}
+                userName={userName}
                 onOpenModel={onOpenSwitcher}
               />
             )}
@@ -958,9 +1087,20 @@ export default function ChatView({
                   />
                 </div>
               ))}
+
+              {/* Between send and the first streamed chunk there is no
+                  assistant message to hang a status on, and the transcript
+                  used to sit silent. The same loader the thinking header
+                  uses, so the hand-off when the message arrives is seamless. */}
+              {chatBusy && messages[messages.length - 1]?.role === "user" && (
+                <div aria-live="polite">
+                  <Loader label="Thinking" />
+                </div>
+              )}
             </div>
 
             {error && <ErrorPanel message={error.message} onRetry={retry} />}
+            {saveError && <SaveErrorPanel message={saveError} onRetry={retrySave} />}
           </div>
         </div>
 
@@ -977,7 +1117,8 @@ export default function ChatView({
             transition={{ duration: 0.15, ease: "easeOut" }}
             onClick={jumpToBottom}
             title="Jump to latest"
-            className="pointer-events-auto absolute bottom-32 left-1/2 z-20 flex h-8 w-8 -translate-x-1/2 items-center justify-center rounded-full border border-hairline bg-background/80 text-muted shadow-[0_8px_24px_rgba(0,0,0,0.2)] backdrop-blur-[20px] transition-colors hover:text-foreground"
+            aria-label="Jump to latest"
+            className="pointer-events-auto absolute bottom-32 left-1/2 z-20 flex size-8 -translate-x-1/2 items-center justify-center rounded-full bg-panel text-secondary shadow-raised transition-[color,transform] duration-150 hover:text-foreground active:scale-[0.94]"
           >
             <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
               <path d="M8 3v10M3.5 8.5 8 13l4.5-4.5" />
@@ -986,8 +1127,12 @@ export default function ChatView({
         )}
       </AnimatePresence>
 
-      <div className="dial-column">
+      <div
+        className="composer-dock dial-column"
+        data-empty={messages.length === 0 ? "true" : undefined}
+      >
         <Composer
+          focusToken={composerFocus}
           input={input}
           setInput={updateComposerInput}
           onSend={send}
@@ -1017,6 +1162,8 @@ export default function ChatView({
           }}
         />
       </div>
+
+      <SelectionActions containerRef={transcriptRef} onQuote={quoteSelection} />
 
       {systemOpen && (
         <SystemPrompt
@@ -1077,6 +1224,30 @@ function describeError(raw: string): {
   };
 }
 
+/**
+ * The answer arrived; storing it did not.
+ *
+ * Deliberately worded so the reader knows the reply on screen is real and
+ * the risk is losing it, which is a different problem from the request
+ * having failed — and a different fix.
+ */
+function SaveErrorPanel({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry: () => void;
+}) {
+  return (
+    <Notice
+      title="Not saved"
+      detail={message}
+      hint="This reply is only in this tab until it reaches your account — keep it open."
+      onRetry={onRetry}
+    />
+  );
+}
+
 function ErrorPanel({
   message,
   onRetry,
@@ -1085,23 +1256,52 @@ function ErrorPanel({
   onRetry: () => void;
 }) {
   const { title, detail, hint } = describeError(message);
-
   return (
-    <div className="mt-4 rounded-xl border border-hairline bg-surface px-4 py-3 backdrop-blur-[20px]">
-      <p className="font-mono text-[11px] uppercase tracking-wider text-muted">
-        {title}
-      </p>
-      <p className="mt-1 font-mono text-xs leading-relaxed text-foreground">
-        {detail}
-      </p>
-      <div className="mt-2.5 flex items-center justify-between gap-3">
-        <p className="font-mono text-[10px] leading-relaxed text-muted">{hint}</p>
-        <button
-          onClick={onRetry}
-          className="shrink-0 rounded-full border border-hairline px-2.5 py-1 font-mono text-[10px] text-muted transition-colors hover:bg-background/40 hover:text-foreground"
-        >
-          retry
-        </button>
+    <Notice
+      title={title.charAt(0).toUpperCase() + title.slice(1)}
+      detail={detail}
+      hint={hint.charAt(0).toUpperCase() + hint.slice(1)}
+      onRetry={onRetry}
+    />
+  );
+}
+
+/** A failure, as a card: what happened, the raw detail, and the way out. */
+function Notice({
+  title,
+  detail,
+  hint,
+  onRetry,
+}: {
+  title: string;
+  detail: string;
+  hint: string;
+  onRetry: () => void;
+}) {
+  return (
+    <div
+      role="alert"
+      className="mt-5 overflow-hidden rounded-card bg-panel shadow-card"
+      style={{ animation: "dial-fade-up 260ms cubic-bezier(0.23,1,0.32,1) both" }}
+    >
+      <div className="flex items-start gap-3 px-4 pb-3 pt-3.5">
+        <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-foreground text-background">
+          <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+            <path d="M8 4.5v4M8 11.25v.01" />
+          </svg>
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-[13.5px] font-medium text-foreground">{title}</p>
+          <p className="mt-1 break-words font-mono text-[12px] leading-relaxed text-secondary">
+            {detail}
+          </p>
+        </div>
+      </div>
+      <div className="flex items-center justify-between gap-3 border-t border-line bg-hover px-4 py-2.5">
+        <p className="text-[12.5px] leading-relaxed text-muted">{hint}</p>
+        <Button variant="secondary" size="xs" onClick={onRetry}>
+          Retry
+        </Button>
       </div>
     </div>
   );
