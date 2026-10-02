@@ -15,7 +15,7 @@ export interface Env {
   /** One hibernating invalidation hub per account. */
   LIVE: DurableObjectNamespace<import("./live").SyncHub>;
 
-  /** Optional public R2 custom domain, e.g. https://blobs.belayet.co. */
+  /** Optional public R2 custom domain, e.g. https://blobs.belayet.app. */
   BLOB_PUBLIC_ORIGIN?: string;
 
   /** Per-account R2 ceiling in bytes. Falls back to DEFAULT_BLOB_QUOTA_BYTES. */

@@ -10,10 +10,14 @@
   "compatibility_flags": ["nodejs_compat"],
 
   // The app's real home. `custom_domain` makes Cloudflare create and manage
-  // the DNS record on the belayet.co zone, and it is what puts the API on
+  // the DNS record on the belayet.app zone, and it is what puts the API on
   // the same origin as the page — which is the whole reason there is no CORS
   // preflight and no cross-site cookie configuration in this project.
-  "routes": [{ "pattern": "chat.belayet.co", "custom_domain": true }],
+  //
+  // This list is authoritative: deploy replaces the Worker's custom domains
+  // with exactly these, and Cloudflare deletes the DNS record and certificate
+  // of any it drops. That is how chat.belayet.co was retired.
+  "routes": [{ "pattern": "chat.belayet.app", "custom_domain": true }],
 
   // One Worker, one origin: the static export is served as assets and the
   // API runs on the same hostname. Splitting them across subdomains would

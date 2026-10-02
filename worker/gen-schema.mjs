@@ -27,7 +27,7 @@ const auth = createAuth(
     GOOGLE_CLIENT_SECRET: "schema-generation-only",
     DATA_KEY: "schema-generation-only",
   },
-  "https://chat.belayet.co",
+  "https://chat.belayet.app",
 );
 
 const sqlType = (f) =>

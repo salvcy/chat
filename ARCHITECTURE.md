@@ -17,7 +17,7 @@ Two programs, one store, and a browser that keeps nothing.
 ```
    Browser (the whole app)                    Cloudflare
   ┌─────────────────────────────┐            ┌───────────────────────────┐
-  │  Next.js static export      │            │  Worker  (chat.belayet.co)│
+  │  Next.js static export      │            │  Worker (chat.belayet.app)│
   │                             │            │   /v1/auth/*   Better Auth│
   │  ┌───────────────────────┐  │  session   │   /v1/threads  the data   │
   │  │ inference (streamText)├──┼──cookie───▶│   /v1/delta    what moved │
@@ -147,6 +147,7 @@ hash.
 
 ```
 PBKDF2(password, salt = "chat.belayet.co/auth/v1:" + email, 600_000)
+        # the salt is a frozen label from the old domain — never change it
         │
         ├── HKDF("auth")  → 43 chars → sent to the server
         └── HKDF("vault") → AES-GCM CryptoKey (non-extractable) → never sent
@@ -254,8 +255,10 @@ having it yet, and the next pull helpfully restored it.
 
 ### 6.2 What a payload is
 
-A thread's `meta` seals its title, model, reasoning effort, search flag,
-system prompt and rolling totals. A message's `payload` seals the whole
+A thread's `meta` seals its title, model, reasoning effort, search flag and
+rolling totals. (The system prompt is the account's instructions, sealed in
+the settings blob; threads written before that change still carry a `system`
+field nobody reads.) A message's `payload` seals the whole
 `UIMessage` — parts, metadata, flight recorder.
 
 There is no `kind` tag any more, because the table says which is which. That

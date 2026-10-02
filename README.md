@@ -10,7 +10,7 @@ Worker with Better Auth, D1 as the authoritative chat store, R2 for encrypted
 images/attachments and oversized messages, and hibernating Durable Objects for
 revision-only realtime updates.
 
-Live: [chat.belayet.co](https://chat.belayet.co)
+Live: [chat.belayet.app](https://chat.belayet.app)
 
 ## Product principles
 

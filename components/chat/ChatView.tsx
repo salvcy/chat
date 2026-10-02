@@ -17,8 +17,7 @@ import MessageBubble from "./MessageBubble";
 import MessageNavigator from "./MessageNavigator";
 import SelectionActions from "./SelectionActions";
 import Button from "@/components/ui/Button";
-import Loader from "@/components/ui/Loader";
-import SystemPrompt from "./SystemPrompt";
+import Activity from "./Activity";
 import type { DialMessage } from "@/lib/conversations";
 import { capabilitiesFor } from "@/lib/capabilities";
 import { currentKey } from "@/lib/credentials";
@@ -149,6 +148,7 @@ export default function ChatView({
   remoteVersion,
   setActiveId,
   userName,
+  instructions,
 }: {
   conversationId: string;
   settings: ChatSettings;
@@ -170,6 +170,8 @@ export default function ChatView({
   setActiveId: (id: string) => void;
   /** For the empty state's greeting. */
   userName?: string;
+  /** The account's standing instructions — the system prompt for every turn. */
+  instructions: string;
 }) {
   const [input, setInput] = useState("");
   /** Bumped to hand the caret back to the composer (after quoting). */
@@ -196,7 +198,6 @@ export default function ChatView({
    * queueing a stale draft after the final answer.
    */
   const streamSettledRef = useRef(true);
-  const [systemOpen, setSystemOpen] = useState(false);
   const [atBottom, setAtBottom] = useState(true);
   const [imageMode, setImageMode] = useState(false);
   const [imageBusy, setImageBusy] = useState(false);
@@ -228,13 +229,20 @@ export default function ChatView({
     capabilitiesRef.current = selectedCapabilities;
   });
 
+  // Edited in settings while a thread is open, they apply from the next turn.
+  const instructionsRef = useRef(instructions);
+  useEffect(() => {
+    instructionsRef.current = instructions;
+  });
+
   /**
    * Inference runs here, in the browser, against the user's own key. The
    * transport reads settings through the ref rather than capturing them, so
    * a mid-thread model switch takes effect on the very next turn.
    */
   const transport = useMemo(
-    () => new OpenRouterChatTransport(settingsRef, capabilitiesRef),
+    () =>
+      new OpenRouterChatTransport(settingsRef, capabilitiesRef, instructionsRef),
     [],
   );
 
@@ -243,6 +251,9 @@ export default function ChatView({
       id: threadId,
       messages: initialMessages,
       transport,
+      // At most one transcript update per frame-ish. Sources arrive ten at a
+      // time and each was its own render of the whole view.
+      throttle: 33,
       onFinish: ({ message, messages: finished, isAbort }) => {
         streamSettledRef.current = true;
         const reconciled = reconcileFinishedResponse(
@@ -975,6 +986,64 @@ export default function ChatView({
     onBranch(messages.slice(0, index + 1), settingsRef.current);
   };
 
+  /*
+   * The bubbles' handlers. MessageBubble is memoized so a streamed token
+   * re-renders only the message it belongs to, and that only works if every
+   * bubble receives the same functions on every render. So they are stable
+   * and take the message's index, and the work they do is read through a ref
+   * synced after commit — the latest `messages`, never a captured one.
+   */
+  const bubbleActions = {
+    edit: (index: number, text: string) =>
+      editAndResend(
+        index,
+        text,
+        messages[index]?.parts.filter(
+          (part): part is FileUIPart => part.type === "file",
+        ) ?? [],
+      ),
+    regenerate: (index: number) => {
+      const id = messages[index]?.id;
+      if (id) regenerateAt(id);
+    },
+    branch: (index: number) => branchAt(index),
+    retryImage: (index: number, image: GeneratedImageData) => {
+      const previous = messages[index - 1];
+      const references =
+        previous?.role === "user"
+          ? previous.parts.filter(
+              (part): part is FileUIPart =>
+                part.type === "file" && isImageReference(part),
+            )
+          : [];
+      void runImage(image.prompt, {
+        replaceMessageId: messages[index]?.id,
+        references,
+      });
+    },
+  };
+  const bubbleActionsRef = useRef(bubbleActions);
+  useEffect(() => {
+    bubbleActionsRef.current = bubbleActions;
+  });
+  const onBubbleEdit = useCallback(
+    (index: number, text: string) => bubbleActionsRef.current.edit(index, text),
+    [],
+  );
+  const onBubbleRegenerate = useCallback(
+    (index: number) => bubbleActionsRef.current.regenerate(index),
+    [],
+  );
+  const onBubbleBranch = useCallback(
+    (index: number) => bubbleActionsRef.current.branch(index),
+    [],
+  );
+  const onBubbleRetryImage = useCallback(
+    (index: number, image: GeneratedImageData) =>
+      bubbleActionsRef.current.retryImage(index, image),
+    [],
+  );
+
   /** Esc stops a run — matches the composer's placeholder hint. */
   useEffect(() => {
     if (!busy) return;
@@ -1038,51 +1107,19 @@ export default function ChatView({
                 <div key={m.id} data-message-index={idx}>
                   <MessageBubble
                     message={m}
+                    index={idx}
                     streaming={
                       chatBusy &&
                       idx === messages.length - 1 &&
                       m.role === "assistant"
                     }
-                    onEdit={
-                      m.role === "user" && !busy
-                        ? (text) =>
-                            editAndResend(
-                              idx,
-                              text,
-                              m.parts.filter(
-                                (part): part is FileUIPart => part.type === "file",
-                              ),
-                            )
-                        : undefined
-                    }
+                    onEdit={m.role === "user" && !busy ? onBubbleEdit : undefined}
                     onRegenerate={
-                      m.role === "assistant" && !busy
-                        ? () => regenerateAt(m.id)
-                        : undefined
+                      m.role === "assistant" && !busy ? onBubbleRegenerate : undefined
                     }
-                    onBranch={
-                      m.role === "assistant" && !busy
-                        ? () => branchAt(idx)
-                        : undefined
-                    }
+                    onBranch={m.role === "assistant" && !busy ? onBubbleBranch : undefined}
                     onRetryImage={
-                      m.role === "assistant" && !busy
-                        ? (image) => {
-                            const previous = messages[idx - 1];
-                            const references =
-                              previous?.role === "user"
-                                ? previous.parts.filter(
-                                    (part): part is FileUIPart =>
-                                      part.type === "file" &&
-                                      isImageReference(part),
-                                  )
-                                : [];
-                            void runImage(image.prompt, {
-                              replaceMessageId: m.id,
-                              references,
-                            });
-                          }
-                        : undefined
+                      m.role === "assistant" && !busy ? onBubbleRetryImage : undefined
                     }
                   />
                 </div>
@@ -1091,10 +1128,17 @@ export default function ChatView({
               {/* Between send and the first streamed chunk there is no
                   assistant message to hang a status on, and the transcript
                   used to sit silent. The same loader the thinking header
-                  uses, so the hand-off when the message arrives is seamless. */}
+                  uses — the same component, at the same offset — so the
+                  hand-off when the message arrives is seamless. */}
               {chatBusy && messages[messages.length - 1]?.role === "user" && (
-                <div aria-live="polite">
-                  <Loader label="Thinking" />
+                <div className="pb-1">
+                  <div className="dial-activity-block mb-3">
+                    <Activity steps={[]} live since={undefined} canSearch={false} />
+                  </div>
+                  {/* Where the reply's metrics row will be, so taking over
+                      moves nothing while the transcript is pinned to the
+                      bottom. */}
+                  <div className="min-h-8" />
                 </div>
               )}
             </div>
@@ -1149,7 +1193,6 @@ export default function ChatView({
           settings={settings}
           onSettingsChange={onSettingsChange}
           models={models}
-          onOpenSystemPrompt={() => setSystemOpen(true)}
           attachments={attachments}
           attachmentError={attachmentError}
           onAttachFiles={(files) => void addAttachments(files)}
@@ -1164,14 +1207,6 @@ export default function ChatView({
       </div>
 
       <SelectionActions containerRef={transcriptRef} onQuote={quoteSelection} />
-
-      {systemOpen && (
-        <SystemPrompt
-          value={settings.system}
-          onSave={(system) => onSettingsChange({ system })}
-          onClose={() => setSystemOpen(false)}
-        />
-      )}
     </>
   );
 }

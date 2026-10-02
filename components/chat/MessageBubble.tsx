@@ -1,19 +1,18 @@
 "use client";
 
 import Image from "next/image";
-import type { FileUIPart, SourceUrlUIPart } from "ai";
+import type { FileUIPart } from "ai";
 import { motion } from "motion/react";
-import { useEffect, useRef, useState } from "react";
-import Citations from "./Citations";
+import { memo, useEffect, useRef, useState } from "react";
 import GeneratedImage from "./GeneratedImage";
 import Markdown from "./Markdown";
 import FileGlyph from "./FileGlyph";
 import MessageActions from "./MessageActions";
 import Metrics from "./Metrics";
-import ThinkingPanel from "./ThinkingPanel";
+import Activity from "./Activity";
 import type { DialMessage } from "@/lib/conversations";
 import { textOf } from "@/lib/store";
-import { dedupeSources } from "@/lib/sources";
+import { answerTextOf, buildTimeline, WORK_KEY, type Block } from "@/lib/timeline";
 import {
   hasRenderableResponse,
   inferRequestStatus,
@@ -30,11 +29,71 @@ const enter = {
   transition: { duration: 0.15, ease: "easeOut" as const },
 };
 
-function isToolPart(p: DialMessage["parts"][number]): boolean {
-  return (
-    p.type === "dynamic-tool" ||
-    (typeof p.type === "string" && p.type.startsWith("tool-"))
-  );
+/**
+ * True when (x, y) is on a visible character of `root`'s text — not on the
+ * whitespace between paragraphs, past the end of a line, or in padding.
+ */
+function pointIsOnWord(root: HTMLElement, x: number, y: number): boolean {
+  let node: Node | null = null;
+  let offset = 0;
+  const position = document.caretPositionFromPoint?.(x, y);
+  if (position) {
+    node = position.offsetNode;
+    offset = position.offset;
+  } else {
+    const range = document.caretRangeFromPoint?.(x, y);
+    if (range) {
+      node = range.startContainer;
+      offset = range.startOffset;
+    }
+  }
+  if (!node || node.nodeType !== Node.TEXT_NODE || !root.contains(node)) return false;
+  const text = node.textContent ?? "";
+  // The caret lands between characters; the click is on one of its two
+  // neighbours, if either is a visible glyph that actually contains the point.
+  for (const at of [offset - 1, offset]) {
+    if (at < 0 || at >= text.length || !/\S/.test(text[at])) continue;
+    const glyph = document.createRange();
+    glyph.setStart(node, at);
+    glyph.setEnd(node, at + 1);
+    const rect = glyph.getBoundingClientRect();
+    if (x >= rect.left - 1 && x <= rect.right + 1 && y >= rect.top && y <= rect.bottom) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Multi-click selection inside a user bubble, made exact.
+ *
+ * Left to the browser, a double-click on the blank line between two
+ * paragraphs — or past the end of a line, or in the padding — selected the
+ * newline there and painted a stray bar of highlight in empty space; and a
+ * triple-click ran the selection out of the bubble into whatever followed,
+ * which WebKit paints as bands across the gap. A double-click on a word still
+ * selects that word. Anything else, and every triple-click, selects exactly
+ * the message: its text and nothing after it.
+ */
+function selectBubbleText(
+  event: React.MouseEvent<HTMLElement>,
+  text: HTMLElement | null,
+) {
+  if (event.button !== 0 || event.detail < 2 || !text) return;
+  if ((event.target as Element).closest("button")) return;
+  if (event.detail === 2 && pointIsOnWord(text, event.clientX, event.clientY)) return;
+  event.preventDefault();
+  const range = document.createRange();
+  range.selectNodeContents(text);
+  const apply = () => {
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  };
+  apply();
+  // A press inside an existing selection defers collapsing it to the
+  // release — which would clear this one. Re-assert once that has run.
+  window.addEventListener("mouseup", () => setTimeout(apply, 0), { once: true });
 }
 
 function requestStatusText(kind: RequestStatusData["kind"]): string {
@@ -81,13 +140,21 @@ function RequestStatusLine({
 
 /**
  * One message. Assistant messages are bare markdown prose on the page — no
- * bubble, no background. User messages are the only bubbles: a right-aligned
- * glass pill. Reasoning and web search render as telemetry panels, sources
- * as footnotes, and every assistant turn carries its measured metrics. The
- * asymmetry is deliberate.
+ * bubble, no background. User messages are the only bubbles, right-aligned.
+ * An assistant turn renders as its timeline: the work — thinking, searching,
+ * and what the model said along the way — as one activity block, then the
+ * answer and its measured metrics. Sources live in the activity, not under
+ * the answer. The asymmetry is deliberate.
+ *
+ * Memoized, and every callback takes the message's index rather than closing
+ * over it, so ChatView can hand each bubble the same functions on every
+ * render. A streamed token used to re-render every message in the thread —
+ * timeline, metrics, sources — and on a long thread that was most of the
+ * main thread while an answer streamed.
  */
-export default function MessageBubble({
+const MessageBubble = memo(function MessageBubble({
   message,
+  index,
   streaming,
   onRegenerate,
   onEdit,
@@ -95,17 +162,19 @@ export default function MessageBubble({
   onRetryImage,
 }: {
   message: DialMessage;
+  index: number;
   streaming: boolean;
-  onRegenerate?: () => void;
-  onEdit?: (text: string) => void;
-  onBranch?: () => void;
-  onRetryImage?: (image: GeneratedImageData) => void;
+  onRegenerate?: (index: number) => void;
+  onEdit?: (index: number, text: string) => void;
+  onBranch?: (index: number) => void;
+  onRetryImage?: (index: number, image: GeneratedImageData) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   /** Long pasted prompts start folded, so the answer is not a scroll away. */
   const [unfolded, setUnfolded] = useState(false);
   const editRef = useRef<HTMLTextAreaElement>(null);
+  const textRef = useRef<HTMLParagraphElement>(null);
 
   useEffect(() => {
     if (!editing) return;
@@ -132,7 +201,7 @@ export default function MessageBubble({
         const next = draft.trim();
         setEditing(false);
         // Resending identical text would just burn a request.
-        if (next && next !== text) onEdit?.(next);
+        if (next && next !== text) onEdit?.(index, next);
       };
       return (
         <motion.div {...enter} className="flex justify-end">
@@ -180,7 +249,7 @@ export default function MessageBubble({
           <div className="overflow-hidden rounded-[18px] rounded-br-[6px] bg-field shadow-hairline">
             {files.length > 0 && (
               <div
-                className={`grid gap-1.5 p-1.5 ${
+                className={`grid select-none gap-1.5 p-1.5 ${
                   files.length > 1 ? "grid-cols-2" : "grid-cols-1"
                 }`}
               >
@@ -223,8 +292,12 @@ export default function MessageBubble({
                  padded paragraph's line boxes begin 16px before the first
                  character and end 16px past the last — so selecting a message
                  painted a band of empty space all around it. */
-              <div className="px-4 py-2.5">
+              <div
+                className="px-4 py-2.5"
+                onMouseDown={(event) => selectBubbleText(event, textRef.current)}
+              >
                 <p
+                  ref={textRef}
                   className={`whitespace-pre-wrap text-[15px] leading-relaxed text-foreground ${
                     folded
                       ? "max-h-[13.5em] overflow-hidden [mask-image:linear-gradient(to_bottom,#000_65%,transparent)]"
@@ -238,7 +311,7 @@ export default function MessageBubble({
                     type="button"
                     onClick={() => setUnfolded((open) => !open)}
                     aria-expanded={!folded}
-                    className="-mb-1 -ml-1.5 mt-1 flex h-6 items-center gap-1 rounded-chip px-1.5 text-[12px] font-medium text-muted transition-colors hover:bg-hover-2 hover:text-foreground"
+                    className="-mb-1 -ml-1.5 mt-1 flex h-6 select-none items-center gap-1 rounded-chip px-1.5 text-[12px] font-medium text-muted transition-colors hover:bg-hover-2 hover:text-foreground"
                   >
                     {folded ? "Show more" : "Show less"}
                     <svg viewBox="0 0 12 12" className={`h-2.5 w-2.5 transition-transform duration-200 ${folded ? "" : "rotate-180"}`} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -252,7 +325,7 @@ export default function MessageBubble({
           {/* Hung in the row gap rather than below the bubble: reserving a
               line for controls that are invisible until hover pushed every
               answer a full row further from its question. */}
-          <div className="absolute right-0 top-full z-10 mt-1 flex items-center justify-end gap-1">
+          <div className="absolute right-0 top-full z-10 mt-1 flex select-none items-center justify-end gap-1">
             <MessageActions
               text={text}
               align="right"
@@ -274,38 +347,35 @@ export default function MessageBubble({
   if (message.role !== "assistant") return null;
   // Turns saved before reasoning-channel answers were promoted at finish:
   // show the reply where a reader expects it rather than inside the trace.
-  if (!streaming) {
-    const promoted = promoteReasoningAnswer(message);
-    if (promoted) message = promoted;
-  }
+  const turn = (!streaming && promoteReasoningAnswer(message)) || message;
 
   /* ---------------------------- assistant ----------------------------- */
 
-  // Whitespace is not an answer: some models emit a bare newline mid-think.
-  const answerStarted = message.parts.some(
-    (p) => p.type === "text" && p.text.trim().length > 0,
+  const canSearch = turn.metadata?.search === true;
+  const blocks = buildTimeline(turn, { streaming, holdRemarks: canSearch });
+  // Sent, and nothing to show yet: an empty block of work under the key the
+  // real one will have, so the first step grows into it instead of
+  // replacing it — and it looks exactly like the placeholder ChatView shows
+  // before this message existed, so that hand-off is seamless too.
+  const shown: Block[] =
+    streaming && blocks.length === 0 ? [{ kind: "activity", key: WORK_KEY, steps: [] }] : blocks;
+  // Whitespace is not an answer, and neither is a remark the model made on
+  // its way back to thinking — the timeline folds both into the work.
+  const answerStarted = blocks.some((block) => block.kind === "text");
+  const regenerate = onRegenerate ? () => onRegenerate(index) : undefined;
+  const startedAt = turn.metadata?.startedAt;
+  const firstThinking = blocks.findIndex(
+    (block) =>
+      block.kind === "activity" &&
+      block.steps.some((step) => step.kind === "thought"),
   );
-  // Reasoning can resume after the answer has begun; while a reasoning part
-  // is still open, the model is thinking, whatever came before it.
-  const reasoningOpen = message.parts.some(
-    (p) => p.type === "reasoning" && p.state === "streaming",
-  );
-  const sources = dedupeSources(
-    message.parts.filter(
-      (p): p is SourceUrlUIPart => p.type === "source-url",
-    ),
-  );
-  // One trace, not one panel per reasoning part — providers emit several.
-  const reasoning = message.parts
-    .filter((p) => p.type === "reasoning")
-    .map((p) => (p.type === "reasoning" ? p.text : ""))
-    .join("\n\n");
 
-  const answerText = textOf(message);
-  const hasGeneratedImage = message.parts.some(
+  // What Copy copies: the answer, not the remarks folded into the work.
+  const answerText = answerTextOf(blocks);
+  const hasGeneratedImage = turn.parts.some(
     (part) => part.type === "data-image",
   );
-  const requestStatus = message.parts.find(
+  const requestStatus = turn.parts.find(
     (part) => part.type === "data-requestStatus",
   );
 
@@ -314,7 +384,7 @@ export default function MessageBubble({
   // mechanism existed carry no tag at all. Without a render-time check those
   // land in the transcript as a blank gap with no explanation and no way out.
   const untaggedDeadEnd =
-    !streaming && !requestStatus && !hasRenderableResponse(message);
+    !streaming && !requestStatus && !hasRenderableResponse(turn);
   // A turn that *did* produce text but never reached its finish event is
   // truncated rather than empty; say so under the partial answer.
   //
@@ -327,13 +397,13 @@ export default function MessageBubble({
     !untaggedDeadEnd &&
     !hasGeneratedImage &&
     answerStarted &&
-    streamNeverFinished(message);
+    streamNeverFinished(turn);
 
   const statusText =
     requestStatus?.type === "data-requestStatus"
       ? requestStatusText(requestStatus.data.kind)
       : untaggedDeadEnd
-        ? requestStatusText(inferRequestStatus(message))
+        ? requestStatusText(inferRequestStatus(turn))
         : truncated
           ? "Response was cut off before it finished."
           : null;
@@ -342,62 +412,69 @@ export default function MessageBubble({
   return (
     <motion.div
       {...enter}
+      // A streaming reply takes over from ChatView's placeholder in place;
+      // fading it in would blink the header that was already there.
+      initial={streaming ? false : enter.initial}
       data-selectable="assistant"
       className={`group max-w-full pb-1 ${streaming ? "dial-streaming" : ""}`}
     >
-      <ThinkingPanel
-        reasoning={reasoning}
-        sources={sources}
-        thinkingMs={message.metadata?.thinkingMs}
-        startedAt={message.metadata?.startedAt}
-        streaming={streaming}
-        answerStarted={answerStarted}
-        reasoningOpen={reasoningOpen}
-      />
-
-      {message.parts.map((part, i) => {
-        // Reasoning and sources are shown together by ThinkingPanel above.
-        if (part.type === "reasoning" || part.type === "source-url") return null;
-        if (isToolPart(part)) return null;
-        if (part.type === "data-requestStatus") return null;
-        if (part.type === "text") return <Markdown key={i} text={part.text} />;
-        if (part.type === "data-image") {
+      {shown.map((block, at) => {
+        if (block.kind === "text") return <Markdown key={block.key} text={block.text} />;
+        if (block.kind === "image") {
+          const data = block.part.data;
           return (
             <GeneratedImage
-              key={part.id ?? i}
-              data={part.data}
+              key={block.key}
+              data={data}
               onRetry={
-                part.data.status === "error" && onRetryImage
-                  ? () => onRetryImage(part.data)
+                data.status === "error" && onRetryImage
+                  ? () => onRetryImage(index, data)
                   : undefined
               }
             />
           );
         }
-        return null;
+        const last = at === shown.length - 1;
+        return (
+          <div key={block.key} className={`dial-activity-block ${at === 0 ? "mb-3" : "my-3"}`}>
+            <Activity
+              steps={block.steps}
+              // Still working while it is the newest thing in the turn, or
+              // while a thought inside it is open.
+              live={
+                streaming &&
+                (last ||
+                  block.steps.some((step) => step.kind === "thought" && step.live))
+              }
+              since={startedAt}
+              fallbackMs={at === firstThinking ? turn.metadata?.thinkingMs : undefined}
+              canSearch={canSearch}
+            />
+          </div>
+        );
       })}
 
       {statusText && (
         <RequestStatusLine
           text={statusText}
-          onRetry={!streaming ? onRegenerate : undefined}
+          onRetry={!streaming ? regenerate : undefined}
         />
       )}
 
-      <Citations sources={sources} />
-
       <div className="flex min-h-8 items-center justify-between gap-3">
         {!hasGeneratedImage && !isDeadEnd && (
-          <Metrics meta={message.metadata} streaming={streaming} />
+          <Metrics meta={turn.metadata} streaming={streaming} />
         )}
         {!streaming && answerStarted && (
           <MessageActions
             text={answerText}
-            onRegenerate={onRegenerate}
-            onBranch={onBranch}
+            onRegenerate={regenerate}
+            onBranch={onBranch ? () => onBranch(index) : undefined}
           />
         )}
       </div>
     </motion.div>
   );
-}
+});
+
+export default MessageBubble;

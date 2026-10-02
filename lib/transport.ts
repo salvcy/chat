@@ -14,7 +14,8 @@ import type { OpenRouterProviderOptions } from "@openrouter/ai-sdk-provider";
 import { currentKey } from "./credentials";
 import { MissingKeyError, providerFor } from "./openrouter-client";
 import { messagesForTextModel } from "./messages";
-import { reviveLateReasoning } from "./reasoning-stream";
+import { orderStream } from "./reasoning-stream";
+import { smoothStream } from "./smooth-stream";
 import type {
   ChatSettings,
   DialDataParts,
@@ -41,8 +42,8 @@ type DialMessage = UIMessage<DialMetadata, DialDataParts>;
  *    the knobs to what the selected model advertises.
  *  - Payload size caps. They existed to protect our function's memory. The
  *    browser now spends its own memory talking to OpenRouter directly.
- *  - The server-held system prompt. It is the user's own prompt on their own
- *    key; there is nothing here to hide from them.
+ *  - The server-held system prompt. It is the user's own instructions on
+ *    their own key; there is nothing here to hide from them.
  *
  * What is carried over exactly: the flight recorder. Every number the UI
  * renders in mono is still measured rather than estimated, and
@@ -99,6 +100,12 @@ export class OpenRouterChatTransport implements ChatTransport<DialMessage> {
      * reads them; everything else the transport sends is a per-thread knob.
      */
     private readonly capabilities: { readonly current: ModelCapabilities },
+    /**
+     * The account's instructions, sent as the system prompt. By ref because
+     * they can be edited in settings while a conversation is open, and the
+     * next turn should carry the edit.
+     */
+    private readonly instructions: { readonly current: string },
   ) {}
 
   async sendMessages({
@@ -111,8 +118,8 @@ export class OpenRouterChatTransport implements ChatTransport<DialMessage> {
     const key = currentKey();
     if (!key) throw new MissingKeyError();
 
-    const { model, reasoning, search, system, temperature } =
-      this.settings.current;
+    const { model, reasoning, search, temperature } = this.settings.current;
+    const system = this.instructions.current.trim();
 
     const modelMessages = await convertToModelMessages(
       messagesForTextModel(messages),
@@ -165,13 +172,23 @@ export class OpenRouterChatTransport implements ChatTransport<DialMessage> {
     let reasoningFirstAt: number | null = null;
     let reasoningLastAt: number | null = null;
     let textFirstAt: number | null = null;
+    /**
+     * Per reasoning part: when the event before it arrived, its first and
+     * last token, and how many deltas it took. See the reasoning-end case.
+     */
+    const spans = new Map<
+      string,
+      { prev: number; first: number | null; last: number | null; deltas: number; index: number }
+    >();
+    /** The last thing that actually arrived — a token, a source. */
+    let lastEventAt = startedAt;
 
     const result = streamText({
       // `usage.include` turns on OpenRouter usage accounting, which is what
       // makes the real per-message cost available instead of an estimate.
       model: openrouter(model, { usage: { include: true }, ...pdfPlugin }),
       messages: modelMessages,
-      ...(system?.trim() ? { system: system.trim() } : {}),
+      ...(system ? { system } : {}),
       ...(temperature !== undefined ? { temperature } : {}),
       // web_search is provider-executed: the model decides when to call it and
       // results come back as `source-url` parts, not tool output we handle.
@@ -180,8 +197,8 @@ export class OpenRouterChatTransport implements ChatTransport<DialMessage> {
         : {}),
       providerOptions: { openrouter: openrouterOpts },
       abortSignal,
-      // Needed by reviveLateReasoning; raw parts are consumed there and never
-      // reach the UI stream.
+      // Needed by orderStream; raw parts are consumed there and never reach
+      // the UI stream.
       includeRawChunks: true,
     });
 
@@ -202,8 +219,59 @@ export class OpenRouterChatTransport implements ChatTransport<DialMessage> {
         case "start":
           return { model, startedAt, effort: reasoning, search };
 
+        // Each thought's own span, so the timeline can time every step. Only
+        // at the edges: metadata on every delta would double the renders.
+        case "reasoning-start": {
+          spans.set(part.id, {
+            prev: lastEventAt,
+            first: null,
+            last: null,
+            deltas: 0,
+            index: spans.size,
+          });
+          return { timings: { [part.id]: [lastEventAt - startedAt] } };
+        }
+
+        /*
+         * When a thought ran, from what was observed.
+         *
+         * It ends at its last token, not when its part closes — a thought
+         * interrupted by a search is only closed when thinking resumes, and
+         * waiting on results is not thinking. Where it *starts* depends on how
+         * it arrived. With web search on, OpenRouter runs the tool loop itself
+         * and sends each round's reasoning as one block once the round is
+         * done, so first-to-last token measured nothing ("Thought for 1ms");
+         * the thinking happened in the silence after the previous event. Only
+         * the turn's first thought, when it genuinely streamed, starts at its
+         * first token — the wait before that is the provider's queue.
+         */
+        case "reasoning-end": {
+          const span = spans.get(part.id);
+          if (span === undefined) return undefined;
+          const last = span.last ?? Date.now();
+          const streamed =
+            span.first !== null && span.deltas > 1 && last - span.first > 300;
+          const start = span.index === 0 && streamed ? span.first! : span.prev;
+          return {
+            timings: {
+              [part.id]: [start - startedAt, Math.max(start, last) - startedAt],
+            },
+          };
+        }
+
+        case "source":
+          lastEventAt = Date.now();
+          return undefined;
+
         case "reasoning-delta": {
           const now = Date.now();
+          lastEventAt = now;
+          const span = spans.get(part.id);
+          if (span) {
+            span.first ??= now;
+            span.last = now;
+            span.deltas += 1;
+          }
           if (reasoningFirstAt === null) reasoningFirstAt = now;
           reasoningLastAt = now;
           if (firstDeltaAt !== null) return undefined;
@@ -214,6 +282,7 @@ export class OpenRouterChatTransport implements ChatTransport<DialMessage> {
 
         case "text-delta": {
           const now = Date.now();
+          lastEventAt = now;
           const meta: DialMetadata = {};
           // Whitespace is not the answer starting: a model can emit a bare
           // newline mid-thought and go on reasoning for a long time.
@@ -287,13 +356,17 @@ export class OpenRouterChatTransport implements ChatTransport<DialMessage> {
       }
     };
 
-    return toUIMessageStream<ToolSet, DialMessage>({
-      stream: result.fullStream.pipeThrough(reviveLateReasoning()),
+    const ui = toUIMessageStream<ToolSet, DialMessage>({
+      // Ordered *before* metadata sees it, so timings key on the ids the
+      // transcript ends up with.
+      stream: result.fullStream.pipeThrough(orderStream()),
       sendSources: true,
       sendReasoning: true,
       messageMetadata,
       onError: describeStreamError,
     }) as ReadableStream<UIMessageChunk>;
+    // Measured above, revealed evenly below: see smoothStream.
+    return smoothStream(ui);
   }
 
   /**

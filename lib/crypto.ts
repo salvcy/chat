@@ -46,6 +46,10 @@ const GROUP = 8;
  * Domain separation. Changing this invalidates every existing token, so it
  * carries a version — a future migration mints v2 keys without silently
  * producing different ones for the same token.
+ *
+ * It is a label, not the app's address. The app moved to chat.belayet.app
+ * and this string did not, and must not: every existing key was derived
+ * with it.
  */
 const SALT = "chat.belayet.co/vault/v1";
 

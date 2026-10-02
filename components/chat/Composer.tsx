@@ -4,27 +4,23 @@ import Image from "next/image";
 import FileGlyph from "./FileGlyph";
 import type { FileUIPart } from "ai";
 import { useEffect, useRef, useState } from "react";
-import Dropdown from "@/components/ui/Dropdown";
+import EffortControl from "./EffortControl";
 import {
   capabilitiesFor,
   effortOptions,
-  modelFor,
   shortModelId,
-  unavailableReason,
 } from "@/lib/capabilities";
-import type {
-  ChatSettings,
-  OpenRouterModel,
-  ReasoningEffort,
-} from "@/lib/types";
+import type { ChatSettings, OpenRouterModel } from "@/lib/types";
 
 /**
  * The bottom instrument.
  *
  * The selected model already lives in the context bar, so repeating it here
- * only made the composer noisy. This surface owns the things that affect the
- * next turn: files, explicit tools, thinking effort, web access, and
- * conversation guidance.
+ * only made the composer noisy. What is left is what a person actually
+ * changes between turns: files, the image tool, and how hard the model
+ * thinks. Web search is not a switch — every model that can search does, when
+ * it needs to — and standing instructions live in settings, because they
+ * belong to the person rather than to one conversation.
  */
 export default function Composer({
   input,
@@ -40,7 +36,6 @@ export default function Composer({
   settings,
   onSettingsChange,
   models,
-  onOpenSystemPrompt,
   attachments,
   attachmentError,
   onAttachFiles,
@@ -62,7 +57,6 @@ export default function Composer({
   settings: ChatSettings;
   onSettingsChange: (patch: Partial<ChatSettings>) => void;
   models: OpenRouterModel[];
-  onOpenSystemPrompt: () => void;
   attachments: FileUIPart[];
   attachmentError: string | null;
   onAttachFiles: (files: FileList) => void;
@@ -104,10 +98,7 @@ export default function Composer({
   }, [focusToken]);
 
   const caps = capabilitiesFor(settings.model, models);
-  const entry = modelFor(settings.model, models);
   const efforts = effortOptions(caps);
-  const searchReason = unavailableReason("search", caps);
-  const hasSystem = settings.system.trim().length > 0;
   // Always available now: a PDF can go to any model, because OpenRouter
   // converts it for the ones that cannot read files. Whether *images* are
   // accepted is enforced per file at intake, not by hiding the control.
@@ -330,66 +321,13 @@ export default function Composer({
                 </svg>
               </button>
             ) : caps.reasoning && efforts.length > 0 ? (
-              <Dropdown
-                label="Think"
-                icon={
-                  <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="currentColor" aria-hidden>
-                    <path d="M8 1.5 9.4 6.6 14.5 8 9.4 9.4 8 14.5 6.6 9.4 1.5 8 6.6 6.6Z" />
-                  </svg>
-                }
+              <EffortControl
                 value={settings.reasoning}
-                onChange={(v) => onSettingsChange({ reasoning: v as ReasoningEffort })}
-                options={efforts.map((effort) => ({
-                  value: effort,
-                  label: effort,
-                  hint: effort === caps.defaultEffort && effort !== "off" ? "default" : undefined,
-                }))}
+                options={efforts}
+                defaultEffort={caps.defaultEffort}
+                onChange={(reasoning) => onSettingsChange({ reasoning })}
               />
             ) : null}
-
-            {!imageMode && (
-              <button
-                type="button"
-                disabled={searchReason !== null || busy}
-                aria-pressed={settings.search}
-                aria-label="Web search"
-                onClick={() => onSettingsChange({ search: !settings.search })}
-                title={
-                  searchReason ??
-                  (entry?.webSearchPrice
-                    ? `Web search · $${Number(entry.webSearchPrice).toFixed(3)}/call`
-                    : "Web search")
-                }
-                className={pill(settings.search)}
-              >
-                <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                  <circle cx="8" cy="8" r="5.25" />
-                  <path d="M2.9 8h10.2M8 2.75c1.4 1.45 2.1 3.2 2.1 5.25S9.4 11.8 8 13.25C6.6 11.8 5.9 10.05 5.9 8S6.6 4.2 8 2.75Z" />
-                </svg>
-                <span className="max-sm:hidden">Search</span>
-              </button>
-            )}
-
-            {!imageMode && (
-              <button
-                type="button"
-                aria-pressed={hasSystem}
-                aria-label="Conversation prompt"
-                onClick={onOpenSystemPrompt}
-                title={
-                  hasSystem
-                    ? `Conversation prompt set · ${settings.system.trim().length} characters`
-                    : "Set a conversation prompt"
-                }
-                className={pill(hasSystem)}
-              >
-                <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                  <path d="M3.25 3.25h9.5v7.5h-5.5L4 13v-2.25h-.75Z" />
-                  <path d="M5.5 5.75h5M5.5 8h3.25" />
-                </svg>
-                <span className="max-sm:hidden">Prompt</span>
-              </button>
-            )}
           </div>
 
           <button

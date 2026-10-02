@@ -72,13 +72,18 @@ export function formatThroughput(tps: number | undefined): string {
   return `${tps >= 100 ? Math.round(tps) : tps.toFixed(1)} tok/s`;
 }
 
+/**
+ * Built once. `toLocaleTimeString` constructs a fresh `Intl.DateTimeFormat`
+ * on every call, and every message's stamp called it on every streamed token:
+ * the single largest cost in a profile of a long thread streaming.
+ */
+let clock: Intl.DateTimeFormat | null = null;
+
 /** Clock time for a message stamp. */
 export function formatTime(ms: number | undefined): string {
   if (!ms) return "";
-  return new Date(ms).toLocaleTimeString([], {
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  clock ??= new Intl.DateTimeFormat([], { hour: "numeric", minute: "2-digit" });
+  return clock.format(ms);
 }
 
 /**

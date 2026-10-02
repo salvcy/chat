@@ -30,6 +30,8 @@
  */
 
 const API = "/v1/auth";
+// A frozen label, not the app's address — the app moved to chat.belayet.app
+// and this did not. Every account's credential and vault key derive from it.
 const APP_SALT = "chat.belayet.co/auth/v1";
 const ITERATIONS = 600_000;
 

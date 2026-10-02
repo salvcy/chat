@@ -127,7 +127,10 @@ export function reconcileSettings(
     ...settings,
     model,
     reasoning,
-    search: caps.tools ? settings.search : false,
+    // Not a choice any more: every model that can call the tool gets it, and
+    // the model decides whether a turn needs the web. A switch that had to be
+    // remembered before asking about today's news was a switch people forgot.
+    search: caps.tools,
   };
 }
 

@@ -177,11 +177,18 @@ export type DialMetadata = {
   /** ms from request start to the first text or reasoning delta. */
   ttftMs?: number;
   /**
-   * ms spent thinking — first reasoning token to first answer token. Measured
-   * at the boundary rather than inferred from the total, so a slow provider
-   * queue doesn't get counted as thinking.
+   * ms spent thinking — first reasoning token to last. Measured at the
+   * boundary rather than inferred from the total, so a slow provider queue
+   * doesn't get counted as thinking.
    */
   thinkingMs?: number;
+  /**
+   * When each reasoning part ran, keyed by the part's id: `[start, end]` in
+   * ms from `startedAt` (`end` is missing while it is still running). This is
+   * what lets the activity timeline say how long each step took rather than
+   * one total for the turn.
+   */
+  timings?: Record<string, number[]>;
   /** ms from request start to the finish event. */
   durationMs?: number;
   /** Completion tokens ÷ generation seconds. */
@@ -204,7 +211,7 @@ export type DialMetadata = {
   answerInReasoning?: boolean;
   /** Reasoning effort the request was sent with, for provenance. */
   effort?: ReasoningEffort;
-  /** Whether web search was armed for this turn. */
+  /** Whether web search was offered to the model for this turn. */
   search?: boolean;
 };
 
@@ -212,13 +219,20 @@ export type DialMetadata = {
 /* Chat request                                                        */
 /* ------------------------------------------------------------------ */
 
-/** Per-conversation knobs, sent with every turn and persisted per thread. */
+/**
+ * Per-conversation knobs, sent with every turn and persisted per thread.
+ *
+ * The system prompt is not one of them any more: it is the account's
+ * instructions (`UserSettings.instructions`), the same in every conversation.
+ */
 export type ChatSettings = {
   model: string;
   reasoning: ReasoningEffort;
+  /**
+   * Derived, never chosen: on whenever the model can call the web-search
+   * tool (`reconcileSettings`). The model decides when a turn needs it.
+   */
   search: boolean;
-  /** Per-conversation system prompt. Empty string = none. */
-  system: string;
   /** 0–2. Undefined leaves the provider default alone. */
   temperature?: number;
 };
@@ -227,5 +241,4 @@ export const DEFAULT_SETTINGS: ChatSettings = {
   model: DEFAULT_MODEL,
   reasoning: "off",
   search: false,
-  system: "",
 };

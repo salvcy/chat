@@ -407,10 +407,11 @@ button:disabled {
   }
 }
 
-/* Only the last markdown block of the message: a turn can carry several
-   text parts, and each would otherwise grow its own mark. */
-.dial-streaming .dial-md:not(:has(~ .dial-md)) > :is(p, h1, h2, h3, h4, blockquote):last-child::after,
-.dial-streaming .dial-md:not(:has(~ .dial-md)) > :is(ul, ol):last-child > li:last-child::after {
+/* Only the last markdown block of the message, and only while it is the live
+   edge: a turn can carry several text blocks, and once the model goes back to
+   thinking below one, the activity block is where the work is happening. */
+.dial-streaming .dial-md:not(:has(~ .dial-md, ~ .dial-activity-block)) > :is(p, h1, h2, h3, h4, blockquote):last-child::after,
+.dial-streaming .dial-md:not(:has(~ .dial-md, ~ .dial-activity-block)) > :is(ul, ol):last-child > li:last-child::after {
   content: "";
   display: inline-block;
   width: 0.42em;
@@ -522,6 +523,31 @@ button:disabled {
   to {
     opacity: 1;
   }
+}
+
+/* The newest words of a live trace or remark (StreamText). */
+.dial-fresh {
+  animation: dial-fade-in 520ms ease-out both;
+}
+
+/* The answer's first words fade in as the work folds away above them. Runs
+   once, when the answer mounts; finished messages never carry the class. */
+.dial-streaming > .dial-md {
+  animation: dial-fade-in 360ms ease-out both;
+}
+
+/* The live activity window fades its top edge once content passes under it.
+   Registered so the fade can ease in with the window instead of switching
+   on — at 0px the gradient is opaque everywhere. */
+@property --dial-fade {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+.dial-reveal {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 var(--dial-fade));
+  mask-image: linear-gradient(to bottom, transparent 0, #000 var(--dial-fade));
 }
 
 /* Horizontal scrollbars (code blocks, tables, the composer control row). */

@@ -100,9 +100,14 @@ signup work plus two D1 writes, not construction.
 The only server, and it holds the only copy. `worker/src/index.ts` is five
 data endpoints over D1 — list threads, read one thread, write a turn, delete a
 thread, and ask what changed — plus state, blobs, live and account deletion.
-Deployed as one Worker on **chat.belayet.co** that also serves the static
+Deployed as one Worker on **chat.belayet.app** that also serves the static
 export, so the app and its API share an origin: no CORS preflight, no
-cross-site cookie configuration.
+cross-site cookie configuration. It lived on chat.belayet.co until October
+2026; that custom domain was detached (its DNS record and certificate went
+with it) and nothing redirects from it. Two strings still say
+`chat.belayet.co` — the salts in `lib/crypto.ts` and `lib/auth-client.ts` —
+and they are labels, not addresses: every existing credential and vault key
+was derived with them, so they never change with the domain.
 
 - **`thread` and `message` are typed, and the structure is in the clear.**
   `thread_id`, `seq`, `pinned`, `updated_at` and `deleted` are plain columns
@@ -204,9 +209,10 @@ cross-site cookie configuration.
 - `lib/session.ts` — `useAccount()`. Session, settings, sync and the locked
   state, in that order of dependency.
 - `lib/settings.ts` — one opaque blob (theme, typeface, text size, column
-  width, density, device-key retention, OpenRouter key), encrypted whenever
-  the account has a key. The model key is billable, so this blob is never
-  stored in the clear.
+  width, density, device-key retention, OpenRouter key, **instructions**),
+  encrypted whenever the account has a key. The model key is billable, so
+  this blob is never stored in the clear. `instructions` is the system
+  prompt for every conversation; it replaced the per-conversation prompt.
 - `components/settings/` — `AuthPanel` (sign in / create / Google),
   `SettingsPanel` (account · keys · appearance), `UnlockBar`.
 - `components/sidebar/AccountButton.tsx` — the rail footer. `shrink-0`
@@ -340,27 +346,75 @@ invoking a Worker.
   jump-to-bottom, retry with a class-specific hint, and a **mid-stream
   snapshot every 1.2s** so closing the tab on a long answer no longer
   throws it away.
-- `components/chat/Composer.tsx` — capability-driven. The reasoning menu
-  offers exactly the model's advertised efforts; search greys out *with a
-  reason* on models that cannot call the web-search tool. Send inverts to a
-  stop square while busy.
+- `components/chat/Composer.tsx` — attach, the `@image` tool, and the
+  effort control; nothing else. **Web search is not a control**:
+  `reconcileSettings` sets `search` to whether the model can call tools, the
+  tool is attached to every such turn, and the model decides when to search
+  (before the catalog loads it is off, because offering tools to a model
+  that cannot take them fails the request). **The system prompt is not here
+  either** — it is the account's instructions, edited in Settings →
+  Instructions and passed to the transport by ref. Send inverts to a stop
+  square while busy.
+- `components/chat/EffortControl.tsx` — the sparkle plus one word ("Medium",
+  or a muted "Think" when off), opening a sliding segmented control of
+  exactly the model's efforts with a one-line description of the selected
+  level. Arrow keys move along it; Escape closes it without stopping a
+  stream. It replaced a "Think · medium ⌄" dropdown.
 - `components/chat/Metrics.tsx` — the per-message flight recorder. Collapsed
   = tok/s · duration · cost; expanded = provider, ttft, token split.
-- `components/chat/ThinkingPanel.tsx` — **one** pre-answer telemetry row, not
-  two. Reasoning and web search share a header: the pixel-grid loader,
-  "Thinking" and a live timer while it runs; "Thought for 11.4s · 3 sources"
-  once settled. Expanding hangs the mono trace and a numbered source list
-  (title, domain) off a hairline rule; Citations still provides the
-  answer's source chips below the response. `thinkingMs` is measured server-side at the first-reasoning →
-  first-text boundary, so a slow provider queue isn't counted as thinking.
-  Auto-collapses when the answer starts unless the reader opened it.
+- `lib/timeline.ts` — `buildTimeline(message, { streaming, holdRemarks })`
+  folds a turn into **one activity block, then the answer**. The work —
+  thoughts, searches, and *remarks* (text the model said before going back to
+  thinking or searching: "I'll look up both versions.") — are steps in stream
+  order; the answer is the text after the last of it. While streaming, text
+  with anything after it is a remark; once finished, the last run of text is
+  the answer even if citations trail it. **While streaming with search on,
+  short text right after the work is held** — shown nowhere until it passes
+  `REMARK_MAX` (120 chars) or a second line, or more work lands behind it —
+  because only then is it known to be the answer rather than a remark; without
+  the hold every remark flashed as the answer and jumped into the activity a
+  second later. Sources *with a position in the text*
+  (`providerMetadata.openrouter.endIndex > 0`) are inline citations and never
+  split the answer; search-round results arrive with `0/0`. Adjacent thoughts
+  merge; whitespace-only text is dropped; `late-reasoning-*` parts from the
+  first revival build are put back in order. The first activity block is
+  always keyed `WORK_KEY`, from the empty placeholder on, so it never
+  remounts. `answerTextOf` is what Copy copies. Pure and tested in
+  `tests/timeline.test.ts`.
+- `components/chat/Activity.tsx` — the activity block. **Live:** the header
+  names what is happening now and rolls (`Swap`) when it changes — the
+  thought's own section title when the model writes them (OpenAI and Gemini
+  summaries: `**Checking the limits**`), "Searching the web" once a thought
+  has *stopped* on a decision to search (judged after 700ms of quiet, never
+  sentence by sentence — that flip-flopped), "Reading 5 sources" after
+  results, else "Thinking" — with a live timer from the turn's start. Under it
+  a seven-line window (`Reveal` in `follow` mode) shows the steps as they
+  happen: traces type in with their newest words fading in (`StreamText`),
+  results drop in one by one, older lines glide up under a fade. **Settled:**
+  the window folds up into the header, "Thought for 4.3s · 3 sources".
+  **Opened:** the same list at full height on a hairline rail — traces mono,
+  titles and remarks sans, each search's results numbered within it, thoughts
+  titled with their own duration (`DialMetadata.timings`, keyed by part id;
+  turns without timings fall back to `thinkingMs`). The live list only ever
+  grows at its end, so nothing above the newest line moves. The pre-reply
+  placeholder (ChatView) is this component with no steps, at the same offset
+  and with the reply's metrics row reserved, so the hand-off moves nothing.
+  **There are no source chips under answers** — sources live here.
+- `components/ui/Reveal.tsx` — a window onto bottom-growing content:
+  `follow` (capped, anchored to the newest line), `full`, `none` (children
+  unmount after the close). Growth is FLIP-glided — offset back by what it
+  grew, animated to rest — with the frame's height on the same clock, so
+  while the frame grows the two cancel and once it is full the text scrolls.
+  Geometry is DOM writes, applied after every commit and on resize.
+- `components/chat/StreamText.tsx` — append-only text rendered by its
+  effect, not by React: each new piece is a `.dial-fresh` span that fades in
+  and is folded back into a text node when its fade ends.
 - `components/chat/MessageActions.tsx` — copy / edit / regenerate / branch,
   revealed on hover.
 - `components/chat/MessageNavigator.tsx` — a container-aware transcript
   minimap beside the scrollbar. Compact markers use a springy proximity
   response (hovered, then neighboring bars), with no persistent single-marker
   highlight; hover/focus previews text, and click smooth-scrolls.
-- `components/chat/SystemPrompt.tsx` — per-conversation prompt + presets.
 - `components/tuner/Palette.tsx` — **the one floating surface.** ⌘K opens it
   straight into model mode (the signature interaction must not cost an extra
   keystroke); typing `>` switches the same surface to commands. Arrow-key
@@ -377,15 +431,13 @@ invoking a Worker.
   delete asks twice.
 - `components/sidebar/RailHandle.tsx` / `RailToggle.tsx` — drag-to-resize
   (180–460px, double-click resets) and collapse (⌘B).
-- `components/chat/Citations.tsx` — one wrapping row of small chips (number
-  + domain) linking out, title on hover. It was a full-width footnote block,
-  then bare `[1] [2]` links that said nothing until hovered.
 - `components/chat/SelectionActions.tsx` — select text inside one answer and
   a small bar offers Quote (into the composer as `> …`, ahead of any draft)
   and Copy. Waits for pointer-up, stays off touch screens, and ignores
   selections spanning messages.
-- `components/ui/Dropdown.tsx` — carries a `disabledReason`. Open state is
-  derived (`open && !disabled`) so a model switch can't strand it.
+- `components/ui/Segmented.tsx` — equal segments with a lifted thumb that
+  slides to the selection; a real radio group (arrow keys move selection and
+  focus). Used by settings and the effort control.
 - `components/ui/Button.tsx` — pill buttons (`primary` inverted, `secondary`
   lifted, `ghost`, `quiet`) at three explicit heights. `buttonClass()` for
   anything that is not a `<button>`.
@@ -613,19 +665,75 @@ invoking a Worker.
   text instead of reasoning many models strip). The flight recorder marks it
   (`answerInReasoning`). While any model thinks, the newest two lines of the
   trace show under the header, so a long think never reads as a hang.
-- **The provider drops reasoning once content opens — even a lone newline.**
-  `@openrouter/ai-sdk-provider` stops emitting reasoning at the first truthy
-  `delta.content`, and some models send `"\n\n"` mid-thought. The header
-  flipped to "Thought for 0.7s", the trace froze, and the model went on
-  thinking invisibly. `lib/reasoning-stream.ts` runs over `fullStream` with
-  `includeRawChunks`: raw chunks arrive *ahead of* the parts derived from
-  them, so reasoning the provider is about to discard is re-emitted as its own
-  part — only after the provider has opened a text part, or it would double.
-  The UI side of the same rule: whitespace is never "the answer started", and
-  the thinking header stays live while any reasoning part is `streaming`.
-  "Thought for" spans first reasoning token to last. Tested in
-  `tests/reasoning-stream.test.ts`; if the provider is upgraded, re-check
-  whether it still drops late reasoning before deleting this.
+- **OpenRouter's search loop sends thinking in blocks, after silence.** With
+  the `openrouter:web_search` server tool the model's rounds run inside
+  OpenRouter: each round's reasoning arrives whole once the round ends (800 to
+  6,400 characters), the results a second or two later, then nothing for
+  2–26s (measured on DeepSeek V4.1 Flash and Kimi K2.6), and the answer's
+  chunks can land within 150ms. Two consequences. Timing a thought
+  first-token-to-last-token read "Thought for 1ms", so a thought starts at the
+  *previous event* (results, text) unless it is the turn's first and genuinely
+  streamed — see the transport's `reasoning-end` case. And rendering blocks as
+  they came read as freeze-then-jump, which is what `lib/smooth-stream.ts` is
+  for: each burst is spread over the silence before it (an average of recent
+  gaps; 150ms–1s for text, up to 4s for thinking, which nobody is waiting to
+  read). Results queued behind a thought wait for it to finish typing; an
+  answer queued behind thinking (past `REMARK_MAX`, or a second line — a
+  shorter line may be a held remark) catches it up within 600ms; the end of
+  the stream within 200ms; abort and error flush at once. A new arrival
+  extends the reveal but never cuts one short, and each tick's text goes out
+  as one merged delta. **Silence is measured between chunks that carry
+  something** — `reasoning-start` arrives a millisecond before its block, and
+  counting it made every block look like it followed no pause. It runs
+  *after* the flight recorder, so measurements are taken on arrival. Tested in
+  `tests/smooth-stream.test.ts`.
+- **A restarted Web Animation holds its first frame.** `element.animate()`
+  is play-pending until the compositor starts it, and holds its first
+  keyframe meanwhile. `Reveal` restarts its glide on every streamed line —
+  every other frame in a fast stream — so the content froze half the time: a
+  30Hz judder, found by sampling positions frame by frame (55 of 149 frames
+  frozen in Kimi's largest block). Setting `startTime` to
+  `document.timeline.currentTime` skips the pending state and starts the
+  animation one frame along; `currentTime` alone did not. Glides also use a
+  curve that starts linear (`cubic-bezier(0.3, 0.3, 0.4, 1)`): a strong
+  ease-out restarted per line is fast-slow-fast, a stutter of its own.
+- **A streamed token must re-render one message, not the thread.** Every
+  chunk re-rendered every MessageBubble — timeline, metrics, sources — and
+  `toLocaleTimeString` built a new `Intl.DateTimeFormat` for each timestamp on
+  each render. On a 30-message thread with a 4× throttled CPU that froze the
+  page for up to 1.85s at a time (main thread busy 7.5s of 9). Now
+  MessageBubble is `memo`'d with index-taking callbacks ChatView keeps stable
+  through a ref, `useChat` is `throttle: 33`, and `formatTime` caches its
+  formatter: 0.9s of script, no frame over 17ms. Measure with CPU throttling
+  in a production build — an unthrottled fast Mac drops no frames either way
+  and hides all of this.
+- **A part sits where it *started*.** useChat appends a part on its start
+  chunk and grows it in place, so a part opened early keeps every later token
+  at its early position — and whatever arrived in between reads as if it came
+  after. `orderStream` in `lib/reasoning-stream.ts` runs over `fullStream`
+  (with `includeRawChunks`) and makes array order equal time order. Four
+  provider behaviours needed it, all tested in
+  `tests/reasoning-stream.test.ts`:
+  - *It drops reasoning once content opens — even a lone newline.*
+    `@openrouter/ai-sdk-provider` stops emitting reasoning at the first truthy
+    `delta.content`, and some models send `"\n\n"` mid-thought: the header
+    flipped to "Thought for 0.7s" while the model went on thinking unseen.
+    Raw chunks arrive *ahead of* the parts derived from them, so the
+    reasoning it is about to discard is re-emitted (`reasoning-resumed-*`)
+    — only after the provider has opened text, or it would double.
+  - *Whitespace opens a text part.* It is buffered until real text arrives
+    and dropped if none does, so a newline never becomes an empty answer
+    above the thinking it interrupted.
+  - *Text resumes under its old id.* Reasoning after real text closes the
+    open text part; the next text gets a new id and lands below the thought.
+  - *A thought spans a search.* The provider keeps one reasoning part open
+    from first thinking token to first answer token, so thinking resumed
+    after the results grew the thought above them. A source mid-thought marks
+    it interrupted; more reasoning then splits it. If none follows nothing is
+    split, so the provider's closing metadata (reasoning signatures, sent back
+    on later turns) stays on the part it belongs to.
+  Sources never split text — annotations ride with content chunks. If the
+  provider is upgraded, re-check each of these before deleting any.
 - **Nested GlideMenus must ignore each other's rows.** A row menu inside the
   rail is a GlideMenu inside a GlideMenu, and pointer events bubble — the
   rail's highlight slid behind the popover to the hovered item's height. A
@@ -651,6 +759,18 @@ invoking a Worker.
 - **An effect that reads `messages` is torn down on every token.** The
   mid-stream snapshot timer must depend only on `busy` and read the latest
   messages from a ref, or its cleanup cancels the pending save forever.
+- **A double-click on nothing selects a newline.** In a user bubble
+  (`whitespace-pre-wrap`), double-clicking the blank line between paragraphs,
+  past the end of a line or in the padding selected the newline there and
+  painted a stray bar in empty space; a triple-click ran the range out of the
+  bubble into the next message, which WebKit paints as bands across the gap.
+  `selectBubbleText` in MessageBubble keeps the browser's word selection for
+  a double-click *on a glyph* (hit-tested with `caretPositionFromPoint` and
+  the glyph's own rect) and otherwise selects exactly the message's text. It
+  re-applies after mouseup, because a press inside an existing selection
+  defers that selection's collapse to the release. Verified by
+  `getSelection().toString()`, not by eye — the spill was invisible in
+  Chromium and still four newlines long.
 - **Padding belongs on the wrapper, not on the element holding the text.** A
   selection highlights whole line boxes, so a padded `<p>` highlights 16px of
   empty space before the first character and after the last — a message
@@ -751,15 +871,24 @@ invoking a Worker.
   **14 interface pass ✓** (Beautiful UI's structure in a monochrome palette:
   solid hairlines and layered shadows, flush rail and lifted chat window,
   gliding highlights, pixel-grid loaders, full-page front door, greeting
-  empty state with a docked composer, source chips, selection quoting). Next product work: sub-agent
-  delegation and per-thread temperature (the wire already carries it).
+  empty state with a docked composer, source chips, selection quoting). ·
+  **15 timeline ✓** (reasoning and search as one chronological activity
+  timeline with per-step timings, automatic web search, account-wide
+  instructions in settings, the effort control, exact bubble selection,
+  moved to chat.belayet.app) · **16 work, then answer ✓** (remarks fold into
+  the activity, per-step timings from observed events, `smoothStream`,
+  memoized bubbles and a throttled transcript, no source chips) · **17 flow ✓**
+  (the live activity window, rolling labels from the model's own titles,
+  remarks held until they are known, judder-free glides, a seamless
+  placeholder hand-off). Next product work: sub-agent delegation and
+  per-thread temperature (the wire already carries it).
 ## Design system (the law)
 
 **Strictly black, white, neutral gray interface chrome — both themes, no
 accent color.** Every token has zero chroma. State is shown by **fill**:
-a binary switch that is on (web search, a conversation prompt, the send
-button) is an **inversion** — a filled, contrast-swapped block; a selection
-among peers (the open thread, a segmented option, the effort menu) is a
+a binary switch that is on (the `@image` tool, the send button) is an
+**inversion** — a filled, contrast-swapped block; a selection among peers
+(the open thread, a segmented option, the effort control) is a
 **quiet fill or a lifted thumb**, because a permanently inverted block would
 be the loudest thing on screen. Syntax highlighting is the sole functional
 exception to monochrome. No default shadcn look, no purple gradients, no
@@ -825,8 +954,11 @@ comment.
   popovers pop in from their anchor (scale 0.96 → 1, 160–200ms, strong
   ease-out); presses scale to 0.97. Streaming shows **one small breathing
   mark at the live edge** of the last paragraph — solid, not blinking, and
-  not a caret (nothing is being typed); no typewriter. Always respect
-  `prefers-reduced-motion`.
+  not a caret (nothing is being typed); no typewriter. The answer fades in
+  once as the work folds away above it; inside the live activity window the
+  newest words fade in and lines glide rather than jump. A label that
+  changes rolls (out up, in from below) and the row eases to its new width.
+  Always respect `prefers-reduced-motion`.
 - **Theme toggle** swaps instantly — no cross-fade. `color-scheme` follows
   the theme so native controls (date picker, autofill) match.
 

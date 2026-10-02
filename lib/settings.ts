@@ -28,6 +28,9 @@ export const TEXT_SIZES = ["small", "medium", "large"] as const;
 export const WIDTHS = ["narrow", "medium", "wide"] as const;
 export const DENSITIES = ["comfortable", "compact"] as const;
 
+/** Instructions ride along with every request; keep them a paragraph or ten. */
+export const INSTRUCTIONS_MAX = 8000;
+
 export type Theme = (typeof THEMES)[number];
 export type Font = (typeof FONTS)[number];
 export type TextSize = (typeof TEXT_SIZES)[number];
@@ -63,11 +66,17 @@ export type UserSettings = Appearance & {
   rememberDeviceKey: boolean;
   /** The user's own OpenRouter key. Null when they have not connected one. */
   openrouterKey: string | null;
+  /**
+   * Standing guidance sent as the system prompt in every conversation. It
+   * replaced the per-conversation prompt: one set of instructions that
+   * follows the person is what people actually reach for, and a prompt
+   * hidden behind a composer button was easy to forget was set.
+   */
+  instructions: string;
   /** What a new chat inherits — the knobs last used, not hard defaults. */
   defaults: {
     model: string;
     reasoning: ReasoningEffort;
-    search: boolean;
   };
   /** Most-recently-picked models, newest first, for the palette. */
   recentModels: string[];
@@ -89,10 +98,10 @@ export const DEFAULT_SETTINGS: UserSettings = {
   ...DEFAULT_APPEARANCE,
   rememberDeviceKey: true,
   openrouterKey: null,
+  instructions: "",
   defaults: {
     model: DEFAULT_CHAT_SETTINGS.model,
     reasoning: DEFAULT_CHAT_SETTINGS.reasoning,
-    search: DEFAULT_CHAT_SETTINGS.search,
   },
   recentModels: [],
   activeThread: null,
@@ -142,6 +151,10 @@ export function normalizeSettings(raw: unknown): UserSettings {
       typeof input.openrouterKey === "string" && input.openrouterKey
         ? input.openrouterKey
         : null,
+    instructions:
+      typeof input.instructions === "string"
+        ? input.instructions.slice(0, INSTRUCTIONS_MAX)
+        : "",
     defaults: {
       model:
         typeof defaults.model === "string" && MODEL_ID_PATTERN.test(defaults.model)
@@ -152,7 +165,6 @@ export function normalizeSettings(raw: unknown): UserSettings {
         REASONING_EFFORTS,
         DEFAULT_SETTINGS.defaults.reasoning,
       ),
-      search: defaults.search === true,
     },
     recentModels: Array.isArray(input.recentModels)
       ? input.recentModels

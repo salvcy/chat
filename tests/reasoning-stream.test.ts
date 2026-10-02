@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { TextStreamPart, ToolSet } from "ai";
-import { reasoningIn, reviveLateReasoning } from "../lib/reasoning-stream.ts";
+import { orderStream, reasoningIn } from "../lib/reasoning-stream.ts";
 
 type Part = TextStreamPart<ToolSet>;
 
@@ -18,13 +18,40 @@ async function run(parts: Part[]): Promise<Part[]> {
       controller.close();
     },
   })
-    .pipeThrough(reviveLateReasoning())
+    .pipeThrough(orderStream())
     .getReader();
   for (;;) {
     const { done, value } = await reader.read();
     if (done) return out;
     out.push(value);
   }
+}
+
+/**
+ * Replays parts the way useChat assembles them — a part is placed when it
+ * starts and grows where it sits — so a test can assert on what the reader
+ * would actually see, in order.
+ */
+function assemble(parts: Part[]): Array<{ type: "text" | "reasoning"; text: string }> {
+  const placed: Array<{ type: "text" | "reasoning"; text: string }> = [];
+  const open = new Map<string, { type: "text" | "reasoning"; text: string }>();
+  for (const part of parts) {
+    if (part.type === "text-start" || part.type === "reasoning-start") {
+      const entry = { type: part.type === "text-start" ? "text" as const : "reasoning" as const, text: "" };
+      assert.ok(!open.has(`${entry.type}:${part.id}`), `${part.type} ${part.id} opened twice`);
+      open.set(`${entry.type}:${part.id}`, entry);
+      placed.push(entry);
+    } else if (part.type === "text-delta" || part.type === "reasoning-delta") {
+      const kind = part.type === "text-delta" ? "text" : "reasoning";
+      const entry = open.get(`${kind}:${part.id}`);
+      assert.ok(entry, `${part.type} for unopened ${part.id}`);
+      entry.text += part.text;
+    } else if (part.type === "text-end" || part.type === "reasoning-end") {
+      const kind = part.type === "text-end" ? "text" : "reasoning";
+      assert.ok(open.delete(`${kind}:${part.id}`), `${part.type} for unopened ${part.id}`);
+    }
+  }
+  return placed;
 }
 
 test("reasoning text is read from details first, then the flat field", () => {
@@ -48,12 +75,14 @@ test("reasoning the provider already emits is never duplicated", async () => {
     { type: "text-delta", id: "t", text: "Answer" },
     { type: "text-end", id: "t" },
   ]);
-  const reasoning = out.filter((part) => part.type === "reasoning-delta");
-  assert.equal(reasoning.length, 1);
+  assert.deepEqual(assemble(out), [
+    { type: "reasoning", text: "thinking " },
+    { type: "text", text: "Answer" },
+  ]);
   assert.ok(!out.some((part) => part.type === "raw"));
 });
 
-test("reasoning after a stray newline is revived and closed by real text", async () => {
+test("a stray newline mid-thought neither opens the answer nor drops the thinking", async () => {
   const out = await run([
     { type: "reasoning-start", id: "r" },
     { type: "reasoning-delta", id: "r", text: "first " },
@@ -70,27 +99,103 @@ test("reasoning after a stray newline is revived and closed by real text", async
     { type: "finish", finishReason: "stop", rawFinishReason: "stop", totalUsage: {} as never },
   ]);
 
-  const late = out.filter(
-    (part): part is Extract<Part, { type: "reasoning-delta" }> =>
-      part.type === "reasoning-delta" && part.id !== "r",
-  );
-  assert.deepEqual(late.map((part) => part.text), ["still ", "thinking"]);
-
-  const types = out.map((part) => part.type);
-  const lateEnd = out.findIndex(
-    (part) => part.type === "reasoning-end" && part.id !== "r",
-  );
-  const answer = out.findIndex(
-    (part) => part.type === "text-delta" && part.text === "Answer",
-  );
-  assert.ok(lateEnd >= 0 && lateEnd < answer, types.join(","));
+  // The answer sits after all of the thinking, not above the second half.
+  assert.deepEqual(assemble(out), [
+    { type: "reasoning", text: "first " },
+    { type: "reasoning", text: "still thinking" },
+    { type: "text", text: "\n\nAnswer" },
+  ]);
 });
 
-test("a revived reasoning part is closed if the stream ends mid-thought", async () => {
+test("thinking that resumes after real text splits the answer in time order", async () => {
+  const out = await run([
+    { type: "text-start", id: "t" },
+    { type: "text-delta", id: "t", text: "Part one.\n\n" },
+    raw({ reasoning: "wait, check that" }),
+    raw({ content: "Part two." }),
+    { type: "text-delta", id: "t", text: "Part two." },
+    { type: "text-end", id: "t" },
+  ]);
+  assert.deepEqual(assemble(out), [
+    { type: "text", text: "Part one.\n\n" },
+    { type: "reasoning", text: "wait, check that" },
+    { type: "text", text: "Part two." },
+  ]);
+});
+
+test("whitespace-only content never becomes a text part", async () => {
+  const out = await run([
+    { type: "reasoning-start", id: "r" },
+    { type: "reasoning-delta", id: "r", text: "the whole reply, on the reasoning channel" },
+    { type: "reasoning-end", id: "r" },
+    { type: "text-start", id: "t" },
+    { type: "text-delta", id: "t", text: "\n" },
+    { type: "text-end", id: "t" },
+  ]);
+  assert.ok(!out.some((part) => part.type.startsWith("text-")));
+});
+
+test("a resumed thought is closed if the stream ends mid-thought", async () => {
   const out = await run([
     { type: "text-start", id: "t" },
     { type: "text-delta", id: "t", text: " " },
     raw({ reasoning: "cut off" }),
   ]);
   assert.equal(out.at(-1)?.type, "reasoning-end");
+  assert.deepEqual(assemble(out), [{ type: "reasoning", text: "cut off" }]);
+});
+
+test("sources do not split the answer", async () => {
+  const out = await run([
+    { type: "text-start", id: "t" },
+    { type: "text-delta", id: "t", text: "Cited " },
+    { type: "source", sourceType: "url", id: "s", url: "https://example.com", title: "Example" },
+    { type: "text-delta", id: "t", text: "claim." },
+    { type: "text-end", id: "t" },
+  ]);
+  assert.deepEqual(assemble(out), [{ type: "text", text: "Cited claim." }]);
+});
+
+const cite = (url: string): Part => ({ type: "source", sourceType: "url", id: url, url, title: url });
+
+test("thinking that resumes after a search lands after the sources", async () => {
+  const out = await run([
+    { type: "reasoning-start", id: "r" },
+    { type: "reasoning-delta", id: "r", text: "Check the docs. " },
+    cite("https://a.example"),
+    cite("https://b.example"),
+    { type: "reasoning-delta", id: "r", text: "They agree." },
+    { type: "reasoning-end", id: "r", providerMetadata: { openrouter: { reasoning_details: [] } } },
+    { type: "text-start", id: "t" },
+    { type: "text-delta", id: "t", text: "Answer" },
+    { type: "text-end", id: "t" },
+  ]);
+  const order = out
+    .filter((part) => part.type === "reasoning-start" || part.type === "source" || part.type === "text-start")
+    .map((part) => part.type);
+  assert.deepEqual(order, ["reasoning-start", "source", "source", "reasoning-start", "text-start"]);
+  assert.deepEqual(assemble(out), [
+    { type: "reasoning", text: "Check the docs. " },
+    { type: "reasoning", text: "They agree." },
+    { type: "text", text: "Answer" },
+  ]);
+  // The provider's closing metadata stays on the thought it closes.
+  const end = out.find((part) => part.type === "reasoning-end" && part.providerMetadata);
+  assert.equal(end?.type === "reasoning-end" && end.id, "r:1");
+});
+
+test("a search that ends the thinking does not split it", async () => {
+  const out = await run([
+    { type: "reasoning-start", id: "r" },
+    { type: "reasoning-delta", id: "r", text: "Look it up." },
+    cite("https://a.example"),
+    { type: "reasoning-end", id: "r", providerMetadata: { openrouter: { reasoning_details: [] } } },
+    { type: "text-start", id: "t" },
+    { type: "text-delta", id: "t", text: "Answer" },
+    { type: "text-end", id: "t" },
+  ]);
+  const ends = out.filter((part) => part.type === "reasoning-end");
+  assert.equal(ends.length, 1);
+  assert.equal(ends[0].type === "reasoning-end" && ends[0].id, "r");
+  assert.ok(ends[0].type === "reasoning-end" && ends[0].providerMetadata);
 });

@@ -45,9 +45,10 @@ const sections = [
         Model requests travel directly from your browser to OpenRouter using
         the key you provide. OpenRouter and the model provider selected for a
         request receive the prompt, relevant conversation context, and any
-        attachment you send to that model. Those services apply their own
-        privacy and retention terms. Our Worker does not proxy or log model
-        prompts.
+        attachment you send to that model. Models that can search the web may
+        decide to, in which case OpenRouter sends the search query to its
+        search provider. Those services apply their own privacy and retention
+        terms. Our Worker does not proxy or log model prompts.
       </p>
     ),
   },
@@ -135,13 +136,13 @@ export default function PrivacyPage() {
 
         <header className="mb-14">
           <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-muted">
-            effective august 25, 2026
+            effective october 1, 2026
           </p>
           <h1 className="mt-3 text-3xl font-medium tracking-[-0.035em] sm:text-4xl">
             Privacy, in plain language.
           </h1>
           <p className="mt-5 max-w-[610px] text-[15px] leading-7 text-secondary">
-            This policy explains how the Chat service at chat.belayet.co
+            This policy explains how the Chat service at chat.belayet.app
             handles information. The short version: account identity lives on
             the service, password-account chat data is encrypted before sync,
             and model requests go directly from your browser to OpenRouter.

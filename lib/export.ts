@@ -24,12 +24,8 @@ export function toMarkdown(
     `- exported: ${stamp(Date.now())}`,
   ];
   if (meta.reasoning !== "off") lines.push(`- reasoning: ${meta.reasoning}`);
-  if (meta.search) lines.push("- web search: on");
   if (meta.totalCostUsd) lines.push(`- cost: ${formatCost(meta.totalCostUsd)}`);
   if (meta.totalTokens) lines.push(`- tokens: ${formatTokens(meta.totalTokens)}`);
-  if (meta.system?.trim()) {
-    lines.push("", "## System prompt", "", "> " + meta.system.trim().replace(/\n/g, "\n> "));
-  }
   lines.push("", "---", "");
 
   for (const m of messages) {

@@ -68,7 +68,6 @@ export default function Metrics({
     detail.push(["thought", formatTokens(meta.reasoningTokens)]);
   }
   if (meta.effort && meta.effort !== "off") detail.push(["effort", meta.effort]);
-  if (meta.search) detail.push(["search", "on"]);
   if (meta.answerInReasoning) detail.push(["answer", "sent as reasoning"]);
   // "stop" is the boring case; only surface a stop reason worth knowing.
   if (meta.finishReason && meta.finishReason !== "stop") {

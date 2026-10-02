@@ -55,8 +55,6 @@ export type ConversationMeta = {
   model: string;
   reasoning: ReasoningEffort;
   search: boolean;
-  /** Per-conversation system prompt. "" = none. */
-  system: string;
   /** Pinned threads sort above everything else. */
   pinned?: boolean;
   /** Rolling totals across the thread, summed from message metadata. */
@@ -132,7 +130,6 @@ export function settingsOf(meta: ConversationMeta | undefined): ChatSettings {
     model: meta.model,
     reasoning: meta.reasoning,
     search: meta.search,
-    system: meta.system ?? "",
   };
 }
 
@@ -537,7 +534,6 @@ async function openThreadRow(row: ThreadWire): Promise<ConversationMeta> {
     model: sealed?.model ?? DEFAULT_SETTINGS.model,
     reasoning: sealed?.reasoning ?? DEFAULT_SETTINGS.reasoning,
     search: sealed?.search ?? DEFAULT_SETTINGS.search,
-    system: sealed?.system ?? "",
     totalCostUsd: sealed?.totalCostUsd,
     totalTokens: sealed?.totalTokens,
     pinned: row.pinned,

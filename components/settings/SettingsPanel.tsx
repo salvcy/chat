@@ -1,13 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import Button from "@/components/ui/Button";
+import Segmented from "@/components/ui/Segmented";
 import type { SessionUser } from "@/lib/auth-client";
 import { keyFingerprint, looksLikeKey } from "@/lib/credentials";
 import {
   DENSITIES,
   FONTS,
+  INSTRUCTIONS_MAX,
   TEXT_SIZES,
   THEMES,
   WIDTHS,
@@ -29,71 +31,106 @@ import type { AccountUsage } from "@/lib/settings";
  * thumb that slides between peers.
  */
 
-type Section = "account" | "keys" | "appearance";
+export type Section = "account" | "instructions" | "keys" | "appearance";
 
-const SECTIONS: { id: Section; label: string }[] = [
-  { id: "account", label: "account" },
-  { id: "keys", label: "keys" },
-  { id: "appearance", label: "appearance" },
+const SECTIONS: Section[] = ["account", "instructions", "keys", "appearance"];
+
+/** A few starting points — cheaper than staring at an empty box. */
+const PRESETS: Array<{ label: string; text: string }> = [
+  {
+    label: "Terse",
+    text: "Answer in as few words as the question allows. No preamble, no summary of what you just said, no offers of further help.",
+  },
+  {
+    label: "Socratic",
+    text: "Before answering, state the strongest objection to the premise of the question. Then answer. Flag where you are uncertain rather than smoothing over it.",
+  },
+  {
+    label: "Engineer",
+    text: "You are a senior engineer reviewing code. Prefer correctness over agreement. Point out failure modes, edge cases and simpler alternatives. Show code, not prose about code.",
+  },
 ];
 
-/* ------------------------------- primitives ---------------------------- */
-
 /**
- * Equal-width segments with a thumb that slides to the selection — Beautiful
- * UI's SegmentedControl (beautifului.dev, MIT). The thumb is a lifted
- * surface, not an inversion: this is a choice among peers, and a filled block
- * would read as "on".
+ * Standing instructions — the system prompt for every conversation.
+ *
+ * Typing writes a local draft; it reaches the account 600ms after the last
+ * keystroke, on blur, and when the panel closes. Writing on every keystroke
+ * would re-seal and upload the whole settings blob per character, and an
+ * explicit Save would break this panel's one rule: nothing in it can be left
+ * unsaved.
  */
-function Segmented<T extends string>({
+function Instructions({
   value,
-  options,
-  onChange,
-  labels,
-  label,
+  onSave,
 }: {
-  value: T;
-  options: readonly T[];
-  onChange: (next: T) => void;
-  labels?: Partial<Record<T, string>>;
-  label?: string;
+  value: string;
+  onSave: (next: string) => void;
 }) {
-  const index = Math.max(0, options.indexOf(value));
+  const [draft, setDraft] = useState(value);
+  const draftRef = useRef(value);
+  const savedRef = useRef(value);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flush = () => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+    if (draftRef.current === savedRef.current) return;
+    savedRef.current = draftRef.current;
+    onSave(draftRef.current);
+  };
+  // Closing the panel mid-sentence still saves the sentence.
+  const flushRef = useRef(flush);
+  useEffect(() => {
+    flushRef.current = flush;
+  });
+  useEffect(() => () => flushRef.current(), []);
+
+  const change = (next: string) => {
+    const clipped = next.slice(0, INSTRUCTIONS_MAX);
+    setDraft(clipped);
+    draftRef.current = clipped;
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(flush, 600);
+  };
+
   return (
-    <div
-      role="radiogroup"
-      aria-label={label}
-      className="relative grid h-8 select-none rounded-full bg-hover-2 p-0.5"
-      style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}
-    >
-      <span
-        aria-hidden
-        className="absolute inset-y-0.5 left-0.5 rounded-full bg-panel shadow-btn transition-transform duration-200 ease-out-strong"
-        style={{
-          width: `calc((100% - 4px) / ${options.length})`,
-          transform: `translateX(${index * 100}%)`,
-        }}
+    <>
+      <textarea
+        value={draft}
+        maxLength={INSTRUCTIONS_MAX}
+        onChange={(e) => change(e.target.value)}
+        onBlur={flush}
+        aria-label="Instructions"
+        placeholder="How should models answer you? Tone, format, what to assume about you…"
+        className="dial-input dial-scroll block h-44! w-full resize-none py-2.5! text-[13.5px]! leading-relaxed"
       />
-      {options.map((option) => {
-        const active = option === value;
-        return (
+      <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+        {PRESETS.map((preset) => (
           <button
-            key={option}
+            key={preset.label}
             type="button"
-            role="radio"
-            aria-checked={active}
-            onClick={() => onChange(option)}
-            className={`relative z-10 truncate rounded-full px-2 text-[12.5px] font-medium capitalize transition-colors duration-150 ${
-              active ? "text-foreground" : "text-muted hover:text-secondary"
-            }`}
+            onClick={() => change(preset.text)}
+            className="h-6 rounded-full bg-hover px-2.5 text-[12px] text-secondary transition-[background-color,color,transform] duration-150 hover:bg-hover-2 hover:text-foreground active:scale-[0.97]"
           >
-            {labels?.[option] ?? option}
+            {preset.label}
           </button>
-        );
-      })}
-    </div>
+        ))}
+        {draft && (
+          <button
+            type="button"
+            onClick={() => change("")}
+            className="ml-auto h-6 rounded-full px-2 text-[12px] text-muted transition-colors hover:text-foreground"
+          >
+            Clear
+          </button>
+        )}
+      </div>
+    </>
   );
 }
+
+/* ------------------------------- primitives ---------------------------- */
 
 /** Bytes, at the precision a person actually reads. */
 function formatBytes(bytes: number): string {
@@ -193,6 +230,7 @@ export default function SettingsPanel({
   onRefreshUsage,
   onClose,
   onSignInRequested,
+  initialSection = "account",
 }: {
   user: SessionUser | null;
   settings: UserSettings;
@@ -207,8 +245,9 @@ export default function SettingsPanel({
   onRefreshUsage: () => Promise<void>;
   onClose: () => void;
   onSignInRequested: () => void;
+  initialSection?: Section;
 }) {
-  const [section, setSection] = useState<Section>("account");
+  const [section, setSection] = useState<Section>(initialSection);
   const [keyDraft, setKeyDraft] = useState("");
   const [keyError, setKeyError] = useState<string | null>(null);
   const [confirmDestroy, setConfirmDestroy] = useState(false);
@@ -268,9 +307,14 @@ export default function SettingsPanel({
             <Segmented
               label="Settings section"
               value={section}
-              options={SECTIONS.map((entry) => entry.id)}
+              options={SECTIONS}
               onChange={setSection}
-              labels={{ account: "Account", keys: "Keys", appearance: "Appearance" }}
+              labels={{
+                account: "Account",
+                instructions: "Instructions",
+                keys: "Keys",
+                appearance: "Appearance",
+              }}
             />
           </div>
         </div>
@@ -437,6 +481,39 @@ export default function SettingsPanel({
                   </p>
                 </div>
               )}
+            </div>
+          )}
+
+          {section === "instructions" && (
+            <div className="divide-y divide-line">
+              <Row
+                label="Instructions"
+                hint={
+                  settings.instructions
+                    ? `${settings.instructions.length}/${INSTRUCTIONS_MAX}`
+                    : "none"
+                }
+              >
+                <p className="mb-3 text-[12.5px] leading-relaxed text-secondary">
+                  Sent as the system prompt in every conversation, on every
+                  model.{" "}
+                  {encrypted
+                    ? "Encrypted with the rest of your settings; OpenRouter and the model provider see them with each message."
+                    : "OpenRouter and the model provider see them with each message."}
+                </p>
+                <Instructions
+                  value={settings.instructions}
+                  onSave={(instructions) => onUpdate({ instructions })}
+                />
+              </Row>
+              <Row label="Web search" hint="automatic">
+                <p className="text-[12.5px] leading-relaxed text-secondary">
+                  Every model that can search the web is given the tool, and
+                  decides for itself when a question needs it. Searches are
+                  billed to your OpenRouter key and appear in each
+                  answer&apos;s activity.
+                </p>
+              </Row>
             </div>
           )}
 

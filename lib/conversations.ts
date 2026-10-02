@@ -338,7 +338,6 @@ export function useConversations({
         model: settings.model,
         reasoning: settings.reasoning,
         search: settings.search,
-        system: settings.system,
         pinned: existing?.pinned ?? false,
         totalCostUsd,
         totalTokens,

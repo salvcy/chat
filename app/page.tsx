@@ -8,7 +8,9 @@ import Loader from "@/components/ui/Loader";
 import ConversationList from "@/components/sidebar/ConversationList";
 import AuthPanel from "@/components/settings/AuthPanel";
 import KeyGate from "@/components/settings/KeyGate";
-import SettingsPanel from "@/components/settings/SettingsPanel";
+import SettingsPanel, {
+  type Section as SettingsSection,
+} from "@/components/settings/SettingsPanel";
 import UnlockBar from "@/components/settings/UnlockBar";
 import Palette, { type Command } from "@/components/tuner/Palette";
 import RailHandle from "@/components/sidebar/RailHandle";
@@ -74,7 +76,7 @@ export default function Home() {
     openThreadRef.current = conv.activeId;
   });
   const [models, setModels] = useState<OpenRouterModel[]>([]);
-  // Session defaults (model + reasoning + search) rather than hard defaults:
+  // Session defaults (model + reasoning) rather than hard defaults:
   // a new chat inherits the knobs you were last working with.
   const [settings, setSettings] = useState<ChatSettings>(() => ({
     ...DEFAULT_SETTINGS,
@@ -88,7 +90,8 @@ export default function Home() {
    */
   const [draftId, setDraftId] = useState(() => crypto.randomUUID());
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  /** The settings panel, open at a section — or closed. */
+  const [settingsOpen, setSettingsOpen] = useState<SettingsSection | false>(false);
   const [authOpen, setAuthOpen] = useState(false);
   /** Messages for the active thread, once read from the cloud store. */
   const [loaded, setLoaded] = useState<{
@@ -180,7 +183,12 @@ export default function Home() {
    * models can't leave stale knobs behind.
    */
   const effective = useMemo(
-    () => (models.length > 0 ? reconcileSettings(settings, models) : settings),
+    () =>
+      models.length > 0
+        ? reconcileSettings(settings, models)
+        : // Until the catalog says the model can call tools, offering one
+          // could fail the request outright.
+          { ...settings, search: false },
     [settings, models],
   );
 
@@ -197,11 +205,7 @@ export default function Home() {
         // …and as the account default, so the *next* new chat inherits them
         // on this device and on every other one.
         account.updateSettings({
-          defaults: {
-            model: next.model,
-            reasoning: next.reasoning,
-            search: next.search,
-          },
+          defaults: { model: next.model, reasoning: next.reasoning },
         });
         return next;
       });
@@ -225,8 +229,8 @@ export default function Home() {
   const newConversation = useCallback(() => {
     setDraftId(crypto.randomUUID());
     conv.setActiveId(null);
-    // Carry model/reasoning/search forward; drop the thread-specific prompt.
-    setSettings({ ...DEFAULT_SETTINGS, ...account.settings.defaults, system: "" });
+    // Carry the model and reasoning effort forward.
+    setSettings({ ...DEFAULT_SETTINGS, ...account.settings.defaults });
     setSidebarOpen(false);
   }, [conv, account.settings.defaults]);
 
@@ -240,7 +244,7 @@ export default function Home() {
       // new one forces useChat to unmount, otherwise its in-memory transcript
       // can remain visible after the IndexedDB rows are gone.
       setDraftId(crypto.randomUUID());
-      setSettings({ ...DEFAULT_SETTINGS, ...account.settings.defaults, system: "" });
+      setSettings({ ...DEFAULT_SETTINGS, ...account.settings.defaults });
     },
     [conv, account.settings.defaults],
   );
@@ -314,7 +318,13 @@ export default function Home() {
       id: "settings",
       label: "Account and settings",
       hint: account.user ? account.user.email : "not signed in",
-      run: () => setSettingsOpen(true),
+      run: () => setSettingsOpen("account"),
+    });
+    list.push({
+      id: "instructions",
+      label: "Edit instructions",
+      hint: account.settings.instructions ? "set" : "none",
+      run: () => setSettingsOpen("instructions"),
     });
     if (credential) {
       list.push({
@@ -475,7 +485,7 @@ export default function Home() {
       account={{
         user: account.user,
         status: account.status,
-        onOpen: () => setSettingsOpen(true),
+        onOpen: () => setSettingsOpen("account"),
       }}
     />
   );
@@ -559,6 +569,7 @@ export default function Home() {
             loadMessages={conv.loadMessages}
             remoteVersion={account.pulled}
             setActiveId={conv.setActiveId}
+            instructions={account.settings.instructions}
           />
         ) : (
           <div className="flex flex-1 items-center justify-center">
@@ -568,6 +579,7 @@ export default function Home() {
 
         {settingsOpen && (
           <SettingsPanel
+            initialSection={settingsOpen}
             user={account.user}
             settings={account.settings}
             status={account.status}
