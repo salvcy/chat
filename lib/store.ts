@@ -2,8 +2,10 @@
 
 import type { UIMessage } from "ai";
 import {
-  downloadBlob,
+  displayBlob,
   downloadPayloadBlob,
+  forgetDisplayedBlobs,
+  pinBlobThread,
   uploadBlob,
   uploadPayloadBlob,
 } from "./blob";
@@ -242,6 +244,26 @@ export function setLiveConnectionId(id: string | null): void {
   connectionId = id;
 }
 
+/** This device's live-socket id, for writes that notify the others. */
+export function liveConnectionId(): string | null {
+  return connectionId;
+}
+
+/**
+ * Seal a live frame. Frames are never stored, but they are the reply's text,
+ * so they get the same treatment as a stored message: sealed with the vault
+ * key when the account has one, bound to their thread, stream and number.
+ */
+export async function sealLive(recordId: string, value: unknown): Promise<string> {
+  assertUnlocked();
+  return seal(recordId, value);
+}
+
+export async function openLive<T>(recordId: string, payload: string): Promise<T | null> {
+  if (encrypted && !vaultKey) return null;
+  return unseal<T>(recordId, payload);
+}
+
 export function setRevisionObserver(
   observer: ((revision: number) => void) | null,
 ): void {
@@ -312,6 +334,10 @@ async function blobIdFor(
   return `${threadId}/${safe}.${tag}.${partIndex}.${assetIndex}`;
 }
 
+function isLocalUrl(url: string): boolean {
+  return url.startsWith("data:") || url.startsWith("blob:");
+}
+
 type PreparedMessage = {
   remote: StrippedMessage;
   /** Same pixels as the in-memory copy, now carrying their durable R2 ids. */
@@ -333,7 +359,9 @@ async function prepareBlobs(
       if (part.data.images.some((asset) => asset.blobId)) stripped = true;
       const pairs = await Promise.all(
         part.data.images.map(async (asset, assetIndex) => {
-          if (!asset.url.startsWith("data:")) {
+          // `data:` is bytes this device has not uploaded yet; `blob:` is
+          // bytes it downloaded. Neither is ever written into a payload.
+          if (!isLocalUrl(asset.url)) {
             return { local: asset, remote: asset };
           }
           stripped = true;
@@ -370,7 +398,7 @@ async function prepareBlobs(
       continue;
     }
 
-    if (part.type === "file" && part.url.startsWith("data:")) {
+    if (part.type === "file" && isLocalUrl(part.url)) {
       stripped = true;
       const dial = dialMetadata(part);
       const blobId =
@@ -420,46 +448,71 @@ async function prepareBlobs(
  * and a thread that is written repeatedly (a streaming answer checkpoints
  * every few seconds) would otherwise re-send the same megabytes. This is a
  * per-session memo, not storage: losing it costs one redundant upload.
+ *
+ * It holds the R2 references and nothing else. It used to keep the parts
+ * whole, which meant a copy of every image and document uploaded in the
+ * session — megabytes of base64 each — pinned in memory until sign-out, for a
+ * memo that only ever reads the blob ids.
  */
 const uploaded = new Map<string, StoredMessage["parts"]>();
 
-/** Fill R2 references this device has not downloaded yet. */
-async function hydrateBlobs(message: StoredMessage): Promise<StoredMessage> {
-  const parts: StoredMessage["parts"] = [];
-
-  for (const part of message.parts) {
+function referencesOnly(parts: StoredMessage["parts"]): StoredMessage["parts"] {
+  return parts.map((part) => {
+    if (part.type === "file") return { ...part, url: "" };
     if (part.type === "data-image") {
-      const images = await Promise.all(
-        part.data.images.map(async (asset) => {
-          if (asset.url.startsWith("data:") || !asset.blobId) return asset;
-          const url = await downloadBlob(
-            asset.blobId,
-            asset.mediaType,
-            vaultKey,
-            asset.blobUrl,
-          );
-          return url ? { ...asset, url } : asset;
-        }),
-      );
-      parts.push({ ...part, data: { ...part.data, images } });
-      continue;
+      return {
+        ...part,
+        data: {
+          ...part.data,
+          images: part.data.images.map((image) => ({ ...image, url: "" })),
+        },
+      };
     }
+    return part;
+  });
+}
 
-    if (part.type === "file" && !part.url) {
-      const dial = dialMetadata(part);
-      if (typeof dial.blobId === "string") {
-        const url = await downloadBlob(
-          dial.blobId,
-          part.mediaType,
-          vaultKey,
-          typeof dial.blobUrl === "string" ? dial.blobUrl : undefined,
+/**
+ * Fill R2 references this device has not downloaded yet, as object URLs.
+ * `version` is the message's revision: a regenerated image keeps its blob id,
+ * so the id alone cannot say whether the bytes held are still the right ones.
+ */
+async function hydrateBlobs(message: StoredMessage, version: number): Promise<StoredMessage> {
+  const parts = await Promise.all(
+    message.parts.map(async (part): Promise<StoredMessage["parts"][number]> => {
+      if (part.type === "data-image") {
+        const images = await Promise.all(
+          part.data.images.map(async (asset) => {
+            if (asset.url || !asset.blobId) return asset;
+            const url = await displayBlob(
+              asset.blobId,
+              asset.mediaType,
+              vaultKey,
+              asset.blobUrl,
+              version,
+            );
+            return url ? { ...asset, url } : asset;
+          }),
         );
-        parts.push(url ? { ...part, url } : part);
-        continue;
+        return { ...part, data: { ...part.data, images } };
       }
-    }
-    parts.push(part);
-  }
+
+      if (part.type === "file" && !part.url) {
+        const dial = dialMetadata(part);
+        if (typeof dial.blobId === "string") {
+          const url = await displayBlob(
+            dial.blobId,
+            part.mediaType,
+            vaultKey,
+            typeof dial.blobUrl === "string" ? dial.blobUrl : undefined,
+            version,
+          );
+          return url ? { ...part, url } : part;
+        }
+      }
+      return part;
+    }),
+  );
 
   const copy = { ...message } as StrippedMessage;
   delete copy.blobsStripped;
@@ -563,13 +616,69 @@ export async function listThreads(): Promise<ConversationMeta[]> {
   return Promise.all(rows.map(openThreadRow));
 }
 
+/** A message as the transcript holds it: no storage columns. */
+export type ThreadMessage = UIMessage<DialMetadata, DialDataParts>;
+
 export type OpenThread = {
   meta: ConversationMeta;
-  messages: StoredMessage[];
+  messages: ThreadMessage[];
 };
 
-export async function readThread(id: string): Promise<OpenThread | null> {
-  assertUnlocked();
+/**
+ * The open thread's messages as last read, by id, with the revision each was
+ * read at.
+ *
+ * A remote change used to mean reading the whole thread again: every payload
+ * downloaded, every message decrypted, every image fetched from R2 and
+ * decrypted a second time — once per checkpoint while another device
+ * streamed. Now the read asks only for what moved since `rev`, and every
+ * message that did not move comes back as the *same object*, so it is neither
+ * decrypted nor re-rendered. One thread, the open one: switching replaces it.
+ */
+type ThreadCache = {
+  thread: string;
+  rev: number;
+  messages: Map<string, { rev: number; message: ThreadMessage | null }>;
+};
+let threadCache: ThreadCache | null = null;
+
+/** How many messages are opened at once: decryption and R2 reads overlap. */
+const OPEN_CONCURRENCY = 6;
+
+async function mapLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  run: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next++;
+      out[index] = await run(items[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+async function openMessage(row: MessageWire): Promise<ThreadMessage | null> {
+  if (!row.payload) return null;
+  const payload = await readPayload(row.payload);
+  if (!payload) return null;
+  const opened = await unseal<StoredMessage>(row.id, payload);
+  if (!opened) return null;
+  const hydrated = await hydrateBlobs({ ...opened, id: row.id }, row.rev);
+  const message = hydrated as Partial<StoredMessage>;
+  delete message.conversationId;
+  delete message.seq;
+  return message as ThreadMessage;
+}
+
+async function readRows(
+  id: string,
+  since: number,
+): Promise<{ thread: ThreadWire; rows: MessageWire[]; rev: number } | null> {
   /*
    * Paged by `seq`, not by offset.
    *
@@ -582,37 +691,78 @@ export async function readThread(id: string): Promise<OpenThread | null> {
   let thread: ThreadWire | null = null;
   const rows: MessageWire[] = [];
   let after = 0;
+  // The lowest revision any page reported: a write landing between pages
+  // must still count as unseen next time.
+  let rev = Number.POSITIVE_INFINITY;
   for (let page = 0; page < MAX_PAGES; page++) {
-    let body: { thread: ThreadWire; messages: MessageWire[]; hasMore: boolean } | null;
+    let body: {
+      rev: number;
+      thread: ThreadWire;
+      messages: MessageWire[];
+      hasMore: boolean;
+    } | null;
     try {
       body = (await call(
-        `/threads/${encodeURIComponent(id)}?after=${after}`,
-      )) as { thread: ThreadWire; messages: MessageWire[]; hasMore: boolean };
+        `/threads/${encodeURIComponent(id)}?after=${after}${since > 0 ? `&since=${since}` : ""}`,
+      )) as typeof body;
     } catch (error) {
       if (error instanceof StoreError && error.status === 404) return null;
       throw error;
     }
     if (!body) return null;
     thread = body.thread;
+    if (typeof body.rev === "number") rev = Math.min(rev, body.rev);
     rows.push(...body.messages);
     if (!body.hasMore || body.messages.length === 0) break;
     after = body.messages[body.messages.length - 1].seq + 1;
   }
   if (!thread) return null;
+  return { thread, rows, rev: Number.isFinite(rev) ? rev : 0 };
+}
 
-  const messages: StoredMessage[] = [];
-  for (const row of rows) {
-    if (!row.payload) continue;
-    const payload = await readPayload(row.payload);
-    if (!payload) continue;
-    const opened = await unseal<StoredMessage>(row.id, payload);
-    if (!opened) continue;
-    messages.push(
-      await hydrateBlobs({ ...opened, id: row.id, conversationId: id, seq: row.seq }),
-    );
+export async function readThread(
+  id: string,
+  {
+    open = true,
+  }: {
+    /** False for a look at a thread that is not on screen (an export): the
+     *  open thread keeps its cache and its pinned images. */
+    open?: boolean;
+  } = {},
+): Promise<OpenThread | null> {
+  assertUnlocked();
+  if (open) pinBlobThread(id);
+  const cache = threadCache?.thread === id ? threadCache : null;
+
+  let read = await readRows(id, cache?.rev ?? 0);
+  // A row sent without its payload that this device does not hold means the
+  // cache and the server disagree about what was seen. Read it whole.
+  if (read && cache && read.rows.some((row) => row.payload === null && !cache.messages.has(row.id))) {
+    read = await readRows(id, 0);
+  }
+  if (!read) {
+    if (open && threadCache?.thread === id) threadCache = null;
+    return null;
   }
 
-  return { meta: await openThreadRow(thread), messages };
+  const held = read.rows.length > 0 && cache ? cache.messages : null;
+  const next: ThreadCache["messages"] = new Map();
+  const opened = await mapLimit(read.rows, OPEN_CONCURRENCY, async (row) => {
+    const prior = held?.get(row.id);
+    if (prior && (row.payload === null || prior.rev === row.rev)) {
+      next.set(row.id, prior);
+      return prior.message;
+    }
+    const message = await openMessage(row);
+    next.set(row.id, { rev: row.rev, message });
+    return message;
+  });
+
+  if (open || threadCache?.thread === id) threadCache = { thread: id, rev: read.rev, messages: next };
+  return {
+    meta: await openThreadRow(read.thread),
+    messages: opened.filter((message): message is ThreadMessage => message !== null),
+  };
 }
 
 export type ThreadWrite = {
@@ -668,7 +818,7 @@ export async function writeThread(input: ThreadWrite): Promise<number> {
         // original corruption vector because an assistant id survives for the
         // whole stream while its text grows.
         if (prepared.remote.blobsStripped) {
-          uploaded.set(message.id, prepared.localParts);
+          uploaded.set(message.id, referencesOnly(prepared.localParts));
         } else {
           uploaded.delete(message.id);
         }
@@ -695,6 +845,7 @@ export async function writeThread(input: ThreadWrite): Promise<number> {
 }
 
 export async function deleteThread(id: string): Promise<void> {
+  if (threadCache?.thread === id) threadCache = null;
   const query = connectionId
     ? `?client=${encodeURIComponent(connectionId)}`
     : "";
@@ -711,6 +862,8 @@ export type Delta = {
   removed: string[];
   /** True when something inside the thread the caller has open moved. */
   threadChanged: boolean;
+  /** The page was full: ask again from `rev`. */
+  hasMore: boolean;
 };
 
 export async function readDelta(
@@ -725,8 +878,11 @@ export async function readDelta(
     rev: number;
     threads: ThreadWire[];
     threadChanged: boolean;
+    hasMore?: boolean;
   } | null;
-  if (!body) return { rev: since, threads: [], removed: [], threadChanged: false };
+  if (!body) {
+    return { rev: since, threads: [], removed: [], threadChanged: false, hasMore: false };
+  }
 
   const live = body.threads.filter((row) => !row.deleted);
   return {
@@ -734,6 +890,7 @@ export async function readDelta(
     threads: await Promise.all(live.map(openThreadRow)),
     removed: body.threads.filter((row) => row.deleted).map((row) => row.id),
     threadChanged: body.threadChanged,
+    hasMore: body.hasMore === true && body.rev > since,
   };
 }
 
@@ -741,7 +898,9 @@ export async function deleteAccount(): Promise<void> {
   await call("/me", { method: "DELETE" });
 }
 
-/** Drop the per-session upload memo — used when signing out. */
+/** Drop the per-session memos — used when signing out. */
 export function forgetUploads(): void {
   uploaded.clear();
+  threadCache = null;
+  forgetDisplayedBlobs();
 }

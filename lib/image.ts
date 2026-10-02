@@ -1,6 +1,7 @@
 "use client";
 
 import { OPENROUTER_API, authHeaders } from "./openrouter-client";
+import { inlineUrl } from "./blob";
 import { DEFAULT_IMAGE_MODEL, type GeneratedImageAsset } from "./types";
 
 /**
@@ -80,6 +81,10 @@ export async function generateImage({
 }): Promise<ImageResult> {
   const target = model ?? DEFAULT_IMAGE_MODEL;
   const startedAt = Date.now();
+  // A reference read back from the account is an object URL; send its bytes.
+  const inputs = await Promise.all(
+    (references ?? []).map(async (reference) => ({ ...reference, url: await inlineUrl(reference.url) })),
+  );
 
   const response = await fetch(`${OPENROUTER_API}/images`, {
     method: "POST",
@@ -88,9 +93,9 @@ export async function generateImage({
       model: target,
       prompt,
       n: 1,
-      ...((references?.length ?? 0) > 0
+      ...(inputs.length > 0
         ? {
-            input_references: references?.map((reference) => ({
+            input_references: inputs.map((reference) => ({
               type: "image_url",
               image_url: { url: reference.url },
             })),

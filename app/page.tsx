@@ -266,8 +266,8 @@ export default function Home() {
     async (id: string, format: "md" | "json" = "md") => {
       const meta = await conv.getMeta(id);
       if (!meta) return;
-      const messages = await conv.loadMessages(id);
-      exportConversation(meta, messages, format);
+      const messages = await conv.peekMessages(id);
+      await exportConversation(meta, messages, format);
     },
     [conv],
   );
@@ -566,7 +566,7 @@ export default function Home() {
             onOpenSwitcher={() => setPaletteOpen(true)}
             onBranch={(messages, from) => void branch(messages, from)}
             saveTurn={conv.saveTurn}
-            loadMessages={conv.loadMessages}
+            loadThread={conv.loadThread}
             remoteVersion={account.pulled}
             setActiveId={conv.setActiveId}
             instructions={account.settings.instructions}

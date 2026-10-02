@@ -18,7 +18,21 @@ import type { Env } from "./env";
  * names it. The id is a random client-minted string that already sits in the
  * clear in the `thread` table, so this discloses nothing the database does
  * not.
+ *
+ * It also relays, and only relays, what an account's devices say to each
+ * other while one of them is streaming an answer: `live` frames carrying the
+ * newest part of the reply (sealed with the account's vault key — the hub
+ * reads the thread id and a frame number, never the text), `want` asking the
+ * streaming device for a full frame, and `stop` asking it to stop. Nothing is
+ * stored. A device that is not connected misses the frames and reads the
+ * checkpoint from D1 instead, exactly as before.
  */
+
+/** Relayed message kinds; anything else a client sends is dropped. */
+const RELAYED = new Set(["live", "want", "stop"]);
+/** A frame is a sealed patch of a few hundred bytes; a keyframe, a reply. */
+const MAX_RELAY_CHARS = 512 * 1024;
+const THREAD_ID = /^[A-Za-z0-9_-]{1,96}$/;
 
 /**
  * `close()` rejects the reserved codes, and 1006 is exactly what an abrupt
@@ -54,6 +68,7 @@ export class SyncHub extends DurableObject<Env> {
       server.send(
         JSON.stringify({ rev: Number.isSafeInteger(rev) ? rev : 0, thread: null }),
       );
+      this.announcePeers();
       return new Response(null, { status: 101, webSocket: client });
     }
 
@@ -62,6 +77,7 @@ export class SyncHub extends DurableObject<Env> {
         rev?: unknown;
         thread?: unknown;
         exclude?: unknown;
+        settings?: unknown;
       } | null;
       const rev = Number(body?.rev);
       if (!Number.isSafeInteger(rev) || rev < 0) {
@@ -72,7 +88,10 @@ export class SyncHub extends DurableObject<Env> {
       const thread =
         typeof body?.thread === "string" && body.thread ? body.thread : null;
 
-      const message = JSON.stringify({ rev, thread });
+      // `settings` says the account's settings blob changed: re-read it.
+      const message = JSON.stringify(
+        body?.settings === true ? { rev, thread, settings: true } : { rev, thread },
+      );
       for (const socket of this.ctx.getWebSockets()) {
         // Never echo a revision back to the device that caused it. Without
         // this, a device that pushes mid-stream wakes itself, finds the rows
@@ -97,9 +116,40 @@ export class SyncHub extends DurableObject<Env> {
     return new Response("not found", { status: 404 });
   }
 
-  /** Clients do not publish data through this channel. */
-  webSocketMessage(socket: WebSocket): void {
-    socket.send(JSON.stringify({ type: "pong" }));
+  /**
+   * Pass a device's live message to the account's other devices, verbatim.
+   *
+   * Only the envelope is read — its kind and thread — and the original string
+   * is what goes out, so a frame costs one parse and no re-serialisation.
+   */
+  webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): void {
+    if (typeof message !== "string" || message.length > MAX_RELAY_CHARS) return;
+    let envelope: { t?: unknown; thread?: unknown } | null = null;
+    try {
+      envelope = JSON.parse(message) as { t?: unknown; thread?: unknown };
+    } catch {
+      return;
+    }
+    if (
+      !envelope ||
+      typeof envelope.t !== "string" ||
+      !RELAYED.has(envelope.t) ||
+      typeof envelope.thread !== "string" ||
+      !THREAD_ID.test(envelope.thread)
+    ) {
+      return;
+    }
+
+    const sender = this.ctx.getTags(socket)[0];
+    for (const other of this.ctx.getWebSockets()) {
+      if (other === socket) continue;
+      if (sender && this.ctx.getTags(other).includes(sender)) continue;
+      try {
+        other.send(message);
+      } catch {
+        // A socket mid-close; the next fan-out will not find it.
+      }
+    }
   }
 
   webSocketClose(socket: WebSocket, code: number, reason: string): void {
@@ -107,6 +157,24 @@ export class SyncHub extends DurableObject<Env> {
       socket.close(echoableCloseCode(code), reason);
     } catch {
       // The peer is already gone; there is nothing left to acknowledge.
+    }
+    this.announcePeers(socket);
+  }
+
+  /**
+   * Tell every device how many are connected. A device alone on its account
+   * then publishes no live frames at all — they would cost a relay each and
+   * reach nobody.
+   */
+  private announcePeers(leaving?: WebSocket): void {
+    const sockets = this.ctx.getWebSockets().filter((socket) => socket !== leaving);
+    const message = JSON.stringify({ t: "peers", n: sockets.length });
+    for (const socket of sockets) {
+      try {
+        socket.send(message);
+      } catch {
+        // Closing; it will not be counted next time.
+      }
     }
   }
 }

@@ -14,6 +14,7 @@ import type { OpenRouterProviderOptions } from "@openrouter/ai-sdk-provider";
 import { currentKey } from "./credentials";
 import { MissingKeyError, providerFor } from "./openrouter-client";
 import { messagesForTextModel } from "./messages";
+import { inlineUrl } from "./blob";
 import { orderStream } from "./reasoning-stream";
 import { smoothStream } from "./smooth-stream";
 import type {
@@ -84,6 +85,29 @@ function describeStreamError(error: unknown): string {
   return error instanceof Error ? error.message : "an error occurred";
 }
 
+/**
+ * Attachments read back from the account are held as object URLs (see
+ * `displayBlob`), which mean nothing outside this tab. The request carries
+ * their bytes, read from the blob only for as long as the request is built.
+ */
+async function withInlineFiles(messages: DialMessage[]): Promise<DialMessage[]> {
+  return Promise.all(
+    messages.map(async (message) => {
+      if (!message.parts.some((part) => part.type === "file" && part.url.startsWith("blob:"))) {
+        return message;
+      }
+      const parts = await Promise.all(
+        message.parts.map(async (part) =>
+          part.type === "file" && part.url.startsWith("blob:")
+            ? { ...part, url: await inlineUrl(part.url) }
+            : part,
+        ),
+      );
+      return { ...message, parts };
+    }),
+  );
+}
+
 export class OpenRouterChatTransport implements ChatTransport<DialMessage> {
   /**
    * Settings arrive as a ref rather than a value because the transport is
@@ -122,7 +146,7 @@ export class OpenRouterChatTransport implements ChatTransport<DialMessage> {
     const system = this.instructions.current.trim();
 
     const modelMessages = await convertToModelMessages(
-      messagesForTextModel(messages),
+      await withInlineFiles(messagesForTextModel(messages)),
     );
 
     // Reasoning maps to OpenRouter's unified param and streams back as

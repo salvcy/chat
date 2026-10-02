@@ -3,6 +3,7 @@ import type { ConversationMeta } from "./store";
 import { textOf } from "./store";
 import { formatCost, formatTokens } from "./format";
 import type { DialDataParts, DialMetadata } from "./types";
+import { inlineUrl } from "./blob";
 
 /**
  * Conversation export. Markdown for reading and pasting elsewhere, JSON for
@@ -111,7 +112,30 @@ export function download(filename: string, content: string, type: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export function exportConversation(
+/** Object URLs die with the tab; an export carries the bytes themselves. */
+async function withInlineMedia(
+  messages: UIMessage<DialMetadata, DialDataParts>[],
+): Promise<UIMessage<DialMetadata, DialDataParts>[]> {
+  return Promise.all(
+    messages.map(async (message) => ({
+      ...message,
+      parts: await Promise.all(
+        message.parts.map(async (part) => {
+          if (part.type === "file") return { ...part, url: await inlineUrl(part.url) };
+          if (part.type === "data-image") {
+            const images = await Promise.all(
+              part.data.images.map(async (image) => ({ ...image, url: await inlineUrl(image.url) })),
+            );
+            return { ...part, data: { ...part.data, images } };
+          }
+          return part;
+        }),
+      ),
+    })),
+  );
+}
+
+export async function exportConversation(
   meta: ConversationMeta,
   messages: UIMessage<DialMetadata, DialDataParts>[],
   format: "md" | "json",
@@ -120,6 +144,10 @@ export function exportConversation(
   if (format === "md") {
     download(name, toMarkdown(meta, messages), "text/markdown;charset=utf-8");
   } else {
-    download(name, toJSON(meta, messages), "application/json;charset=utf-8");
+    download(
+      name,
+      toJSON(meta, await withInlineMedia(messages)),
+      "application/json;charset=utf-8",
+    );
   }
 }

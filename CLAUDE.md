@@ -236,7 +236,30 @@ are the only places those values are consumed.
   the Worker inside its CPU budget.
 - `lib/store.ts` — the whole data layer, replacing `lib/db.ts` and
   `lib/sync.ts` together. Seal on write, open on read, R2 for anything heavy,
-  and five requests. There is no cursor, no dirty flag, no merge.
+  and five requests. There is no cursor, no dirty flag, no merge. **Reads are
+  incremental:** the open thread's decrypted messages are kept with the
+  revision each was read at, a re-read asks only for rows that moved
+  (`?since=`), and unchanged messages come back as the same objects — not
+  re-decrypted, not re-downloaded, not re-rendered. One thread, the open one;
+  `readThread(id, { open: false })` looks at another without disturbing it.
+  Messages open six at a time.
+- `lib/blob.ts` — R2 transport and the **display cache**. Downloaded images
+  and documents are `Blob`s behind object URLs, not `data:` URLs: a data URL
+  was the bytes base64'd into a JS string and copied again into the `<img>`
+  attribute, ~2.7× the file per image, re-downloaded on every open. Measured
+  on a thread of six 1.8MB images: JS heap 24.9MB → 10.3MB, reopen 245ms → 39ms
+  with no downloads. Keyed by blob id and message revision (a regenerated image
+  reuses its id), within 64MB (8GB+ devices) or 24MB, LRU — except the open
+  thread's, which are never revoked. **A `blob:` URL never leaves the tab:**
+  the transport and image requests inline it (`inlineUrl`), JSON export embeds
+  the bytes, a write treats it like a `data:` URL (reference, never sealed),
+  and live frames strip it. The upload memo in `store.ts` keeps R2
+  references only — it used to pin a copy of every image uploaded in the
+  session until sign-out.
+- `lib/live.ts` / `lib/live-frames.ts` — device-to-device live frames over
+  the account's socket: publishing, receiving, sealing, and the pure
+  diff/patch/overlay logic (tested in `tests/live-frames.test.ts`). See the
+  rule below.
 - `lib/keystore.ts` — raw IndexedDB holding an account-scoped,
   **non-extractable `CryptoKey`** when the user chooses to remember this
   browser. This is the *only* remaining use of
@@ -557,12 +580,37 @@ invoking a Worker.
   cross-device sync looked broken while it was working perfectly. ChatView
   adopts remote changes, but never while busy or saving, never after a failed
   save, never twice for the same version, and never when the stored copy is
-  missing a message it is holding (that means our own save is still in
-  flight). The cost of the last guard is
-  that a *truncation* made elsewhere waits for a thread switch; losing a
-  locally streamed answer would be worse. `pulled` now increments only when
-  the delta says the *open* thread moved — a write to some other conversation
+  missing a message this device never wrote (its own unsaved work). A missing
+  message the server *did* hold — `loadThread` reports it in `removed` — was
+  deleted elsewhere by an edit or regenerate and is dropped here too; that
+  used to wait for a thread switch. `pulled` now increments only when the
+  delta says the *open* thread moved — a write to some other conversation
   must not make the transcript in front of the reader re-read itself.
+- **A reply streaming on one device streams on the others.** Checkpoints
+  reach D1 every ~5s, so another device saw an answer in jumps — and shown as
+  finished, "cut off", between them. The streaming device now publishes the
+  turn's tail every 180ms over the account socket: a keyframe, then patches
+  that are nearly all appended text, a few hundred bytes each; sealed with the
+  vault key and bound to thread, stream and frame number; relayed by the hub
+  verbatim and stored nowhere. A receiver lays the tail over its transcript
+  only when the message before it (`prev`) matches, renders it with the live
+  activity UI, and its composer becomes "Replying on another device — Esc to
+  stop" (a `stop` message to the streaming device). Joining mid-stream or
+  missing a frame sends `want` for a keyframe; opening a thread asks
+  immediately; 12s without a frame or `done` falls back to the checkpoint. The
+  hub announces socket counts (`peers`) and a device alone publishes nothing.
+  Two-tab test against the local Worker: the receiver tracked the streaming
+  tab within one frame across a 27s DeepSeek reply; edits, regenerates and
+  remote stop applied live.
+- **Settings changes reach the other devices.** A settings PUT that changed a
+  shared field carries `notify` and the writer's socket id; the hub tells the
+  others, which re-read the blob and keep their own device fields (open
+  thread, rail geometry, remember-key). A local edit made while that read was
+  in flight wins — its own push will notify in turn.
+- **A full delta page is not the end.** `/v1/delta` returned the account's
+  revision with a page capped at 200 rows, so the client's cursor jumped past
+  every thread the page left out and never asked for them again. A full page
+  now reports its last row's revision and the client pages until done.
 - **`saveTurn` must only rewrite what changed.** It marked the entire thread
   dirty on every save, so one turn in a fifty-message conversation queued
   fifty records — and the mid-stream snapshot did it again every 1.2s, about
@@ -880,8 +928,11 @@ invoking a Worker.
   memoized bubbles and a throttled transcript, no source chips) · **17 flow ✓**
   (the live activity window, rolling labels from the model's own titles,
   remarks held until they are known, judder-free glides, a seamless
-  placeholder hand-off). Next product work: sub-agent delegation and
-  per-thread temperature (the wire already carries it).
+  placeholder hand-off) · **18 devices ✓** (live frames mirror a streaming
+  reply to the account's other devices, remote stop, live edits and
+  regenerates, live settings, incremental thread reads, object-URL media with
+  a display cache, the delta paging fix). Next product work: sub-agent
+  delegation and per-thread temperature (the wire already carries it).
 ## Design system (the law)
 
 **Strictly black, white, neutral gray interface chrome — both themes, no

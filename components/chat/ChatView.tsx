@@ -24,6 +24,22 @@ import { currentKey } from "@/lib/credentials";
 import { generateImage } from "@/lib/image";
 import { promoteReasoningAnswer, reconcileFinishedResponse } from "@/lib/messages";
 import { isStreamingRollback } from "@/lib/message-sync";
+import {
+  askForKeyframe,
+  askToStop,
+  hasLivePeers,
+  openFrame,
+  publishFrame,
+  subscribeLive,
+} from "@/lib/live";
+import {
+  applyFrame,
+  diffTail,
+  overlay,
+  tailOf,
+  type FrameBody,
+  type LiveTail,
+} from "@/lib/live-frames";
 import { OpenRouterChatTransport } from "@/lib/transport";
 import {
   DEFAULT_IMAGE_MODEL,
@@ -35,6 +51,15 @@ import {
 
 /** How often the latest stream is offered to the cloud checkpoint throttle. */
 const STREAM_SAVE_MS = 1200;
+/** How often a streaming device mirrors its reply to the account's others. */
+const LIVE_FRAME_MS = 180;
+/** A stream with nothing new still says it is alive this often. */
+const LIVE_HEARTBEAT_MS = 3000;
+/** No frame for this long, and another device's stream is presumed gone. */
+const LIVE_STALE_MS = 12_000;
+
+/** Another device's stream into this thread, as last received. */
+type RemoteStream = { stream: string; n: number; tail: LiveTail; at: number };
 /** Distance from the bottom that still counts as "following the stream". */
 const STICK_THRESHOLD_PX = 80;
 /**
@@ -144,7 +169,7 @@ export default function ChatView({
   onOpenSwitcher,
   onBranch,
   saveTurn,
-  loadMessages,
+  loadThread,
   remoteVersion,
   setActiveId,
   userName,
@@ -164,7 +189,10 @@ export default function ChatView({
     naming?: boolean;
     draft?: boolean;
   }) => Promise<void>;
-  loadMessages: (conversationId: string) => Promise<DialMessage[]>;
+  /** Read the thread, and which held messages another device deleted. */
+  loadThread: (
+    conversationId: string,
+  ) => Promise<{ messages: DialMessage[]; removed: Set<string> }>;
   /** Increments when a sync applied remote records. See the effect below. */
   remoteVersion: number;
   setActiveId: (id: string) => void;
@@ -418,35 +446,223 @@ export default function ChatView({
    *    regenerate) waits for the next thread switch rather than applying
    *    live; losing a locally streamed answer would be far worse.
    */
-  const appliedRemoteRef = useRef(0);
+  const appliedRemoteRef = useRef("0:0");
+  /** Asks for a read outside the realtime signal — a live stream went quiet. */
+  const [readNonce, setReadNonce] = useState(0);
   useEffect(() => {
-    if (remoteVersion === 0 || busy || pendingWrites > 0 || saveError) return;
-    if (remoteVersion === appliedRemoteRef.current) return;
+    if (remoteVersion === 0 && readNonce === 0) return;
+    if (busy || pendingWrites > 0 || saveError) return;
+    const version = `${remoteVersion}:${readNonce}`;
+    if (version === appliedRemoteRef.current) return;
 
     let cancelled = false;
-    void loadMessages(threadId).catch(() => [] as DialMessage[]).then((fresh) => {
+    void loadThread(threadId)
+      .catch(() => ({ messages: [] as DialMessage[], removed: new Set<string>() }))
+      .then(({ messages: fresh, removed }) => {
       if (cancelled || fresh.length === 0) return;
 
       const local = latestRef.current;
       const stored = new Set(fresh.map((message) => message.id));
-      if (local.some((message) => !stored.has(message.id))) return;
+      // Missing from the server and known to have been there: another device
+      // deleted it (an edit, a regenerate), and that applies here too. Missing
+      // and never written: this device's own unsaved work — keep the screen.
+      if (
+        local.some((message) => !stored.has(message.id) && !removed.has(message.id))
+      ) {
+        return;
+      }
       // A delayed checkpoint has the same message id and is a strict prefix
       // of the answer already on screen. Never let it roll a completed parent
       // device back to the child's partial cloud snapshot.
       if (isStreamingRollback(local, fresh)) return;
       if (fingerprint(fresh) === fingerprint(local)) {
-        appliedRemoteRef.current = remoteVersion;
+        appliedRemoteRef.current = version;
         return;
       }
 
-      appliedRemoteRef.current = remoteVersion;
+      appliedRemoteRef.current = version;
+      latestRef.current = fresh;
       setMessages(fresh);
     });
 
     return () => {
       cancelled = true;
     };
-  }, [remoteVersion, busy, pendingWrites, saveError, loadMessages, threadId, setMessages]);
+  }, [remoteVersion, readNonce, busy, pendingWrites, saveError, loadThread, threadId, setMessages]);
+
+  /* ----------------------------- live mirror ---------------------------- */
+
+  /*
+   * While this device streams, the reply is mirrored to the account's other
+   * devices a few times a second (see lib/live-frames.ts); while another
+   * device streams into this thread, its frames are laid over this
+   * transcript, so the reply appears here as it is written rather than in
+   * five-second checkpoints. The stored copy stays the authority: frames are
+   * a view, and the realtime re-read replaces them once the turn is saved.
+   */
+  const stopAllRef = useRef<() => void>(() => undefined);
+  const busyRef = useRef(busy);
+  useEffect(() => {
+    busyRef.current = busy;
+  });
+
+  // Publishing. One stream per run of `chatBusy`.
+  useEffect(() => {
+    if (!chatBusy) return;
+    const transcript = latestRef.current;
+    // The turn starts at its user message: a send appends one, an edit
+    // replaces one, a regenerate reuses one. Everything from there is live.
+    let base = transcript.length;
+    for (let index = transcript.length - 1; index >= 0; index--) {
+      if (transcript[index].role === "user") {
+        base = index;
+        break;
+      }
+    }
+    const stream = crypto.randomUUID().replace(/-/g, "");
+    let n = 0;
+    let sent: LiveTail | null = null;
+    let keyframe = true;
+    let lastAt = Date.now();
+    let inFlight = false;
+    let chain = Promise.resolve();
+
+    const emit = (done: boolean) => {
+      if (inFlight && !done) return;
+      inFlight = true;
+      chain = chain
+        .then(async () => {
+          if (!hasLivePeers()) return;
+          const tail = tailOf(latestRef.current, base);
+          const now = Date.now();
+          const body: FrameBody | null = keyframe
+            ? { kind: "key", tail }
+            : (diffTail(sent, tail) ??
+              (done || now - lastAt > LIVE_HEARTBEAT_MS ? { kind: "patch", patch: [] } : null));
+          if (!body) return;
+          const delivered = await publishFrame(threadId, {
+            stream,
+            n,
+            body,
+            ...(done ? { done: true } : {}),
+          });
+          // A frame that did not leave changes nothing: the next one is
+          // diffed against what the other devices actually have.
+          if (!delivered) return;
+          n += 1;
+          sent = tail;
+          keyframe = false;
+          lastAt = now;
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          inFlight = false;
+        });
+    };
+
+    const timer = setInterval(() => emit(false), LIVE_FRAME_MS);
+    const unsubscribe = subscribeLive((message) => {
+      if (message.thread !== threadId) return;
+      if (message.t === "want") keyframe = true;
+      if (message.t === "stop" && message.stream === stream) stopAllRef.current();
+    });
+    return () => {
+      clearInterval(timer);
+      unsubscribe();
+      // The last frame carries the finished reply. onFinish publishes its
+      // settled transcript a moment after the status flips, so wait for it.
+      setTimeout(() => emit(true), 150);
+    };
+  }, [chatBusy, threadId]);
+
+  // Receiving.
+  const [remote, setRemote] = useState<RemoteStream | null>(null);
+  const remoteRef = useRef<RemoteStream | null>(null);
+  useEffect(() => {
+    let chain = Promise.resolve();
+    let askedAt = 0;
+    let readFor: string | null = null;
+
+    const settle = (final: RemoteStream | null) => {
+      remoteRef.current = null;
+      setRemote(null);
+      if (!final) return;
+      // Take the finished reply into this transcript now; the stored copy
+      // replaces it when the other device's save is announced.
+      const shown = overlay(latestRef.current, final.tail);
+      if (shown) {
+        latestRef.current = shown;
+        setMessages(shown);
+      }
+    };
+
+    const unsubscribe = subscribeLive((message) => {
+      if (message.t !== "live" || message.thread !== threadId) return;
+      chain = chain
+        .then(async () => {
+          // This device's own run is what this transcript shows.
+          if (busyRef.current) return;
+          const frame = await openFrame(message);
+          if (!frame) return;
+          const current = remoteRef.current;
+          const tail =
+            frame.body.kind === "key"
+              ? frame.body.tail
+              : current && current.stream === frame.stream && frame.n === current.n + 1
+                ? applyFrame(current.tail, frame.body)
+                : null;
+          if (!tail) {
+            // Joined mid-stream, or missed a frame: ask for a whole one.
+            if (Date.now() - askedAt > 1000) {
+              askedAt = Date.now();
+              askForKeyframe(threadId);
+            }
+            return;
+          }
+          const next = { stream: frame.stream, n: frame.n, tail, at: Date.now() };
+          if (frame.done) {
+            settle(next);
+            return;
+          }
+          // The tail belongs after messages this device has not read yet —
+          // the turn's first checkpoint. Read once, then lay it over.
+          if (!overlay(latestRef.current, tail) && readFor !== frame.stream) {
+            readFor = frame.stream;
+            setReadNonce((count) => count + 1);
+          }
+          remoteRef.current = next;
+          setRemote(next);
+        })
+        .catch(() => undefined);
+    });
+
+    // Opening a thread another device is replying in: ask for a whole frame
+    // now rather than waiting to notice a gap, so the reply goes live within
+    // a frame instead of showing its last checkpoint as if it were finished.
+    if (hasLivePeers()) askForKeyframe(threadId);
+
+    // A device that vanished mid-stream sends no `done`. Fall back to what
+    // it last saved.
+    const watchdog = setInterval(() => {
+      const current = remoteRef.current;
+      if (current && Date.now() - current.at > LIVE_STALE_MS) {
+        settle(null);
+        setReadNonce((count) => count + 1);
+      }
+    }, 2000);
+
+    return () => {
+      unsubscribe();
+      clearInterval(watchdog);
+    };
+  }, [threadId, setMessages]);
+
+  /** What the transcript shows: this device's messages, with any live tail over them. */
+  const remoteShown = remote ? overlay(messages, remote.tail) : null;
+  const shown = remoteShown ?? messages;
+  const remoteLive = remoteShown !== null;
+  /** Busy here or elsewhere: either way, this thread is mid-reply. */
+  const occupied = busy || remoteLive;
 
   /* ------------------------------ scroll ------------------------------- */
 
@@ -620,7 +836,7 @@ export default function ChatView({
   useLayoutEffect(() => {
     // An empty workspace has nothing to follow. Scrolling it to its own
     // bottom hid the top half of the welcome state on shorter viewports.
-    if (messages.length === 0) return;
+    if (shown.length === 0) return;
     followLatest();
 
     // The SDK's finished state and the message's final UI do not always land
@@ -631,7 +847,7 @@ export default function ChatView({
       measureAtBottom();
     });
     return () => cancelAnimationFrame(frame);
-  }, [messages, status, followLatest, measureAtBottom]);
+  }, [shown, status, followLatest, measureAtBottom]);
 
   useEffect(() => {
     const transcript = transcriptRef.current;
@@ -878,12 +1094,23 @@ export default function ChatView({
 
   const stopAll = useCallback(() => {
     if (imageAbortRef.current) imageAbortRef.current.abort();
-    else void stop();
+    // The SDK's stop rejects with the abort it just caused; the stream's own
+    // handlers already turned that into an interrupted turn.
+    else void stop().catch(() => undefined);
   }, [stop]);
+  useEffect(() => {
+    stopAllRef.current = stopAll;
+  });
+
+  /** Stop: this device's run, or ask the device that is replying to stop. */
+  const stopAny = useCallback(() => {
+    if (busy) stopAll();
+    else if (remote) askToStop(threadId, remote.stream);
+  }, [busy, remote, stopAll, threadId]);
 
   const send = () => {
     const text = input.trim();
-    if ((!text && attachments.length === 0) || busy) return;
+    if ((!text && attachments.length === 0) || occupied) return;
     if (imageMode) {
       if (!text) {
         setAttachmentError("Describe the image you want to generate.");
@@ -1046,16 +1273,16 @@ export default function ChatView({
 
   /** Esc stops a run — matches the composer's placeholder hint. */
   useEffect(() => {
-    if (!busy) return;
+    if (!occupied) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
-        stopAll();
+        stopAny();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [busy, stopAll]);
+  }, [occupied, stopAny]);
 
   useEffect(
     () => () => {
@@ -1090,10 +1317,10 @@ export default function ChatView({
           <div
             ref={transcriptRef}
             className={`dial-column px-4 pb-5 pt-2 sm:px-7 ${
-              messages.length === 0 ? "h-full" : ""
+              shown.length === 0 ? "h-full" : ""
             }`}
           >
-            {messages.length === 0 && (
+            {shown.length === 0 && (
               <EmptyState
                 settings={settings}
                 models={models}
@@ -1103,23 +1330,23 @@ export default function ChatView({
             )}
 
             <div className="dial-rows">
-              {messages.map((m, idx) => (
+              {shown.map((m, idx) => (
                 <div key={m.id} data-message-index={idx}>
                   <MessageBubble
                     message={m}
                     index={idx}
                     streaming={
-                      chatBusy &&
-                      idx === messages.length - 1 &&
+                      (chatBusy || remoteLive) &&
+                      idx === shown.length - 1 &&
                       m.role === "assistant"
                     }
-                    onEdit={m.role === "user" && !busy ? onBubbleEdit : undefined}
+                    onEdit={m.role === "user" && !occupied ? onBubbleEdit : undefined}
                     onRegenerate={
-                      m.role === "assistant" && !busy ? onBubbleRegenerate : undefined
+                      m.role === "assistant" && !occupied ? onBubbleRegenerate : undefined
                     }
-                    onBranch={m.role === "assistant" && !busy ? onBubbleBranch : undefined}
+                    onBranch={m.role === "assistant" && !occupied ? onBubbleBranch : undefined}
                     onRetryImage={
-                      m.role === "assistant" && !busy ? onBubbleRetryImage : undefined
+                      m.role === "assistant" && !occupied ? onBubbleRetryImage : undefined
                     }
                   />
                 </div>
@@ -1130,7 +1357,7 @@ export default function ChatView({
                   used to sit silent. The same loader the thinking header
                   uses — the same component, at the same offset — so the
                   hand-off when the message arrives is seamless. */}
-              {chatBusy && messages[messages.length - 1]?.role === "user" && (
+              {(chatBusy || remoteLive) && shown[shown.length - 1]?.role === "user" && (
                 <div className="pb-1">
                   <div className="dial-activity-block mb-3">
                     <Activity steps={[]} live since={undefined} canSearch={false} />
@@ -1148,12 +1375,12 @@ export default function ChatView({
           </div>
         </div>
 
-        <MessageNavigator messages={messages} scrollRef={scrollRef} />
+        <MessageNavigator messages={shown} scrollRef={scrollRef} />
       </div>
 
       {/* jump to bottom — only while there's something to catch up with */}
       <AnimatePresence>
-        {!atBottom && messages.length > 0 && (
+        {!atBottom && shown.length > 0 && (
           <motion.button
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
@@ -1173,15 +1400,16 @@ export default function ChatView({
 
       <div
         className="composer-dock dial-column"
-        data-empty={messages.length === 0 ? "true" : undefined}
+        data-empty={shown.length === 0 ? "true" : undefined}
       >
         <Composer
           focusToken={composerFocus}
           input={input}
           setInput={updateComposerInput}
           onSend={send}
-          onStop={stopAll}
-          busy={busy}
+          onStop={stopAny}
+          busy={occupied}
+          elsewhere={remoteLive && !busy}
           imageMode={imageMode}
           imageModel={activeImageModel}
           imageModelIsFallback={selectedImageModel === undefined}

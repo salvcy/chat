@@ -358,21 +358,26 @@ local work:
 3. **Never twice for the same version.** This keeps the dependencies
    from re-reading the instant a stream finishes and racing the `onFinish`
    save that has not landed yet.
-4. **Never when the stored copy is missing a message we are holding.** That
-   means our own save is still in flight and the read is stale.
+4. **Never when the stored copy is missing a message this device never
+   wrote.** That is this device's own unsaved work. A missing message the
+   server *did* hold — `loadThread` reports those as `removed` — was deleted
+   on another device by an edit or a regenerate, and that applies here too.
 
-The cost of guard 3 is that a *truncation* made on another device (an edit or
-a regenerate) waits for a thread switch rather than applying live. Losing a
-locally streamed answer would be far worse.
+Reads are incremental. The store keeps the open thread's decrypted messages
+with the revision each was read at, asks the server only for rows that moved
+since (`GET /v1/threads/:id?since=`; every row still comes back as id, seq and
+revision, which is how a deletion shows), and hands back the *same objects*
+for everything else — so a remote change re-decrypts, re-downloads and
+re-renders only what moved. Decryption and R2 reads run six at a time.
 
 ---
 
 ## 7. Realtime
 
 One **hibernating Durable Object per account** (`worker/src/live.ts`). It
-never sees a record, title, prompt, or blob id — a sync commit sends the
-latest integer revision, and connected devices use it as a hint to run the
-normal authenticated pull. So a dropped socket message cannot lose data; it
+never sees a record, title, prompt, or blob id in the clear — a sync commit
+sends the latest integer revision, and connected devices use it as a hint to
+run the normal authenticated pull. So a dropped socket message cannot lose data; it
 only delays a refresh until the next focus or interval.
 
 Hibernatable sockets keep the connection alive while the object sleeps, so
@@ -383,6 +388,29 @@ registers a connection id as a DO *tag* (tags survive hibernation), pushes
 carry that id, and the fan-out skips it. Without this, a device pushing
 mid-stream woke itself, found the rows its own 1.2 s snapshot had just
 re-dirtied, pushed again, and looped at round-trip speed.
+
+**Live frames mirror a reply while it streams.** Checkpoints reach D1 every
+~5 s, which is what another device used to see: an answer arriving in jumps.
+Now the streaming device also publishes the turn's tail — the messages from
+its user message on — over the same socket about five times a second: a
+keyframe first, then patches that are almost entirely appended text (a few
+hundred bytes each, `lib/live-frames.ts`). Frames are sealed with the vault
+key and bound to their thread, stream and number; the hub reads only the
+envelope (`t`, `thread`) and relays the original string to the account's
+other sockets, storing nothing. A device with the thread open lays the tail
+over its transcript (checking the message before it, `prev`, so a tail is
+never attached to the wrong history) and renders it with the same live
+activity UI. An edit or regenerate moves the tail's `base` back, so a
+truncation made elsewhere also applies live. A receiver that joins mid-stream
+or misses a frame asks for a keyframe (`want`); the other device's Stop is a
+`stop` message; a stream that goes quiet for 12 s without its `done` frame
+falls back to the last checkpoint. The hub announces how many sockets are
+connected (`peers`), and a device alone on its account publishes nothing.
+
+**Settings are live too.** A settings write names the writer's socket and
+whether a shared field changed; the hub tells the other devices, which re-read
+the blob and take everything except their own device fields (open thread,
+rail geometry, the remember-key choice).
 
 **The close handler must not echo reserved codes.** `close()` rejects 1005 and
 1006, and 1006 is exactly what an abrupt disconnect delivers. Throwing in a

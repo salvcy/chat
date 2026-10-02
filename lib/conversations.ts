@@ -448,13 +448,21 @@ export function useConversations({
     [performSave],
   );
 
-  const loadMessages = useCallback(
-    async (conversationId: string): Promise<DialMessage[]> => {
-      if (!enabled) return [];
+  /**
+   * Read a thread, and say which messages this device knew the server held
+   * that it no longer does — what another device deleted, by an edit or a
+   * regenerate. ChatView needs that distinction: a message missing from the
+   * server that was never written there is this device's own unsaved work,
+   * and must not be dropped.
+   */
+  const loadThread = useCallback(
+    async (conversationId: string): Promise<{ messages: DialMessage[]; removed: Set<string> }> => {
+      if (!enabled) return { messages: [], removed: new Set() };
       const opened = await readThread(conversationId);
+      const before = writtenRef.current.get(conversationId);
       if (!opened) {
         writtenRef.current.delete(conversationId);
-        return [];
+        return { messages: [], removed: new Set(before?.keys() ?? []) };
       }
 
       createdRef.current.add(conversationId);
@@ -469,15 +477,26 @@ export function useConversations({
       });
       writtenRef.current.set(conversationId, written);
 
-      // Strip the storage-only columns before handing rows to useChat.
-      return opened.messages.map((row) => {
-        const message = { ...row } as Partial<StoredMessage>;
-        delete message.conversationId;
-        delete message.seq;
-        return message as DialMessage;
-      });
+      const removed = new Set<string>();
+      for (const id of before?.keys() ?? []) if (!written.has(id)) removed.add(id);
+      // The store hands back the same objects for messages that did not
+      // change, so a re-read re-renders only what moved.
+      return { messages: opened.messages, removed };
     },
     [enabled, upsertLocal],
+  );
+
+  const loadMessages = useCallback(
+    async (conversationId: string): Promise<DialMessage[]> =>
+      (await loadThread(conversationId)).messages,
+    [loadThread],
+  );
+
+  /** A thread's messages without opening it — for an export of another one. */
+  const peekMessages = useCallback(
+    async (conversationId: string): Promise<DialMessage[]> =>
+      enabled ? ((await readThread(conversationId, { open: false }))?.messages ?? []) : [],
+    [enabled],
   );
 
   /** Persist a metadata change on a thread the list already knows about. */
@@ -581,6 +600,8 @@ export function useConversations({
     reload,
     saveTurn,
     loadMessages,
+    loadThread,
+    peekMessages,
     rename,
     remove,
     togglePin,

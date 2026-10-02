@@ -461,15 +461,27 @@ export async function pushRemote(
   settings: UserSettings,
   kek: CryptoKey | null,
   accountEncrypted = false,
+  {
+    client = null,
+    notify = false,
+  }: {
+    /** This device's live-socket id, so the notification skips it. */
+    client?: string | null;
+    /** A shared setting changed: tell the account's other devices. */
+    notify?: boolean;
+  } = {},
 ): Promise<void> {
   if (accountEncrypted && !kek) throw new WouldDowngradeError();
 
-  const body = kek
-    ? {
-        settings: await sealRecord(kek, SETTINGS_RECORD_ID, settings),
-        encryption: "password" as const,
-      }
-    : { settings: JSON.stringify(settings) };
+  const body = {
+    ...(kek
+      ? {
+          settings: await sealRecord(kek, SETTINGS_RECORD_ID, settings),
+          encryption: "password" as const,
+        }
+      : { settings: JSON.stringify(settings) }),
+    ...(notify ? { notify: true, ...(client ? { client } : {}) } : {}),
+  };
 
   const response = await fetch("/v1/state", {
     method: "PUT",

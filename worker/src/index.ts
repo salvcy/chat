@@ -411,6 +411,11 @@ async function readThread(
   const url = new URL(request.url);
   const after = intParam(url, "after");
   if (after === null) return fail("after must be a non-negative integer", 400);
+  // Messages at or below this revision come back without their payload: the
+  // caller already holds them. Every row still comes back as (id, seq, rev),
+  // which is how a deletion made elsewhere shows up — as a row that is gone.
+  const since = url.searchParams.has("since") ? intParam(url, "since") : 0;
+  if (since === null) return fail("since must be a non-negative integer", 400);
 
   const thread = await env.DB.prepare(
     `SELECT id, rev, meta, pinned, deleted, created_at, updated_at
@@ -421,13 +426,15 @@ async function readThread(
   if (!thread || thread.deleted === 1) return fail("thread not found", 404);
 
   const { results } = await env.DB.prepare(
-    `SELECT id, seq, rev, payload, updated_at
+    `SELECT id, seq, rev,
+            CASE WHEN rev > ?4 THEN payload END AS payload,
+            updated_at
        FROM message
-      WHERE user_id = ? AND thread_id = ? AND seq >= ?
+      WHERE user_id = ?1 AND thread_id = ?2 AND seq >= ?3
       ORDER BY seq
-      LIMIT ?`,
+      LIMIT ?5`,
   )
-    .bind(userId, threadId, after, MESSAGE_PAGE_SIZE)
+    .bind(userId, threadId, after, since, MESSAGE_PAGE_SIZE)
     .all<MessageRow>();
 
   // Trim to the character budget rather than the row count when payloads are
@@ -770,11 +777,16 @@ async function readDelta(
     threadChanged = hit !== null;
   }
 
+  // A full page is not the end. Reporting the account's revision with it
+  // moved the caller's cursor past every row this page left out, and those
+  // threads were never asked for again; the last row's revision is where the
+  // next page starts.
+  const hasMore = results.length === DELTA_PAGE_SIZE;
   return json({
-    rev: state.rev,
+    rev: hasMore ? results[results.length - 1].rev : state.rev,
     threads: results.map(threadJson),
     threadChanged,
-    hasMore: results.length === DELTA_PAGE_SIZE,
+    hasMore,
   });
 }
 
@@ -964,11 +976,12 @@ async function notifyLive(
   rev: number,
   thread: string | null,
   exclude: string | null,
+  settings = false,
 ): Promise<void> {
   const stub = env.LIVE.get(env.LIVE.idFromName(userId));
   await stub.fetch("https://live.internal/notify", {
     method: "POST",
-    body: JSON.stringify({ rev, thread, exclude }),
+    body: JSON.stringify({ rev, thread, exclude, settings }),
   });
 }
 
@@ -1062,10 +1075,13 @@ async function writeState(
   env: Env,
   userId: string,
   state: StateRow,
+  ctx: ExecutionContext,
 ): Promise<Response> {
   const body = (await readJson(request)) as {
     settings?: unknown;
     encryption?: unknown;
+    client?: unknown;
+    notify?: unknown;
   };
 
   // Checked for presence, not just type. An omitted key used to reach the
@@ -1107,6 +1123,18 @@ async function writeState(
   )
     .bind(body.settings, encryption, Date.now(), userId)
     .run();
+
+  // Tell this account's other devices to re-read their settings. The client
+  // says whether the change is worth it: the open thread and rail geometry
+  // are written on every switch and drag, and belong to the device that made
+  // them.
+  if (body.notify === true) {
+    const client =
+      typeof body.client === "string" && CONNECTION_ID.test(body.client)
+        ? body.client
+        : null;
+    ctx.waitUntil(notifyLive(env, userId, state.rev, null, client, true));
+  }
 
   return json({ ok: true, encryption });
 }
@@ -1295,7 +1323,7 @@ const handler = {
           return await readState(env, userId, await stateFor());
         }
         if (request.method === "PUT") {
-          return await writeState(request, env, userId, await stateFor());
+          return await writeState(request, env, userId, await stateFor(), ctx);
         }
         return fail("method not allowed", 405);
       }

@@ -35,6 +35,7 @@ import {
 import {
   deleteAccount,
   forgetUploads,
+  liveConnectionId,
   readDelta,
   setEncryption,
   setLiveConnectionId,
@@ -42,6 +43,7 @@ import {
   setVaultKey,
   type ConversationMeta,
 } from "./store";
+import { attachLiveSocket, dispatchLive, isLiveMessage, setLivePeers } from "./live";
 import { deriveCredential } from "./auth-client";
 
 /**
@@ -58,6 +60,25 @@ import { deriveCredential } from "./auth-client";
  *    cannot open yet reads as absent, and treating absent as empty would
  *    overwrite a working configuration with defaults.
  */
+
+/**
+ * Settings that belong to the device that set them. They still travel with
+ * the account — a reload restores them — but another device changing them is
+ * no reason to rearrange this one: opening a thread on the phone must not
+ * switch the laptop's, and a drawer's width means nothing to a desktop rail.
+ */
+const DEVICE_FIELDS = [
+  "activeThread",
+  "railWidth",
+  "railCollapsed",
+  "rememberDeviceKey",
+] as const satisfies readonly (keyof UserSettings)[];
+
+function changesShared(patch: Partial<UserSettings>): boolean {
+  return Object.keys(patch).some(
+    (field) => !(DEVICE_FIELDS as readonly string[]).includes(field),
+  );
+}
 
 export type SyncStatus =
   | { state: "offline" }
@@ -150,6 +171,11 @@ export function useAccount({ openThreadRef, onThreads }: AccountOptions) {
   /** The account revision this device has already seen. Never persisted. */
   const revRef = useRef(0);
   const onThreadsRef = useRef(onThreads);
+  /** A shared setting changed here and the next push should say so. */
+  const notifyNextRef = useRef(false);
+  /** Bumped by every local settings edit, so a remote read can tell it raced one. */
+  const localEditsRef = useRef(0);
+  const refreshSettingsRef = useRef<() => Promise<void>>(async () => undefined);
   /** Key derived during signup while an optional OTP gate is still pending. */
   const pendingSignupKeyRef = useRef<CryptoKey | null>(null);
 
@@ -215,19 +241,27 @@ export function useAccount({ openThreadRef, onThreads }: AccountOptions) {
     runningRef.current = true;
     setStatus({ state: "syncing" });
     try {
-      const delta = await readDelta(revRef.current, openThreadRef.current);
-      // A local commit can land while this read is in flight. Never let the
-      // older response move the cursor backwards and make our own checkpoint
-      // look like a remote edit on the next refresh.
-      revRef.current = Math.max(revRef.current, delta.rev);
-      if (delta.threads.length > 0 || delta.removed.length > 0) {
-        onThreadsRef.current?.(delta.threads, delta.removed);
+      let threadChanged = false;
+      // Page until the server says it is done: a full page ends at its last
+      // row's revision, not the account's.
+      for (let page = 0; page < 50; page++) {
+        const since = revRef.current;
+        const delta = await readDelta(since, openThreadRef.current);
+        // A local commit can land while this read is in flight. Never let the
+        // older response move the cursor backwards and make our own checkpoint
+        // look like a remote edit on the next refresh.
+        revRef.current = Math.max(revRef.current, delta.rev);
+        if (delta.threads.length > 0 || delta.removed.length > 0) {
+          onThreadsRef.current?.(delta.threads, delta.removed);
+        }
+        threadChanged ||= delta.threadChanged;
+        if (!delta.hasMore || delta.rev <= since) break;
       }
       // ChatView watches this to re-read the open transcript. Bumping it for
       // every delta would make an unrelated thread's write re-read the one in
       // front of the reader, which is exactly the churn the scoped delta
       // exists to avoid.
-      if (delta.threadChanged) setPulled((count) => count + 1);
+      if (threadChanged) setPulled((count) => count + 1);
       setStatus({ state: "idle", at: Date.now() });
     } catch (error) {
       setStatus({
@@ -252,6 +286,49 @@ export function useAccount({ openThreadRef, onThreads }: AccountOptions) {
     if (!userRef.current) return;
     setUsage(await fetchUsage());
   }, []);
+
+  /**
+   * Another device changed a shared setting: read the blob again and take
+   * everything but this device's own fields.
+   *
+   * This device's pending writes land first, and a local edit made while the
+   * read was in flight wins — its own push is already on the way and will
+   * notify the other device in turn.
+   */
+  const refreshSettings = useCallback(async () => {
+    if (!userRef.current || lockedRef.current) return;
+    const edits = localEditsRef.current;
+    await pushChainRef.current;
+    let remote;
+    try {
+      remote = await fetchRemote(kekRef.current);
+    } catch {
+      return;
+    }
+    if (!remote.settings || edits !== localEditsRef.current) return;
+
+    const local = settingsRef.current;
+    const next: UserSettings = { ...remote.settings };
+    for (const field of DEVICE_FIELDS) {
+      (next as Record<string, unknown>)[field] = local[field];
+    }
+    if (JSON.stringify(next) === JSON.stringify(local)) return;
+
+    settingsRef.current = next;
+    setSettings(next);
+    writeLocal(next);
+    if (next.openrouterKey !== local.openrouterKey) {
+      setCredential(
+        next.openrouterKey
+          ? { key: next.openrouterKey, source: "manual", label: null, connectedAt: Date.now() }
+          : null,
+      );
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshSettingsRef.current = refreshSettings;
+  }, [refreshSettings]);
 
   /* ------------------------- adopt a signed-in user --------------------- */
 
@@ -446,16 +523,31 @@ export function useAccount({ openThreadRef, onThreads }: AccountOptions) {
       socket = new WebSocket(
         `${protocol}//${window.location.host}/v1/live?c=${connection}`,
       );
-      socket.onopen = () => {
+      const opened = socket;
+      opened.onopen = () => {
         retry = 0;
         setLiveConnectionId(connection);
+        attachLiveSocket(opened);
       };
-      socket.onmessage = (event) => {
+      opened.onmessage = (event) => {
         try {
           const payload = JSON.parse(String(event.data)) as {
+            t?: unknown;
+            n?: unknown;
             rev?: unknown;
             thread?: unknown;
+            settings?: unknown;
           };
+          if (payload.t === "peers" && typeof payload.n === "number") {
+            setLivePeers(payload.n);
+            return;
+          }
+          // Another device's live stream, or a request for this one's.
+          if (isLiveMessage(payload)) {
+            dispatchLive(payload);
+            return;
+          }
+          if (payload.settings === true) void refreshSettingsRef.current();
           // A revision we already hold is the hub catching a device up on
           // connect, or a duplicate fan-out. Either way there is nothing to
           // ask for, and asking anyway would spend a request to be told so.
@@ -466,10 +558,11 @@ export function useAccount({ openThreadRef, onThreads }: AccountOptions) {
           // Forward compatibility: unknown hub messages are ignored.
         }
       };
-      socket.onerror = () => socket?.close();
-      socket.onclose = () => {
-        socket = null;
+      opened.onerror = () => opened.close();
+      opened.onclose = () => {
+        if (socket === opened) socket = null;
         setLiveConnectionId(null);
+        attachLiveSocket(null);
         schedule();
       };
     };
@@ -486,6 +579,7 @@ export function useAccount({ openThreadRef, onThreads }: AccountOptions) {
     return () => {
       stopped = true;
       setLiveConnectionId(null);
+      attachLiveSocket(null);
       if (timer !== null) clearTimeout(timer);
       window.removeEventListener("online", reconnect);
       window.removeEventListener("focus", reconnect);
@@ -506,6 +600,9 @@ export function useAccount({ openThreadRef, onThreads }: AccountOptions) {
         void forgetKey(current.id).then(() => setDeviceKeyStored(false));
       }
     }
+
+    localEditsRef.current += 1;
+    if (changesShared(patch)) notifyNextRef.current = true;
 
     setSettings((current) => {
       const next = { ...current, ...patch };
@@ -530,15 +627,18 @@ export function useAccount({ openThreadRef, onThreads }: AccountOptions) {
 
       if (userRef.current) {
         pushChainRef.current = pushChainRef.current
-          .then(() =>
-            pushRemote(
+          .then(() => {
+            const notify = notifyNextRef.current;
+            notifyNextRef.current = false;
+            return pushRemote(
               // Read the ref, not `next`: by the time this link of the chain
               // runs, a later change may already have superseded it.
               settingsRef.current,
               kekRef.current,
               encryptedRef.current,
-            ),
-          )
+              { client: liveConnectionId(), notify },
+            );
+          })
           .catch(() => {
             // Kept locally; the next successful save carries it up.
           });

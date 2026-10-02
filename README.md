@@ -8,7 +8,8 @@ vision, PDFs, and image generation run directly from the browser against
 OpenRouter with the user’s own key. Cloudflare provides the account layer: a
 Worker with Better Auth, D1 as the authoritative chat store, R2 for encrypted
 images/attachments and oversized messages, and hibernating Durable Objects for
-revision-only realtime updates.
+realtime updates — revision hints, plus sealed live frames that mirror a reply
+to the account's other devices while it streams.
 
 Live: [chat.belayet.app](https://chat.belayet.app)
 
@@ -26,8 +27,9 @@ Live: [chat.belayet.app](https://chat.belayet.app)
   IndexedDB by default so refreshes stay unlocked. A synced “lock on exit” mode
   keeps it in memory only and requires the password after a refresh.
 - **Minimal infrastructure.** Static assets bypass the Worker. Streaming saves
-  are checkpointed, serialized per thread, and realtime sockets carry only a
-  revision and random thread id.
+  are checkpointed, serialized per thread, and realtime sockets carry a
+  revision and random thread id — or, while a reply streams, frames sealed
+  with the vault key that the hub relays without reading or storing.
 - **Monochrome interface.** State is expressed through fill and inversion
   rather than accent colors; restrained syntax highlighting is the functional
   exception. Surface structure — hairlines, layered shadows, gliding

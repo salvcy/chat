@@ -28,6 +28,7 @@ export default function Composer({
   onSend,
   onStop,
   busy,
+  elsewhere = false,
   imageMode,
   imageModel,
   imageModelIsFallback,
@@ -48,6 +49,8 @@ export default function Composer({
   onSend: () => void;
   onStop: () => void;
   busy: boolean;
+  /** The reply in progress is being written on another device. */
+  elsewhere?: boolean;
   imageMode: boolean;
   imageModel: string;
   /** True when the chat model can't emit images, so @image uses a stand-in. */
@@ -219,9 +222,11 @@ export default function Composer({
           }}
           placeholder={
             busy
-              ? imageMode
-                ? "Rendering — Esc to stop"
-                : "Generating — Esc to stop"
+              ? elsewhere
+                ? "Replying on another device — Esc to stop"
+                : imageMode
+                  ? "Rendering — Esc to stop"
+                  : "Generating — Esc to stop"
               : imageMode
                 ? "Describe an image…"
                 : "Ask anything…"

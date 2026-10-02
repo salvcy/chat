@@ -90,19 +90,6 @@ function dataUrlBytes(url: string): Uint8Array {
   return bytes;
 }
 
-function toDataUrl(bytes: Uint8Array, mediaType: string): string {
-  // Spreading a multi-megabyte Uint8Array over String.fromCharCode overflows
-  // the call stack. Chunking is both faster and safe on Safari.
-  const chunks: string[] = [];
-  const size = 0x8000;
-  for (let offset = 0; offset < bytes.length; offset += size) {
-    chunks.push(
-      String.fromCharCode(...bytes.subarray(offset, offset + size)),
-    );
-  }
-  return `data:${mediaType};base64,${btoa(chunks.join(""))}`;
-}
-
 async function pack(
   blobId: string,
   plaintext: Uint8Array,
@@ -217,13 +204,41 @@ export async function downloadPayloadBlob(
   return new TextDecoder().decode(await unpack(blobId, packed, null));
 }
 
-/** Encrypt (when possible) and upload one local data URL. PUT is idempotent. */
+/** The bytes behind a local `data:` or `blob:` URL. */
+async function localBytes(url: string): Promise<Uint8Array> {
+  if (url.startsWith("blob:")) {
+    const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
+    if (bytes.length > MAX_PLAINTEXT_BYTES) {
+      throw new BlobTransportError("image exceeded the 10 MB sync limit", 413);
+    }
+    return bytes;
+  }
+  return dataUrlBytes(url);
+}
+
+/**
+ * A `blob:` URL as a `data:` URL, for anything that leaves this tab — a
+ * request to OpenRouter, an export. Object URLs mean nothing anywhere else.
+ * Anything else comes back unchanged.
+ */
+export async function inlineUrl(url: string): Promise<string> {
+  if (!url.startsWith("blob:")) return url;
+  const blob = await (await fetch(url)).blob();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("could not read an attachment"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+/** Encrypt (when possible) and upload one local data or object URL. PUT is idempotent. */
 export async function uploadBlob(
   blobId: string,
-  dataUrl: string,
+  url: string,
   key: CryptoKey | null,
 ): Promise<UploadedBlob> {
-  const packed = await pack(blobId, dataUrlBytes(dataUrl), key);
+  const packed = await pack(blobId, await localBytes(url), key);
   const response = await fetch(`${API}/${blobPath(blobId)}`, {
     method: "PUT",
     credentials: "same-origin",
@@ -249,20 +264,104 @@ async function fetchPacked(blobId: string, publicUrl?: string): Promise<Response
   });
 }
 
-/** Download, authenticate, and reconstruct a browser-displayable data URL. */
-export async function downloadBlob(
+/* ------------------------------ display cache ----------------------------- */
+
+/**
+ * Downloaded images and documents, held as object URLs.
+ *
+ * These used to come back as `data:` URLs: the bytes base64'd into a
+ * JavaScript string (4/3 of the size), which the `<img>` then copied into its
+ * own attribute — about 2.7 times the file held per image, and re-downloaded
+ * and decrypted every time its thread was opened. A `Blob` holds the bytes
+ * once, outside the JavaScript heap, and the URL handed around is fifty
+ * characters.
+ *
+ * Kept by blob id and the message revision it was read at (a regenerated
+ * image reuses its id), within a byte budget, least recently used first —
+ * except the open thread's, which are on screen and never revoked.
+ */
+type Held = { url: string; bytes: number; thread: string; used: number };
+const held = new Map<string, Held>();
+const downloading = new Map<string, Promise<string | null>>();
+let heldBytes = 0;
+let pinnedThread: string | null = null;
+
+/**
+ * How much of other threads' media to keep for an instant reopen: 64MB on a
+ * machine reporting 8GB or more, 24MB anywhere else — a phone, or a browser
+ * that does not say (`deviceMemory` is Chromium-only).
+ */
+function heldBudget(): number {
+  const memory = (globalThis.navigator as { deviceMemory?: number } | undefined)?.deviceMemory;
+  return ((memory ?? 0) >= 8 ? 64 : 24) * 1024 * 1024;
+}
+
+function trimHeld(): void {
+  const budget = heldBudget();
+  if (heldBytes <= budget) return;
+  const oldest = [...held.entries()].sort((a, b) => a[1].used - b[1].used);
+  for (const [key, entry] of oldest) {
+    if (heldBytes <= budget) break;
+    if (entry.thread === pinnedThread) continue;
+    URL.revokeObjectURL(entry.url);
+    held.delete(key);
+    heldBytes -= entry.bytes;
+  }
+}
+
+/** The thread on screen: its blobs stay, whatever the budget says. */
+export function pinBlobThread(thread: string | null): void {
+  pinnedThread = thread;
+  trimHeld();
+}
+
+/** Revoke everything — signing out. */
+export function forgetDisplayedBlobs(): void {
+  for (const entry of held.values()) URL.revokeObjectURL(entry.url);
+  held.clear();
+  heldBytes = 0;
+}
+
+/** Download, authenticate and decrypt a blob; an object URL to display it. */
+export async function displayBlob(
   blobId: string,
   mediaType: string,
   key: CryptoKey | null,
-  publicUrl?: string,
+  publicUrl: string | undefined,
+  version: number,
 ): Promise<string | null> {
-  const response = await fetchPacked(blobId, publicUrl);
-  if (response.status === 404) return null;
-  if (!response.ok) throw await errorFrom(response);
-  const packed = new Uint8Array(await response.arrayBuffer());
-  const plaintext = await unpack(blobId, packed, key);
-  if (plaintext.length > MAX_PLAINTEXT_BYTES) {
-    throw new BlobTransportError("image exceeded the 10 MB sync limit", 413);
+  const cacheKey = `${blobId}#${version}`;
+  const hit = held.get(cacheKey);
+  if (hit) {
+    hit.used = Date.now();
+    return hit.url;
   }
-  return toDataUrl(plaintext, mediaType);
+  const running = downloading.get(cacheKey);
+  if (running) return running;
+
+  const task = (async () => {
+    const response = await fetchPacked(blobId, publicUrl);
+    if (response.status === 404) return null;
+    if (!response.ok) throw await errorFrom(response);
+    const plaintext = await unpack(blobId, new Uint8Array(await response.arrayBuffer()), key);
+    if (plaintext.length > MAX_PLAINTEXT_BYTES) {
+      throw new BlobTransportError("image exceeded the 10 MB sync limit", 413);
+    }
+    const url = URL.createObjectURL(new Blob([arrayBuffer(plaintext)], { type: mediaType }));
+    held.set(cacheKey, {
+      url,
+      bytes: plaintext.length,
+      thread: blobId.split("/")[0],
+      used: Date.now(),
+    });
+    heldBytes += plaintext.length;
+    trimHeld();
+    return url;
+  })();
+  downloading.set(cacheKey, task);
+  try {
+    return await task;
+  } finally {
+    downloading.delete(cacheKey);
+  }
 }
