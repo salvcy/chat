@@ -69,7 +69,15 @@ export class SyncHub extends DurableObject<Env> {
         JSON.stringify({ rev: Number.isSafeInteger(rev) ? rev : 0, thread: null }),
       );
       this.announcePeers();
-      return new Response(null, { status: 101, webSocket: client });
+      // The desktop app offered `chat.v1` alongside its token (index.ts,
+      // LIVE_PROTOCOL); a browser drops a handshake whose offer goes
+      // unanswered. Only ever this one fixed value — the token is not echoed.
+      const protocol = url.searchParams.get("p") === "chat.v1" ? "chat.v1" : null;
+      return new Response(null, {
+        status: 101,
+        webSocket: client,
+        headers: protocol ? { "Sec-WebSocket-Protocol": protocol } : undefined,
+      });
     }
 
     if (url.pathname === "/notify" && request.method === "POST") {

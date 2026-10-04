@@ -505,8 +505,19 @@ PDF does not.
 
 ## 10. Worker API
 
-All under `/v1/` on the same origin as the app — no CORS preflight, no
+All under `/v1/` on the same origin as the website — no CORS preflight, no
 cross-site cookie configuration.
+
+The one cross-origin caller is the desktop app (`../Tauri`), whose bundled
+copy of this UI runs at `tauri://localhost` (`http://tauri.localhost` on
+Windows). Those origins get CORS on every route — `Authorization` and
+`Content-Type` allowed, `set-auth-token` exposed, credentials **never**
+allowed — and authenticate with a bearer token instead of the cookie: Better
+Auth's `bearer` plugin issues the signed session token on sign-in and accepts
+it as `Authorization: Bearer` (signature required). A WebSocket handshake
+cannot carry that header, so `/v1/live` also accepts the token as a
+`bearer.<base64url>` subprotocol offered next to `chat.v1`, and the hub
+answers `chat.v1`. Sign-in's CSRF check trusts the same origins.
 
 | Route | Method | Notes |
 |---|---|---|
@@ -630,6 +641,9 @@ privacy policy does.
 
 ## 13. Build, deploy, operate
 
+From `web/` (the desktop app in `../Tauri` bundles `out/` into its own
+build; see its README):
+
 ```bash
 npx next build          # static export to ./out
 npx wrangler deploy     # Worker + assets, one origin
@@ -649,10 +663,13 @@ public by design and lives in `wrangler.jsonc` vars.
 at all. The OpenRouter key belongs to the user and lives in their browser.
 
 Security headers ship in `public/_headers` (a static export has no
-`headers()`). The load-bearing directive is `connect-src 'self'
+`headers()`). The load-bearing directive is `connect-src 'self' blob:
 https://openrouter.ai`: the user's key lives in the browser, so the realistic
 threat is script injection exfiltrating it, and exfiltration needs a
-destination.
+destination. `blob:` is there because media is held as object URLs and read
+back with `fetch` (`'self'` does not cover them); it is not a destination.
+The desktop app's CSP (`../Tauri/src-tauri/tauri.conf.json`) is this one plus
+the API's origin and Tauri's IPC.
 
 ---
 
@@ -660,6 +677,9 @@ destination.
 
 - **No rate limit outside `/v1/auth` per unit time.** The data routes are
   bounded per request and per account per day (§8.1), but not per second.
+- **The desktop app's UI updates with the app, not with a deploy.** It is a
+  bundled copy, so an API change must stay compatible with installed builds
+  until they are replaced. There is no auto-updater yet.
 - **There is no offline mode, at all.** This is a deliberate consequence of
   §3, not an oversight, but it is a real capability loss: no network means no
   app. Inference is browser-to-OpenRouter direct, so a Worker outage stops

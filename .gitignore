@@ -1,0 +1,4 @@
+.DS_Store
+
+# Google OAuth client credentials — never commit, wherever one lands.
+client_secret_*.json

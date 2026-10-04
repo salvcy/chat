@@ -4,6 +4,7 @@ import {
   createOpenRouter,
   type OpenRouterProvider,
 } from "@openrouter/ai-sdk-provider";
+import { siteOrigin } from "./api";
 
 /**
  * The browser's OpenRouter provider — the replacement for the server-only
@@ -37,7 +38,7 @@ export function providerFor(key: string): OpenRouterProvider {
     // Attribution on the OpenRouter dashboard. `HTTP-Referer` is a custom
     // header name (not the browser's protected `Referer`), so setting it
     // from a page is allowed and it survives the preflight allow-list.
-    appUrl: window.location.origin,
+    appUrl: siteOrigin(),
   });
   cached = { key, provider };
   return provider;
@@ -57,7 +58,7 @@ export const OPENROUTER_API = "https://openrouter.ai/api/v1";
 export function authHeaders(key: string): Record<string, string> {
   return {
     Authorization: `Bearer ${key}`,
-    "HTTP-Referer": window.location.origin,
+    "HTTP-Referer": siteOrigin(),
     "X-Title": APP_NAME,
   };
 }

@@ -1,0 +1,38 @@
+[package]
+name = "chat"
+version = "0.2.0"
+description = "Chat for the desktop: the chat.belayet.app UI, bundled, on the same account"
+edition = "2021"
+publish = false
+
+# The logic lives in the library and `main.rs` only calls it — Tauri's layout.
+# The `_lib` suffix keeps the two from sharing a name, which breaks builds on
+# Windows (rust-lang/cargo#8519). Desktop only, so the library is only ever
+# linked into the binary; iOS and Android would need "staticlib" and "cdylib".
+[lib]
+name = "chat_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7.1", features = [] }
+
+[dependencies]
+tauri = { version = "2.12.1", features = [] }
+tauri-plugin-deep-link = "2.6.1"
+tauri-plugin-opener = "2.7.0"
+# `deep-link`: a link that launches a second instance (Windows, Linux) is
+# handed to the running one instead.
+tauri-plugin-single-instance = { version = "2.5.2", features = ["deep-link"] }
+tauri-plugin-window-state = "2.5.0"
+# The session token's home: the macOS Keychain (Credential Manager on Windows).
+keyring = "4.2.0"
+serde_json = "1"
+
+# Tauri's recommended release settings: the shell does almost no work of its
+# own, so size wins over speed.
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

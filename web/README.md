@@ -77,7 +77,9 @@ the prompts and files sent to them.
 
 ## Local development
 
-Requirements: Node 24+ and Wrangler 4.
+Requirements: Node 24+ and Wrangler 4. Every command in this file runs from
+`web/`. The desktop app ([`../Tauri`](../Tauri)) bundles this UI — the same
+export, switching to desktop mode when the app announces itself.
 
 ```bash
 npm install

@@ -10,6 +10,13 @@
 # *origins* is still worth having; treat the inline allowance as the reason
 # connect-src has to be strict rather than as a reason to relax it.
 #
+# `blob:` is in connect-src because images and attachments are held as object
+# URLs (lib/blob.ts) and read back as bytes with fetch() whenever they leave
+# the tab — a follow-up turn, an export, an image reference. `'self'` does not
+# cover blob: URLs, so without it every one of those failed in production
+# while working everywhere the headers were not applied. A blob: URL is local
+# to this page; it is not a destination anything can be sent to.
+#
 # NOTE FOR THE R2 CUSTOM DOMAIN: serving ciphertext straight from R2 instead
 # of through the Worker needs its origin added to connect-src as well as
 # BLOB_PUBLIC_ORIGIN being set. `downloadBlob` fetches that URL with
@@ -18,7 +25,7 @@
 # optimisation would look like it had simply not worked.
 
 /*
-  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://openrouter.ai; form-action 'none'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' blob: https://openrouter.ai; form-action 'none'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'
   Referrer-Policy: strict-origin-when-cross-origin
   X-Content-Type-Options: nosniff
   Cross-Origin-Opener-Policy: same-origin

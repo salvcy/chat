@@ -1,6 +1,7 @@
 "use client";
 
 import type { UIMessage } from "ai";
+import { apiFetch } from "./api";
 import {
   displayBlob,
   downloadPayloadBlob,
@@ -199,9 +200,8 @@ export class StoreError extends Error {
 }
 
 async function call(path: string, init?: RequestInit): Promise<unknown> {
-  const response = await fetch(`${API}${path}`, {
+  const response = await apiFetch(`${API}${path}`, {
     ...init,
-    credentials: "same-origin",
     headers: init?.body
       ? { "Content-Type": "application/json", ...init?.headers }
       : init?.headers,

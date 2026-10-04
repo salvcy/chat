@@ -7,6 +7,11 @@ Accounts required, end-to-end encrypted, cloud-first. This file locks the
 stack and the design system — don't deviate without the user explicitly
 approving it.
 
+This project lives in `web/` of the repository. Every path below is relative
+to `web/` and every command runs from it, `npx wrangler deploy` included. The
+desktop app is `../Tauri`, a native shell around this site with its own law
+(`../Tauri/CLAUDE.md`); the repository-wide rules are in `../CLAUDE.md`.
+
 ## Stack (locked)
 
 - **Next.js 16** (App Router, Turbopack) + **React 19** + **TypeScript ^5**
@@ -109,6 +114,16 @@ with it) and nothing redirects from it. Two strings still say
 and they are labels, not addresses: every existing credential and vault key
 was derived with them, so they never change with the domain.
 
+- **The desktop app is the one cross-origin caller.** Its bundled UI calls
+  this API from `tauri://localhost` / `http://tauri.localhost` (`appOrigins`
+  in `auth.ts`). Those origins, and only those, get CORS — never
+  `Access-Control-Allow-Credentials`, so no cookie-authorised response is
+  readable cross-origin whatever an origin claims. The app's session is a
+  bearer token (Better Auth's `bearer` plugin, signature required); the live
+  socket takes it as a `bearer.<base64url>` subprotocol and answers `chat.v1`.
+  Bearer requests have no cookie cache, so each costs the indexed session
+  read the cookie path saves. `EXTRA_APP_ORIGINS` adds origins for local
+  testing only.
 - **`thread` and `message` are typed, and the structure is in the clear.**
   `thread_id`, `seq`, `pinned`, `updated_at` and `deleted` are plain columns
   because sorting and grouping cannot be done through a seal; `meta` and
@@ -256,6 +271,9 @@ are the only places those values are consumed.
   and live frames strip it. The upload memo in `store.ts` keeps R2
   references only — it used to pin a copy of every image uploaded in the
   session until sign-out.
+- `lib/api.ts` — where the API is and how a request proves who sent it:
+  `apiFetch`, `openLiveSocket`, the desktop token, `OfflineError`. See "The
+  desktop app" below.
 - `lib/live.ts` / `lib/live-frames.ts` — device-to-device live frames over
   the account's socket: publishing, receiving, sealing, and the pure
   diff/patch/overlay logic (tested in `tests/live-frames.test.ts`). See the
@@ -469,8 +487,68 @@ invoking a Worker.
   palette's keyboard cursor).
 - `components/ui/Loader.tsx` — `PixelGrid`, `Elapsed`, and the two together.
 
+### The desktop app (`../Tauri`)
+
+The desktop app ships **this UI, bundled**: `npm run build` here produces
+`out/`, the app embeds it and serves it from `tauri://localhost`
+(`http://tauri.localhost` on Windows). Nothing is forked — the same export
+runs on the web and in the app, and switches mode at runtime.
+
+- **`lib/api.ts` is the switch.** The app's native side defines
+  `window.__CHAT_DESKTOP__` (`{ api, platform }`) before any script runs; that
+  definition, and nothing else, is desktop mode. **Every API call goes through
+  `apiFetch`**, never a bare `fetch("/v1/…")` — on the web it is a relative
+  same-origin request with the cookie; in the app it is absolute against
+  `desktop.api` with `Authorization: Bearer`. `openLiveSocket` does the same
+  for the live socket, offering the token as a subprotocol. `siteOrigin()`
+  is the site's address wherever `location.origin` used to stand for it
+  (OpenRouter attribution, the PKCE callback).
+- **Read `desktop` in effects and handlers, never during render.** The export
+  is prerendered where `window` does not exist; a render that differs by mode
+  does not hydrate. Layout differences are CSS keyed on `data-shell`, which the
+  boot script sets pre-paint.
+- **The session token lives in the macOS Keychain**, behind the app's own
+  commands (`session_token` / `set_session_token` / `clear_session_token`),
+  never in web storage. It arrives in the `set-auth-token` header Better Auth's
+  bearer plugin adds to a sign-in response; `apiFetch` stores whatever it is
+  handed, `signOut`, account deletion and a definite "no session" clear it.
+- **OpenRouter connect leaves the app.** `beginConnect` opens the default
+  browser; OpenRouter returns to `/connect/desktop` on the website
+  (`app/connect/desktop/Relay.tsx`), which opens
+  `belayet-chat://openrouter?code=…`; the app holds the code until KeyGate takes
+  it (`take_openrouter_code`). The verifier never leaves the app window, so a
+  code arriving any other way exchanges for nothing.
+- **Google sign-in is refused in the app**: its redirect would finish in the
+  browser and set the cookie there.
+- **The window has no title bar on macOS.** The traffic lights sit over the
+  page at a measured position, and the page leaves room in its own top rows —
+  the rail's brand row, the chat strip when the rail is closed, the front
+  door's header — all centred on one line (`globals.css`, "window controls",
+  and `TRAFFIC_LIGHTS` in `../Tauri/src-tauri/src/lib.rs`; change together).
+  `data-tauri-drag-region` marks what moves the window (`deep` on rows whose
+  buttons stay clickable); it is inert in a browser.
+- **Unreachable is not signed out.** `getSession` throws `OfflineError` when
+  the request never reached the server, and the session restore retries
+  (backoff, and on `online`) behind a "Can't reach the server" note instead of
+  showing the sign-in form. A web page without network never loaded; the app
+  opens without one.
+
+What the app depends on here, mirrored in `../Tauri`: the scheme name
+(`DESKTOP_SCHEME` in `lib/pkce.ts` and `tauri.conf.json`), the relay path, the
+command names, the `openrouter-code` event, the `data-shell` /
+`data-fullscreen` attributes, and the CSP — the app's (`tauri.conf.json`)
+mirrors `public/_headers` plus the API's origin.
+
 ### Rules learned the hard way
 
+- **`'self'` does not cover `blob:` URLs, and local testing hid it.** Media
+  became object URLs (phase 18) and is read back with `fetch(blob:)` whenever
+  it leaves the tab — a follow-up turn in a thread with an image, a JSON
+  export, an image reference. Production's `connect-src 'self'` blocked every
+  one: the follow-up failed with "No response was returned" while images still
+  displayed (`img-src` had `blob:`). The two-tab tests ran behind a proxy that
+  sent no CSP, so they passed. `connect-src` now lists `blob:`, and the test
+  proxy applies `public/_headers` — test under the headers production sends.
 - **R2 has no per-prefix quota, so the total has to be carried in D1.**
   `blob_bytes` / `blob_count` on `user_state` are maintained on every put and
   delete. The put path subtracts the *previous* object's size first: blob ids
@@ -931,8 +1009,12 @@ invoking a Worker.
   placeholder hand-off) · **18 devices ✓** (live frames mirror a streaming
   reply to the account's other devices, remote stop, live edits and
   regenerates, live settings, incremental thread reads, object-URL media with
-  a display cache, the delta paging fix). Next product work: sub-agent
-  delegation and per-thread temperature (the wire already carries it).
+  a display cache, the delta paging fix) · **19 desktop ✓** (the repository
+  split into `web/` and `../Tauri`; a native macOS app bundling this UI, with
+  CORS and bearer sessions on the Worker, the token in the Keychain, OpenRouter
+  connect through a deep link, and window controls set into the UI's own top
+  rows; the `blob:` CSP fix). Next product work: sub-agent delegation and
+  per-thread temperature (the wire already carries it).
 ## Design system (the law)
 
 **Strictly black, white, neutral gray interface chrome — both themes, no
@@ -1034,7 +1116,9 @@ comment.
   other web storage can hold one safely), and the Cache API copy of
   OpenRouter's public model catalog. Adding a fourth
   needs a reason that survives the question "what happens when this disagrees
-  with the server?"
+  with the server?" The desktop app keeps the same three in its own origin and
+  one more thing outside the browser altogether: the session token, in the
+  Keychain — a credential, not a copy of anything the server holds.
 - **Never widen `run_worker_first` beyond `/v1/*`.** Static asset requests
   are free and do not invoke the Worker. Widening that glob puts every page
   load onto the billable path.

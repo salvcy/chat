@@ -406,7 +406,14 @@ export default function Home() {
   if (!account.ready) {
     return (
       <FrontDoor>
-        <Loader timer={false} className="opacity-80" />
+        <div className="flex flex-col items-center gap-3">
+          <Loader timer={false} className="opacity-80" />
+          {account.unreachable && (
+            <p className="text-center text-[12.5px] text-muted">
+              Can’t reach the server. Retrying when you’re back online.
+            </p>
+          )}
+        </div>
       </FrontDoor>
     );
   }
@@ -491,7 +498,9 @@ export default function Home() {
   );
 
   return (
-    <div className="app-shell flex h-[100dvh] overflow-hidden">
+    // In the desktop app the bare page around the window moves the window
+    // (Tauri's drag region; inert in a browser), as a title bar would.
+    <div className="app-shell flex h-[100dvh] overflow-hidden" data-tauri-drag-region>
       {/* Width comes from --dial-rail-w (restored pre-paint by the boot
           script, updated directly by RailHandle) so dragging never re-renders
           the tree. `.dial-rail` is what the collapsed class hides. The rail
@@ -501,7 +510,9 @@ export default function Home() {
         className="dial-rail relative hidden h-full shrink-0 overflow-hidden md:block"
         style={{ width: "var(--dial-rail-w)" }}
       >
-        <div className="h-full py-2 pl-2">{sidebar}</div>
+        <div className="dial-rail-frame h-full py-2 pl-2" data-tauri-drag-region>
+          {sidebar}
+        </div>
         <RailHandle
           onCommit={(railWidth) => account.updateSettings({ railWidth })}
         />
@@ -525,7 +536,7 @@ export default function Home() {
               onClick={() => setSidebarOpen(false)}
             />
             <motion.div
-              className="absolute inset-y-0 left-0 w-[300px] max-w-[86vw] rounded-r-window bg-chrome py-2 pl-2 shadow-overlay"
+              className="dial-rail-frame absolute inset-y-0 left-0 w-[300px] max-w-[86vw] rounded-r-window bg-chrome py-2 pl-2 shadow-overlay"
               initial={{ x: "-100%" }}
               animate={{ x: 0 }}
               exit={{ x: "-100%" }}

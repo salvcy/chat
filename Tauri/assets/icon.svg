@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 20 20">
+  <!-- The brand mark (web/public/brand/chat-mark-v2.svg) edge to edge, in its light-scheme colours: Windows and Linux. -->
+  <rect width="20" height="20" rx="5" fill="#111111"/>
+  <g fill="#f2f2f2">
+    <rect x="5" y="8.5" width="2" height="5" rx="1"/>
+    <rect x="9" y="5.5" width="2" height="8" rx="1"/>
+    <rect x="13" y="9.5" width="2" height="4" rx="1"/>
+  </g>
+</svg>

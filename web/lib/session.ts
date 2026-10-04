@@ -45,6 +45,7 @@ import {
 } from "./store";
 import { attachLiveSocket, dispatchLive, isLiveMessage, setLivePeers } from "./live";
 import { deriveCredential } from "./auth-client";
+import { OfflineError, forgetSession, openLiveSocket } from "./api";
 
 /**
  * The signed-in account: who you are, what you've configured, and keeping
@@ -116,6 +117,8 @@ export function useAccount({ openThreadRef, onThreads }: AccountOptions) {
   const [status, setStatus] = useState<SyncStatus>({ state: "offline" });
   /** False until the session has been resolved, so nothing flashes. */
   const [ready, setReady] = useState(false);
+  /** True while the session cannot be resolved because the server is unreachable. */
+  const [unreachable, setUnreachable] = useState(false);
   /**
    * Whether this account has a vault key. Mirrored into state rather than
    * read off `kekRef` at render time — a ref read during render is a React
@@ -432,9 +435,42 @@ export function useAccount({ openThreadRef, onThreads }: AccountOptions) {
 
   useEffect(() => {
     let cancelled = false;
+    let wake: (() => void) | null = null;
+    const retryNow = () => wake?.();
+    window.addEventListener("online", retryNow);
+
+    /*
+     * Keep asking until the server answers. "Unreachable" is not "signed
+     * out": answering it with the sign-in form tells a returning user their
+     * session is gone when only the network is. The desktop app opens with
+     * no network at all, which a web page never could.
+     */
+    const resolve = async (): Promise<SessionUser | null | undefined> => {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const session = await getSession();
+          setUnreachable(false);
+          return session;
+        } catch (error) {
+          if (!(error instanceof OfflineError)) return null;
+        }
+        if (cancelled) return undefined;
+        setUnreachable(true);
+        await new Promise<void>((done) => {
+          const timer = setTimeout(done, Math.min(30_000, 1000 * 2 ** attempt));
+          wake = () => {
+            clearTimeout(timer);
+            done();
+          };
+        });
+        wake = null;
+        if (cancelled) return undefined;
+      }
+    };
+
     void (async () => {
-      const existing = await getSession();
-      if (cancelled) return;
+      const existing = await resolve();
+      if (cancelled || existing === undefined) return;
       if (!existing) {
         setReady(true);
         return;
@@ -447,6 +483,8 @@ export function useAccount({ openThreadRef, onThreads }: AccountOptions) {
     })();
     return () => {
       cancelled = true;
+      window.removeEventListener("online", retryNow);
+      retryNow();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount
   }, []);
@@ -515,14 +553,11 @@ export function useAccount({ openThreadRef, onThreads }: AccountOptions) {
         return;
       }
 
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       // Identifies this socket so the hub can skip it when fanning out a
       // revision this device just pushed. Minted per connection: a
       // reconnected socket is a different subscriber to the hub.
       const connection = crypto.randomUUID().replace(/-/g, "");
-      socket = new WebSocket(
-        `${protocol}//${window.location.host}/v1/live?c=${connection}`,
-      );
+      socket = openLiveSocket(`c=${connection}`);
       const opened = socket;
       opened.onopen = () => {
         retry = 0;
@@ -784,6 +819,7 @@ export function useAccount({ openThreadRef, onThreads }: AccountOptions) {
   const destroy = useCallback(async () => {
     const accountId = userRef.current?.id;
     await deleteAccount();
+    await forgetSession();
     forgetUploads();
     setCredential(null);
     setVaultKey(null);
@@ -804,6 +840,8 @@ export function useAccount({ openThreadRef, onThreads }: AccountOptions) {
   return {
     user,
     ready,
+    /** The session could not be resolved yet because the server is unreachable. */
+    unreachable,
     settings,
     status,
     /** True when this account's records are end-to-end encrypted. */

@@ -29,6 +29,8 @@
  * encryption there needs a passphrase the user actually types.
  */
 
+import { OfflineError, apiFetch, desktop, forgetSession } from "./api";
+
 const API = "/v1/auth";
 // A frozen label, not the app's address — the app moved to chat.belayet.app
 // and this did not. Every account's credential and vault key derive from it.
@@ -133,12 +135,14 @@ export class AuthError extends Error {
   }
 }
 
+/**
+ * One Better Auth endpoint. Better Auth's CSRF check requires an Origin
+ * header, which the browser sends; `apiFetch` supplies the session — the
+ * cookie on the web, the bearer token in the desktop app.
+ */
 async function call(path: string, body?: unknown): Promise<unknown> {
-  const response = await fetch(`${API}${path}`, {
+  const response = await apiFetch(`${API}${path}`, {
     method: body === undefined ? "GET" : "POST",
-    // Better Auth's CSRF check requires an Origin header; the browser sends
-    // it. `same-origin` credentials keep the session cookie flowing.
-    credentials: "same-origin",
     ...(body === undefined
       ? {}
       : {
@@ -161,15 +165,25 @@ async function call(path: string, body?: unknown): Promise<unknown> {
   return payload;
 }
 
+/**
+ * The signed-in user, or null when there is none. Throws `OfflineError` when
+ * the server could not be reached: "no session" and "no network" used to look
+ * the same, which was harmless while a page without network could not load at
+ * all — the desktop app opens without one, and must not show a returning user
+ * the sign-in form because the Wi-Fi is off.
+ */
 export async function getSession(): Promise<SessionUser | null> {
+  let payload: { user?: SessionUser } | null;
   try {
-    const payload = (await call("/get-session")) as {
-      user?: SessionUser;
-    } | null;
-    return payload?.user ?? null;
-  } catch {
+    payload = (await call("/get-session")) as { user?: SessionUser } | null;
+  } catch (error) {
+    if (error instanceof OfflineError) throw error;
     return null;
   }
+  // A definite "nobody": a desktop token that no longer opens a session is
+  // dead weight in the Keychain.
+  if (!payload?.user) await forgetSession();
+  return payload?.user ?? null;
 }
 
 /** Whole years, UTC, so the boundary does not move with the timezone. */
@@ -241,6 +255,14 @@ export async function resendEmailOTP(email: string): Promise<void> {
  * is opt-in rather than universal.
  */
 export async function signInWithGoogle(): Promise<void> {
+  // The redirect would finish in the browser and set the cookie there; the
+  // desktop app would never see the session.
+  if (desktop) {
+    throw new AuthError(
+      "Google sign-in isn't available in the desktop app yet — use your email",
+      501,
+    );
+  }
   const payload = (await call("/sign-in/social", {
     provider: "google",
     callbackURL: window.location.origin,
@@ -256,5 +278,9 @@ export async function signInWithGoogle(): Promise<void> {
 }
 
 export async function signOut(): Promise<void> {
-  await call("/sign-out", {});
+  try {
+    await call("/sign-out", {});
+  } finally {
+    await forgetSession();
+  }
 }

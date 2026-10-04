@@ -1,11 +1,12 @@
-import { createAuth } from "./auth";
+import { appOrigins, createAuth } from "./auth";
 import type { Env } from "./env";
 export { SyncHub } from "./live";
 
 /**
  * The API.
  *
- * Six surfaces, all under `/v1/` on the same origin as the app:
+ * Six surfaces, all under `/v1/` on the same origin as the website — and,
+ * cross-origin, for the desktop app (see "CORS" below):
  *
  *   /v1/auth/*     Better Auth — email+password, Google, sessions
  *   /v1/threads    conversations and their messages
@@ -988,6 +989,41 @@ async function notifyLive(
 /** Connection ids only ever come back to us as a tag to skip. */
 const CONNECTION_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
+/**
+ * A WebSocket handshake cannot carry an `Authorization` header, so the
+ * desktop app offers its session token as a subprotocol instead:
+ * `chat.v1, bearer.<token as base64url>`. The hub answers with `chat.v1`
+ * alone — a browser fails a handshake that offered subprotocols and got none
+ * back. The website sends neither and authenticates with its cookie.
+ */
+const LIVE_PROTOCOL = "chat.v1";
+const LIVE_BEARER = "bearer.";
+
+function offeredProtocols(request: Request): string[] {
+  return (request.headers.get("Sec-WebSocket-Protocol") ?? "")
+    .split(",")
+    .map((protocol) => protocol.trim())
+    .filter(Boolean);
+}
+
+/** The headers to resolve a session from: a live socket's token, made a header. */
+function sessionHeaders(request: Request, pathname: string): Headers {
+  if (pathname !== "/v1/live") return request.headers;
+  const offered = offeredProtocols(request).find((protocol) =>
+    protocol.startsWith(LIVE_BEARER),
+  );
+  if (!offered) return request.headers;
+  try {
+    const encoded = offered.slice(LIVE_BEARER.length).replace(/-/g, "+").replace(/_/g, "/");
+    const token = atob(encoded.padEnd(Math.ceil(encoded.length / 4) * 4, "="));
+    const headers = new Headers(request.headers);
+    headers.set("Authorization", `Bearer ${token}`);
+    return headers;
+  } catch {
+    return request.headers;
+  }
+}
+
 function connectLive(
   request: Request,
   env: Env,
@@ -1000,9 +1036,13 @@ function connectLive(
   const upgrade = request.headers.get("Upgrade");
   if (upgrade) headers.set("Upgrade", upgrade);
   const query = connection ? `&c=${connection}` : "";
-  return stub.fetch(`https://live.internal/connect?rev=${rev}${query}`, {
-    headers,
-  });
+  const protocol = offeredProtocols(request).includes(LIVE_PROTOCOL)
+    ? `&p=${LIVE_PROTOCOL}`
+    : "";
+  return stub.fetch(
+    `https://live.internal/connect?rev=${rev}${query}${protocol}`,
+    { headers },
+  );
 }
 
 /* -------------------------------- state -------------------------------- */
@@ -1183,6 +1223,62 @@ async function deleteMe(
   return response;
 }
 
+/* --------------------------------- CORS -------------------------------- */
+
+/**
+ * The desktop app is the only cross-origin caller.
+ *
+ * The website calls this API from its own origin and needs no CORS. The
+ * desktop app ships its own copy of the UI, served from inside the app
+ * (`appOrigins`), and reads these responses across origins — so those origins,
+ * and only those, get `Access-Control-Allow-Origin`.
+ *
+ * Credentials are never allowed. The app authenticates with a bearer token
+ * (`auth.ts`, 4), not the cookie, so `Access-Control-Allow-Credentials` stays
+ * unset: no response a cookie authorised can be read by another origin,
+ * whatever origin it claims.
+ */
+function corsOrigin(request: Request, env: Env): string | null {
+  const origin = request.headers.get("Origin");
+  return origin && appOrigins(env).includes(origin) ? origin : null;
+}
+
+function preflight(origin: string | null): Response {
+  if (!origin) return new Response(null, { status: 204 });
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": origin,
+      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE",
+      "Access-Control-Allow-Headers": "Authorization, Content-Type",
+      "Access-Control-Max-Age": "600",
+      Vary: "Origin",
+    },
+  });
+}
+
+/** `set-auth-token` is how the bearer plugin hands the app its session. */
+function withCors(response: Response, origin: string | null): Response {
+  // A 101 carries a socket, not a readable response; CORS does not apply.
+  if (!origin || response.status === 101) return response;
+  const headers = new Headers(response.headers);
+  headers.set("Access-Control-Allow-Origin", origin);
+  headers.append("Vary", "Origin");
+  const exposed = new Set(
+    (headers.get("Access-Control-Expose-Headers") ?? "")
+      .split(",")
+      .map((header) => header.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  exposed.add("set-auth-token");
+  headers.set("Access-Control-Expose-Headers", [...exposed].join(", "));
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 /* -------------------------------- router ------------------------------- */
 
 /**
@@ -1219,152 +1315,164 @@ const handler = {
     env: Env,
     ctx: ExecutionContext,
   ): Promise<Response> {
-    const url = new URL(request.url);
-    const { pathname } = url;
+    const origin = corsOrigin(request, env);
+    if (request.method === "OPTIONS") return preflight(origin);
+    return withCors(await route(request, env, ctx), origin);
+  },
+};
 
-    if (!pathname.startsWith("/v1/")) return fail("not found", 404);
+async function route(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const { pathname } = url;
 
-    const auth = getAuth(env, url.origin);
+  if (!pathname.startsWith("/v1/")) return fail("not found", 404);
 
-    // Better Auth owns everything under /v1/auth — signup, signin, the
-    // Google redirect and callback, session refresh, signout.
-    if (pathname.startsWith("/v1/auth/")) {
-      return auth.handler(request);
+  const auth = getAuth(env, url.origin);
+
+  // Better Auth owns everything under /v1/auth — signup, signin, the
+  // Google redirect and callback, session refresh, signout.
+  if (pathname.startsWith("/v1/auth/")) {
+    return auth.handler(request);
+  }
+
+  try {
+    const session = await auth.api.getSession({
+      headers: sessionHeaders(request, pathname),
+    });
+    if (!session?.user) return fail("unauthorized", 401);
+    const userId = session.user.id;
+
+    /*
+     * Account state is loaded per route rather than up front.
+     *
+     * Every request used to pay `loadState` before the router had even
+     * looked at the path, so a 404 and a WebSocket upgrade cost the same
+     * D1 read as a write did. Blob reads are the clearest win: fetching an
+     * image is now one R2 get and no D1 at all, and a page full of
+     * generated images is exactly when that repeats.
+     */
+    const stateFor = async (): Promise<StateRow> => {
+      const state = await loadState(env, userId);
+      // The session outlived the account it belongs to.
+      if (!state) throw new Unauthorized();
+      return state;
+    };
+
+    const blobMatch = pathname.match(/^\/v1\/blobs\/(.+)$/);
+    if (blobMatch) {
+      let blobId: string;
+      try {
+        blobId = decodeURIComponent(blobMatch[1]);
+      } catch {
+        return fail("invalid file id", 400);
+      }
+      if (!BLOB_ID.test(blobId)) return fail("invalid file id", 400);
+      if (request.method === "GET") return await getBlob(env, userId, blobId);
+      if (request.method === "DELETE") {
+        return await deleteBlob(env, userId, blobId);
+      }
+      if (request.method === "PUT") {
+        return await putBlob(request, env, userId, blobId, await stateFor());
+      }
+      return fail("method not allowed", 405);
     }
 
-    try {
-      const session = await auth.api.getSession({ headers: request.headers });
-      if (!session?.user) return fail("unauthorized", 401);
-      const userId = session.user.id;
-
-      /*
-       * Account state is loaded per route rather than up front.
-       *
-       * Every request used to pay `loadState` before the router had even
-       * looked at the path, so a 404 and a WebSocket upgrade cost the same
-       * D1 read as a write did. Blob reads are the clearest win: fetching an
-       * image is now one R2 get and no D1 at all, and a page full of
-       * generated images is exactly when that repeats.
-       */
-      const stateFor = async (): Promise<StateRow> => {
-        const state = await loadState(env, userId);
-        // The session outlived the account it belongs to.
-        if (!state) throw new Unauthorized();
-        return state;
-      };
-
-      const blobMatch = pathname.match(/^\/v1\/blobs\/(.+)$/);
-      if (blobMatch) {
-        let blobId: string;
-        try {
-          blobId = decodeURIComponent(blobMatch[1]);
-        } catch {
-          return fail("invalid file id", 400);
-        }
-        if (!BLOB_ID.test(blobId)) return fail("invalid file id", 400);
-        if (request.method === "GET") return await getBlob(env, userId, blobId);
-        if (request.method === "DELETE") {
-          return await deleteBlob(env, userId, blobId);
-        }
-        if (request.method === "PUT") {
-          return await putBlob(request, env, userId, blobId, await stateFor());
-        }
-        return fail("method not allowed", 405);
+    const threadMatch = pathname.match(/^\/v1\/threads\/([^/]+)$/);
+    if (threadMatch) {
+      let threadId: string;
+      try {
+        threadId = decodeURIComponent(threadMatch[1]);
+      } catch {
+        return fail("invalid thread id", 400);
       }
-
-      const threadMatch = pathname.match(/^\/v1\/threads\/([^/]+)$/);
-      if (threadMatch) {
-        let threadId: string;
-        try {
-          threadId = decodeURIComponent(threadMatch[1]);
-        } catch {
-          return fail("invalid thread id", 400);
-        }
-        if (!ID.test(threadId)) return fail("invalid thread id", 400);
-        if (request.method === "GET") {
-          return await readThread(request, env, userId, threadId, await stateFor());
-        }
-        if (request.method === "PUT") {
-          return await writeThread(
-            request,
-            env,
-            userId,
-            threadId,
-            await stateFor(),
-            ctx,
-          );
-        }
-        if (request.method === "DELETE") {
-          const client = url.searchParams.get("client");
-          return await deleteThread(
-            env,
-            userId,
-            threadId,
-            await stateFor(),
-            ctx,
-            client && CONNECTION_ID.test(client) ? client : null,
-          );
-        }
-        return fail("method not allowed", 405);
+      if (!ID.test(threadId)) return fail("invalid thread id", 400);
+      if (request.method === "GET") {
+        return await readThread(request, env, userId, threadId, await stateFor());
       }
-
-      if (pathname === "/v1/threads") {
-        if (request.method !== "GET") return fail("method not allowed", 405);
-        return await listThreads(request, env, userId, await stateFor());
-      }
-
-      if (pathname === "/v1/delta") {
-        if (request.method !== "GET") return fail("method not allowed", 405);
-        return await readDelta(request, env, userId, await stateFor());
-      }
-
-      if (pathname === "/v1/state") {
-        if (request.method === "GET") {
-          return await readState(env, userId, await stateFor());
-        }
-        if (request.method === "PUT") {
-          return await writeState(request, env, userId, await stateFor(), ctx);
-        }
-        return fail("method not allowed", 405);
-      }
-
-      if (pathname === "/v1/live") {
-        if (request.method !== "GET") return fail("method not allowed", 405);
-        if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
-          return fail("websocket upgrade required", 426);
-        }
-        const state = await stateFor();
-        const connection = url.searchParams.get("c");
-        return await connectLive(
+      if (request.method === "PUT") {
+        return await writeThread(
           request,
           env,
           userId,
-          state.rev,
-          connection && CONNECTION_ID.test(connection) ? connection : null,
+          threadId,
+          await stateFor(),
+          ctx,
         );
       }
-
-      if (pathname === "/v1/me" && request.method === "DELETE") {
-        return await deleteMe(env, userId, ctx);
+      if (request.method === "DELETE") {
+        const client = url.searchParams.get("client");
+        return await deleteThread(
+          env,
+          userId,
+          threadId,
+          await stateFor(),
+          ctx,
+          client && CONNECTION_ID.test(client) ? client : null,
+        );
       }
+      return fail("method not allowed", 405);
+    }
 
-      return fail("not found", 404);
-    } catch (error) {
-      if (error instanceof Unauthorized) return fail("unauthorized", 401);
-      // Never echo an exception: it could carry a fragment of a payload, and
-      // payloads are the one thing this service promises not to reveal.
-      const message =
-        error instanceof Error &&
-        /request body (was not valid JSON|is too large)/.test(error.message)
-          ? error.message
-          : "the request could not be completed";
-      return fail(
-        message,
-        message === "the request could not be completed" ? 500 : 400,
+    if (pathname === "/v1/threads") {
+      if (request.method !== "GET") return fail("method not allowed", 405);
+      return await listThreads(request, env, userId, await stateFor());
+    }
+
+    if (pathname === "/v1/delta") {
+      if (request.method !== "GET") return fail("method not allowed", 405);
+      return await readDelta(request, env, userId, await stateFor());
+    }
+
+    if (pathname === "/v1/state") {
+      if (request.method === "GET") {
+        return await readState(env, userId, await stateFor());
+      }
+      if (request.method === "PUT") {
+        return await writeState(request, env, userId, await stateFor(), ctx);
+      }
+      return fail("method not allowed", 405);
+    }
+
+    if (pathname === "/v1/live") {
+      if (request.method !== "GET") return fail("method not allowed", 405);
+      if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+        return fail("websocket upgrade required", 426);
+      }
+      const state = await stateFor();
+      const connection = url.searchParams.get("c");
+      return await connectLive(
+        request,
+        env,
+        userId,
+        state.rev,
+        connection && CONNECTION_ID.test(connection) ? connection : null,
       );
     }
-  },
-};
+
+    if (pathname === "/v1/me" && request.method === "DELETE") {
+      return await deleteMe(env, userId, ctx);
+    }
+
+    return fail("not found", 404);
+  } catch (error) {
+    if (error instanceof Unauthorized) return fail("unauthorized", 401);
+    // Never echo an exception: it could carry a fragment of a payload, and
+    // payloads are the one thing this service promises not to reveal.
+    const message =
+      error instanceof Error &&
+      /request body (was not valid JSON|is too large)/.test(error.message)
+        ? error.message
+        : "the request could not be completed";
+    return fail(
+      message,
+      message === "the request could not be completed" ? 500 : 400,
+    );
+  }
+}
 
 /** Thrown by `stateFor` so a missing account row unwinds to one 401. */
 class Unauthorized extends Error {}

@@ -1,0 +1,42 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Chat",
+  "version": "0.2.0",
+  "identifier": "app.belayet.chat",
+  "build": {
+    "frontendDist": "../../web/out",
+    "beforeBuildCommand": { "script": "npm run build", "cwd": "../../web", "wait": true },
+    "beforeDevCommand": { "script": "npm run build", "cwd": "../../web", "wait": true }
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' blob: ipc: http://ipc.localhost https://openrouter.ai https://chat.belayet.app wss://chat.belayet.app; form-action 'none'; base-uri 'self'; object-src 'none'",
+      "dangerousDisableAssetCspModification": true
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": { "schemes": ["belayet-chat"] }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Productivity",
+    "shortDescription": "Every model, through one OpenRouter key",
+    "longDescription": "A minimal, end-to-end encrypted chat interface for every model on OpenRouter, as a native app.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "signingIdentity": "-"
+    }
+  }
+}

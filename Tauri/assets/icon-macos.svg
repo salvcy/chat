@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- The same mark on Apple's 1024 icon grid: an 824 tile, its corner radius, room for the shadow. -->
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000000" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185.4" fill="#111111" filter="url(#shadow)"/>
+  <rect x="101" y="101" width="822" height="822" rx="184.4" fill="none" stroke="#ffffff" stroke-opacity="0.12" stroke-width="2"/>
+  <g transform="translate(100 100) scale(41.2)" fill="#f2f2f2">
+    <rect x="5" y="8.5" width="2" height="5" rx="1"/>
+    <rect x="9" y="5.5" width="2" height="8" rx="1"/>
+    <rect x="13" y="9.5" width="2" height="4" rx="1"/>
+  </g>
+</svg>

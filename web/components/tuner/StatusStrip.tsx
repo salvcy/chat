@@ -75,7 +75,10 @@ export default function StatusStrip({
         : null;
 
   return (
-    <header className="flex h-12 shrink-0 items-center gap-1 border-b border-line px-2 sm:px-2.5">
+    <header
+      className="dial-strip flex h-12 shrink-0 items-center gap-1 border-b border-line px-2 sm:px-2.5"
+      data-tauri-drag-region="deep"
+    >
       <RailToggle onCommit={onRailCollapse} />
       <button
         onClick={onOpenSidebar}

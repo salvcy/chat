@@ -5,6 +5,7 @@ import Button from "@/components/ui/Button";
 import Loader from "@/components/ui/Loader";
 import { GateCard } from "./FrontDoor";
 import { fetchKeyStatus } from "@/lib/account";
+import { desktop, onDesktopEvent } from "@/lib/api";
 import {
   looksLikeKey,
   type Credential,
@@ -16,6 +17,7 @@ import {
   clearCodeFromUrl,
   completeConnect,
   pendingCode,
+  takeDesktopCode,
 } from "@/lib/pkce";
 
 /**
@@ -35,7 +37,28 @@ import {
  * The key is validated against OpenRouter before it is stored, so a typo
  * fails here with a reason rather than three screens later as a mystery
  * stream error.
+ *
+ * In the desktop app, Connect opens the default browser and this screen waits;
+ * the code comes back through the app's URL scheme (see `lib/pkce.ts`).
  */
+/** Trade an authorization code for a verified key, or say why not. */
+async function exchange(
+  code: string,
+): Promise<{ credential: Credential } | { error: string }> {
+  try {
+    const credential = await completeConnect(code);
+    const status = await fetchKeyStatus(credential.key);
+    return { credential: { ...credential, label: status.label } };
+  } catch (err) {
+    return {
+      error:
+        err instanceof ConnectError || err instanceof Error
+          ? err.message
+          : "the connection could not be completed",
+    };
+  }
+}
+
 export default function KeyGate({
   onConnect,
   signedIn,
@@ -51,6 +74,8 @@ export default function KeyGate({
   const [error, setError] = useState<string | null>(null);
   /** True while finishing an OAuth round trip, so the form isn't offered. */
   const [returning, setReturning] = useState(() => pendingCode() !== null);
+  /** Desktop only: approval is happening in the browser. */
+  const [waiting, setWaiting] = useState(false);
 
   /* --------------------------- oauth return --------------------------- */
 
@@ -63,25 +88,38 @@ export default function KeyGate({
 
     let cancelled = false;
     void (async () => {
-      try {
-        const credential = await completeConnect(code);
-        const status = await fetchKeyStatus(credential.key);
-        if (cancelled) return;
-        onConnect({ ...credential, label: status.label });
-      } catch (err) {
-        if (cancelled) return;
-        setError(
-          err instanceof ConnectError || err instanceof Error
-            ? err.message
-            : "the connection could not be completed",
-        );
-      } finally {
-        if (!cancelled) setReturning(false);
-      }
+      const result = await exchange(code);
+      if (cancelled) return;
+      if ("error" in result) setError(result.error);
+      else onConnect(result.credential);
+      setReturning(false);
     })();
-
     return () => {
       cancelled = true;
+    };
+  }, [onConnect]);
+
+  // The desktop app's way back: the native side announces a code, and also
+  // holds one that arrived before this screen was listening.
+  useEffect(() => {
+    if (!desktop) return;
+    let cancelled = false;
+    const claim = async () => {
+      const code = await takeDesktopCode();
+      if (!code || cancelled) return;
+      setReturning(true);
+      setWaiting(false);
+      const result = await exchange(code);
+      if (cancelled) return;
+      if ("error" in result) setError(result.error);
+      else onConnect(result.credential);
+      setReturning(false);
+    };
+    void claim();
+    const stop = onDesktopEvent("openrouter-code", () => void claim());
+    return () => {
+      cancelled = true;
+      stop();
     };
   }, [onConnect]);
 
@@ -92,7 +130,11 @@ export default function KeyGate({
     setBusy(true);
     try {
       await beginConnect();
-      // beginConnect navigates away; reaching here means it didn't.
+      if (desktop) {
+        setBusy(false);
+        setWaiting(true);
+      }
+      // On the web beginConnect navigates away; reaching here means it didn't.
     } catch {
       setBusy(false);
       setError("could not start the connection — paste a key instead");
@@ -144,7 +186,7 @@ export default function KeyGate({
         {returning ? "Connecting to OpenRouter" : "Connect your OpenRouter key"}
       </h1>
       <p className="mt-1 text-[13px] leading-relaxed text-secondary">
-        Requests go from this browser straight to OpenRouter — no server of ours
+        Requests go from this device straight to OpenRouter — no server of ours
         sits in the path.{" "}
         {signedIn
           ? encrypted
@@ -155,6 +197,22 @@ export default function KeyGate({
 
       {returning ? (
         <Loader label="Finishing the handshake" className="mt-6" />
+      ) : waiting ? (
+        <div className="mt-6">
+          <Loader label="Waiting for your browser" />
+          <p className="mt-3 text-[12.5px] leading-relaxed text-secondary">
+            Approve on openrouter.ai, and the key comes straight back to this
+            window.
+          </p>
+          <Button
+            variant="secondary"
+            size="md"
+            onClick={() => setWaiting(false)}
+            className="mt-4 w-full"
+          >
+            Cancel
+          </Button>
+        </div>
       ) : (
         <>
           <Button

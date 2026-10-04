@@ -14,6 +14,8 @@
  * OAuth account without pretending it is end-to-end encrypted.
  */
 
+import { apiFetch } from "./api";
+
 const API = "/v1/blobs";
 const MAGIC = new Uint8Array([0x44, 0x49, 0x41, 0x4c]); // DIAL
 const VERSION = 1;
@@ -183,9 +185,8 @@ export async function uploadPayloadBlob(
   payload: string,
 ): Promise<void> {
   const packed = await pack(blobId, encoder.encode(payload), null);
-  const response = await fetch(`${API}/${blobPath(blobId)}`, {
+  const response = await apiFetch(`${API}/${blobPath(blobId)}`, {
     method: "PUT",
-    credentials: "same-origin",
     headers: { "Content-Type": "application/octet-stream" },
     body: arrayBuffer(packed),
   });
@@ -195,9 +196,7 @@ export async function uploadPayloadBlob(
 export async function downloadPayloadBlob(
   blobId: string,
 ): Promise<string | null> {
-  const response = await fetch(`${API}/${blobPath(blobId)}`, {
-    credentials: "same-origin",
-  });
+  const response = await apiFetch(`${API}/${blobPath(blobId)}`);
   if (response.status === 404) return null;
   if (!response.ok) throw await errorFrom(response);
   const packed = new Uint8Array(await response.arrayBuffer());
@@ -239,9 +238,8 @@ export async function uploadBlob(
   key: CryptoKey | null,
 ): Promise<UploadedBlob> {
   const packed = await pack(blobId, await localBytes(url), key);
-  const response = await fetch(`${API}/${blobPath(blobId)}`, {
+  const response = await apiFetch(`${API}/${blobPath(blobId)}`, {
     method: "PUT",
-    credentials: "same-origin",
     headers: { "Content-Type": "application/octet-stream" },
     body: arrayBuffer(packed),
   });
@@ -259,9 +257,7 @@ async function fetchPacked(blobId: string, publicUrl?: string): Promise<Response
       // route remains the correctness fallback until it is ready.
     }
   }
-  return fetch(`${API}/${blobPath(blobId)}`, {
-    credentials: "same-origin",
-  });
+  return apiFetch(`${API}/${blobPath(blobId)}`);
 }
 
 /* ------------------------------ display cache ----------------------------- */

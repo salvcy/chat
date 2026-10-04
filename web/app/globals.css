@@ -285,6 +285,62 @@ button:disabled {
     visibility 0s linear 220ms;
 }
 
+/* ---- the macOS desktop app's window controls ----
+   The desktop app (../Tauri) hides the title bar and draws the traffic lights
+   over the page, so the page makes room for them in its own top rows instead
+   of under a bar of its own. `data-shell` is set pre-paint by the boot script
+   from what the app announces; `data-fullscreen` by the app while the window
+   is full screen, where macOS hides the lights and the room is not needed.
+
+   The geometry agrees with TRAFFIC_LIGHTS in Tauri/src-tauri/src/lib.rs and
+   was measured from the native buttons: three 14px lights from x 18 to 78,
+   centred 32px from the top. --dial-lights-y is that centre line, and
+   --dial-lights-x the width they take from the window's left edge with a
+   12px gap. Every row they sit in is centred on the line — the rail's brand
+   row, the chat window's top strip when the rail is closed, the front door's
+   header. */
+:root {
+  --dial-lights-x: 90px;
+  --dial-lights-y: 32px;
+}
+
+/* Rail open: the lights sit in the brand row, ahead of the mark. The frame
+   pads the row down so its 40px centre lands on the lights' line. */
+:root[data-shell="macos"]:not([data-fullscreen]) .dial-rail-frame {
+  padding-top: calc(var(--dial-lights-y) - 20px);
+}
+
+:root[data-shell="macos"]:not([data-fullscreen]) .dial-rail-brand {
+  /* The frame's own 8px left padding is already behind the row. */
+  padding-left: calc(var(--dial-lights-x) - 8px);
+}
+
+/* Rail closed, or a narrow window: the lights sit in the chat window's top
+   strip, which starts 8px in — its 48px centre is the same line. */
+:root[data-shell="macos"]:not([data-fullscreen]).dial-rail-collapsed .dial-strip {
+  padding-left: calc(var(--dial-lights-x) - 8px);
+}
+
+/* The front door's header spans the window from its top edge. */
+:root[data-shell="macos"]:not([data-fullscreen]) .dial-door-bar {
+  padding-left: var(--dial-lights-x);
+  padding-top: calc(var(--dial-lights-y) * 2 - 56px);
+}
+
+@media (max-width: 767px) {
+  :root[data-shell="macos"]:not([data-fullscreen]) .dial-strip {
+    padding-left: calc(var(--dial-lights-x) - 8px);
+  }
+
+  /* A phone gets the window edge to edge; a narrow desktop window keeps it
+     inset, so the lights have a row to sit in like every other width. */
+  :root[data-shell="macos"]:not([data-fullscreen]) .app-workspace {
+    margin: 8px;
+    border-radius: var(--radius-window);
+    box-shadow: var(--dial-shadow-window);
+  }
+}
+
 /* The transcript minimap only appears when the chat pane itself has enough
    room — sidebar resizing counts, not just the browser viewport.
  *

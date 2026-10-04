@@ -1,0 +1,17 @@
+{
+  "name": "chat-desktop",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev --no-dev-server",
+    "dev:local": "CHAT_API=http://localhost:8787 tauri dev --no-dev-server --config src-tauri/tauri.local.conf.json",
+    "build": "tauri build",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "icons": "node scripts/icons.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.1"
+  }
+}

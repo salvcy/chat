@@ -1,5 +1,6 @@
 "use client";
 
+import { apiFetch, syncWindowTheme } from "./api";
 import { sealRecord, openRecord } from "./crypto";
 import {
   DEFAULT_SETTINGS as DEFAULT_CHAT_SETTINGS,
@@ -243,6 +244,7 @@ export function applyTheme(theme: Theme): void {
       window.matchMedia("(prefers-color-scheme: dark)").matches);
   root.classList.toggle("dark", dark);
   root.dataset.themeChoice = theme;
+  syncWindowTheme(theme);
 }
 
 /* -------------------------------- storage ------------------------------ */
@@ -381,7 +383,7 @@ export type AccountUsage = {
 /** Storage totals only. Cheap enough to call whenever settings is opened. */
 export async function fetchUsage(): Promise<AccountUsage | null> {
   try {
-    const response = await fetch("/v1/state", { credentials: "same-origin" });
+    const response = await apiFetch("/v1/state");
     if (!response.ok) return null;
     const payload = (await response.json()) as { usage?: AccountUsage };
     return payload.usage ?? null;
@@ -391,7 +393,7 @@ export async function fetchUsage(): Promise<AccountUsage | null> {
 }
 
 export async function fetchRemote(kek: CryptoKey | null): Promise<RemoteState> {
-  const response = await fetch("/v1/state", { credentials: "same-origin" });
+  const response = await apiFetch("/v1/state");
   if (!response.ok) throw new Error(`settings unavailable (${response.status})`);
 
   const payload = (await response.json()) as {
@@ -483,9 +485,8 @@ export async function pushRemote(
     ...(notify ? { notify: true, ...(client ? { client } : {}) } : {}),
   };
 
-  const response = await fetch("/v1/state", {
+  const response = await apiFetch("/v1/state", {
     method: "PUT",
-    credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });

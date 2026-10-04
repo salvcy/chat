@@ -1,5 +1,5 @@
 import { betterAuth } from "better-auth";
-import { emailOTP } from "better-auth/plugins";
+import { bearer, emailOTP } from "better-auth/plugins";
 import type { Env } from "./env";
 
 /**
@@ -37,7 +37,32 @@ import type { Env } from "./env";
  * `dateOfBirth` is required at signup and the 18+ rule is enforced on both
  * sides. It is self-declared — this is an age *gate*, not age verification,
  * and nothing here should be described as the latter.
+ *
+ * ## 4. The desktop app holds a token, not a cookie
+ *
+ * The desktop app ships its own copy of the UI and calls this API from
+ * another origin (`appOrigins`), where a same-site cookie is never sent. The
+ * `bearer` plugin hands it the same signed session token the cookie carries,
+ * in a `set-auth-token` response header, and accepts it back as
+ * `Authorization: Bearer`. The app keeps it in the macOS Keychain. Sessions
+ * are the same rows either way; only the transport differs.
  */
+
+/**
+ * Origins allowed to call the API cross-origin — the desktop app's: its UI
+ * is served from inside the app, `tauri://localhost` on macOS and Linux and
+ * `http://tauri.localhost` on Windows. `EXTRA_APP_ORIGINS` adds more, for
+ * local testing only.
+ */
+const APP_ORIGINS = ["tauri://localhost", "http://tauri.localhost"];
+
+export function appOrigins(env: Env): string[] {
+  const extra = (env.EXTRA_APP_ORIGINS ?? "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  return [...APP_ORIGINS, ...extra];
+}
 
 /** Exactly 32 bytes of base64url — what the client's HKDF step produces. */
 const PRE_STRETCHED = /^[A-Za-z0-9_-]{43}$/;
@@ -117,6 +142,10 @@ export function createAuth(env: Env, origin: string) {
     baseURL: origin,
     basePath: "/v1/auth",
     secret: env.AUTH_SECRET,
+    // Sign-in and sign-up check the Origin header (Better Auth's CSRF
+    // defence). The app's origins are trusted for that; they still get no
+    // cookie, because CORS never allows credentials (see index.ts).
+    trustedOrigins: appOrigins(env),
 
     emailAndPassword: {
       enabled: true,
@@ -128,33 +157,39 @@ export function createAuth(env: Env, origin: string) {
       autoSignInAfterVerification: true,
     },
 
-    plugins: emailVerificationEnabled
-      ? [
-          emailOTP({
-            overrideDefaultEmailVerification: true,
-            expiresIn: 10 * 60,
-            allowedAttempts: 5,
-            storeOTP: "hashed",
-            rateLimit: { window: 60, max: 3 },
-            async sendVerificationOTP({ email, otp, type }) {
-              if (!env.EMAIL || !env.EMAIL_FROM) return;
-              const purpose =
-                type === "email-verification"
-                  ? "verify your email"
-                  : type === "forget-password"
-                    ? "reset your password"
-                    : "sign in";
-              await env.EMAIL.send({
-                from: env.EMAIL_FROM,
-                to: email,
-                subject: `${otp} · ${purpose}`,
-                text: `Your Chat code is ${otp}. It expires in 10 minutes. If you did not request this, you can ignore this email.`,
-                html: `<div style="font-family:ui-sans-serif,system-ui,sans-serif;color:#111"><p style="font-size:14px">Your Chat verification code</p><p style="font-family:ui-monospace,monospace;font-size:28px;letter-spacing:.18em;margin:20px 0">${otp}</p><p style="font-size:12px;color:#666">Expires in 10 minutes. If you did not request this, you can ignore this email.</p></div>`,
-              });
-            },
-          }),
-        ]
-      : [],
+    plugins: [
+      // The desktop app's session transport (see 4 above). Signature
+      // required: a bare token without the HMAC is refused rather than
+      // signed on the client's behalf.
+      bearer({ requireSignature: true }),
+      ...(emailVerificationEnabled
+        ? [
+            emailOTP({
+              overrideDefaultEmailVerification: true,
+              expiresIn: 10 * 60,
+              allowedAttempts: 5,
+              storeOTP: "hashed",
+              rateLimit: { window: 60, max: 3 },
+              async sendVerificationOTP({ email, otp, type }) {
+                if (!env.EMAIL || !env.EMAIL_FROM) return;
+                const purpose =
+                  type === "email-verification"
+                    ? "verify your email"
+                    : type === "forget-password"
+                      ? "reset your password"
+                      : "sign in";
+                await env.EMAIL.send({
+                  from: env.EMAIL_FROM,
+                  to: email,
+                  subject: `${otp} · ${purpose}`,
+                  text: `Your Chat code is ${otp}. It expires in 10 minutes. If you did not request this, you can ignore this email.`,
+                  html: `<div style="font-family:ui-sans-serif,system-ui,sans-serif;color:#111"><p style="font-size:14px">Your Chat verification code</p><p style="font-family:ui-monospace,monospace;font-size:28px;letter-spacing:.18em;margin:20px 0">${otp}</p><p style="font-size:12px;color:#666">Expires in 10 minutes. If you did not request this, you can ignore this email.</p></div>`,
+                });
+              },
+            }),
+          ]
+        : []),
+    ],
 
     // Better Auth already supplies strict rules for sign-in/sign-up (3 per
     // 10s) and OTP issuance/verification (3 per minute). D1 storage makes

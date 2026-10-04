@@ -1,5 +1,6 @@
 "use client";
 
+import { desktop, invokeDesktop } from "./api";
 import type { Credential } from "./credentials";
 
 /**
@@ -18,12 +19,24 @@ import type { Credential } from "./credentials";
  * server: there is no client secret to hide, because possession of the
  * one-time verifier is the proof. The verifier never leaves this tab.
  *
+ * The desktop app approves in the default browser instead — its window never
+ * navigates away from the app — and OpenRouter returns to a relay page on the
+ * website (`app/connect/desktop`), which hands the code to the app through its
+ * URL scheme. The app's native side holds it until this page takes it
+ * (`takeDesktopCode`); the verifier stays in the app window, so a code that
+ * reached the app any other way exchanges for nothing.
+ *
  * @see https://openrouter.ai/docs/use-cases/oauth-pkce
  */
 
 const AUTH_URL = "https://openrouter.ai/auth";
 const EXCHANGE_URL = "https://openrouter.ai/api/v1/auth/keys";
 const VERIFIER_KEY = "dial:pkce-verifier";
+
+/** The desktop app's URL scheme, registered by its bundle (Tauri/src-tauri/tauri.conf.json). */
+export const DESKTOP_SCHEME = "belayet-chat";
+/** Where OpenRouter returns the desktop app's users; the page passes the code on. */
+export const DESKTOP_RELAY_PATH = "/connect/desktop";
 
 /** RFC 7636 base64url: standard base64, `+/` swapped out, padding dropped. */
 function base64url(bytes: ArrayBuffer): string {
@@ -55,11 +68,13 @@ async function challengeOf(verifier: string): Promise<string> {
  * and we append our own `?code=` on return.
  */
 export function callbackUrl(): string {
+  if (desktop) return `${desktop.api}${DESKTOP_RELAY_PATH}`;
   return `${window.location.origin}${window.location.pathname}`;
 }
 
 /**
- * Start the flow. Redirects the tab, so nothing after this runs.
+ * Start the flow. Redirects the tab, so nothing after this runs — except in
+ * the desktop app, where it opens the default browser and returns.
  *
  * The verifier goes to sessionStorage rather than localStorage on purpose:
  * it is single-use, scoped to this tab, and gone when the tab closes.
@@ -73,7 +88,21 @@ export async function beginConnect(): Promise<void> {
   url.searchParams.set("callback_url", callbackUrl());
   url.searchParams.set("code_challenge", challenge);
   url.searchParams.set("code_challenge_method", "S256");
+  if (desktop) {
+    // A new window is handed to the default browser (src-tauri/src/lib.rs).
+    window.open(url.toString(), "_blank", "noopener,noreferrer");
+    return;
+  }
   window.location.assign(url.toString());
+}
+
+/** A code the desktop app received through its URL scheme — once. Null on the web. */
+export async function takeDesktopCode(): Promise<string | null> {
+  try {
+    return await invokeDesktop<string | null>("take_openrouter_code");
+  } catch {
+    return null;
+  }
 }
 
 /** The `?code=` OpenRouter appends on the way back, if this is a return trip. */
@@ -114,7 +143,9 @@ export async function completeConnect(code: string): Promise<Credential> {
 
   if (!verifier) {
     throw new ConnectError(
-      "this tab did not start the connection — try again, or paste a key instead",
+      desktop
+        ? "this window did not start the connection — try again, or paste a key instead"
+        : "this tab did not start the connection — try again, or paste a key instead",
     );
   }
 

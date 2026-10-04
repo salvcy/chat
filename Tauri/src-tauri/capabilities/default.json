@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the bundled UI may ask of the native side. Local content only: no remote URL is listed, so nothing loaded from the network can reach these.",
+  "windows": ["main"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+    "core:window:allow-set-theme",
+    "allow-session-token",
+    "allow-set-session-token",
+    "allow-clear-session-token",
+    "allow-take-openrouter-code"
+  ]
+}

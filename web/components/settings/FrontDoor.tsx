@@ -30,7 +30,10 @@ export default function FrontDoor({
 }) {
   return (
     <div className="app-shell flex h-[100dvh] flex-col overflow-y-auto">
-      <header className="flex h-14 shrink-0 items-center justify-between px-4 sm:px-6">
+      <header
+        className="dial-door-bar flex h-14 shrink-0 items-center justify-between px-4 sm:px-6"
+        data-tauri-drag-region="deep"
+      >
         <BrandMark />
         <ThemeToggle onCommit={onTheme ?? (() => {})} />
       </header>

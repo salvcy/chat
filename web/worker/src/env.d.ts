@@ -27,6 +27,13 @@ export interface Env {
    */
   DAILY_WRITE_LIMIT?: string;
 
+  /**
+   * More origins allowed to call the API cross-origin, comma-separated, on
+   * top of the desktop app's own (`APP_ORIGINS` in index.ts). Unset in
+   * production; set for local testing of the desktop build in a browser.
+   */
+  EXTRA_APP_ORIGINS?: string;
+
   /** Signs session cookies. `wrangler secret put AUTH_SECRET`. */
   AUTH_SECRET: string;
 
