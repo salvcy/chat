@@ -24,6 +24,7 @@ import { currentKey } from "@/lib/credentials";
 import { generateImage } from "@/lib/image";
 import { promoteReasoningAnswer, reconcileFinishedResponse } from "@/lib/messages";
 import { isStreamingRollback } from "@/lib/message-sync";
+import { useHoldPage } from "@/lib/release";
 import {
   askForKeyframe,
   askToStop,
@@ -389,6 +390,9 @@ export default function ChatView({
 
   const chatBusy = status === "streaming" || status === "submitted";
   const busy = chatBusy || imageBusy;
+  // What closing the desktop app's window for a while must not throw away
+  // (lib/release.ts). Typed text is checked there, from the page.
+  useHoldPage(busy || pendingWrites > 0 || saveError !== null || attachments.length > 0);
   const canSeeImages = selectedCapabilities.vision;
   const selectedImageModel = selectedCapabilities.imageGeneration
     ? settings.model

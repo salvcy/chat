@@ -162,11 +162,9 @@ export default function ConversationList({
 
   return (
     <aside className="flex h-full w-full flex-col pr-1">
-      {/* brand — in the macOS app, the row the traffic lights sit in */}
-      <div
-        className="dial-rail-brand flex h-10 shrink-0 items-center px-2.5"
-        data-tauri-drag-region="deep"
-      >
+      {/* brand — the desktop app has none (globals.css, "the desktop app's
+          window") */}
+      <div className="dial-rail-brand flex h-10 shrink-0 items-center px-2.5">
         <BrandMark />
       </div>
 

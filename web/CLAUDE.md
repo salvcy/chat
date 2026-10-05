@@ -274,6 +274,8 @@ are the only places those values are consumed.
 - `lib/api.ts` — where the API is and how a request proves who sent it:
   `apiFetch`, `openLiveSocket`, the desktop token, `OfflineError`. See "The
   desktop app" below.
+- `lib/release.ts` — the desktop app's closed window letting its page go:
+  `useReleaseWhenClosed` (mounted once in `app/page.tsx`) and `useHoldPage`.
 - `lib/live.ts` / `lib/live-frames.ts` — device-to-device live frames over
   the account's socket: publishing, receiving, sealing, and the pure
   diff/patch/overlay logic (tested in `tests/live-frames.test.ts`). See the
@@ -507,9 +509,12 @@ runs on the web and in the app, and switches mode at runtime.
   is prerendered where `window` does not exist; a render that differs by mode
   does not hydrate. Layout differences are CSS keyed on `data-shell`, which the
   boot script sets pre-paint.
-- **The session token lives in the macOS Keychain**, behind the app's own
-  commands (`session_token` / `set_session_token` / `clear_session_token`),
-  never in web storage. It arrives in the `set-auth-token` header Better Auth's
+- **The session token lives in the system's credential store** — the
+  Keychain on macOS, Credential Manager on Windows, the Secret Service on
+  Linux — behind the app's own commands (`session_token` /
+  `set_session_token` / `clear_session_token`), never in web storage. Where
+  the store cannot be reached (a Linux desktop with no Secret Service) the
+  commands fail and the token stays in memory: signed in for the run. It arrives in the `set-auth-token` header Better Auth's
   bearer plugin adds to a sign-in response; `apiFetch` stores whatever it is
   handed, `signOut`, account deletion and a definite "no session" clear it.
 - **OpenRouter connect leaves the app.** `beginConnect` opens the default
@@ -520,13 +525,37 @@ runs on the web and in the app, and switches mode at runtime.
   code arriving any other way exchanges for nothing.
 - **Google sign-in is refused in the app**: its redirect would finish in the
   browser and set the cookie there.
-- **The window has no title bar on macOS.** The traffic lights sit over the
-  page at a measured position, and the page leaves room in its own top rows —
-  the rail's brand row, the chat strip when the rail is closed, the front
-  door's header — all centred on one line (`globals.css`, "window controls",
-  and `TRAFFIC_LIGHTS` in `../Tauri/src-tauri/src/lib.rs`; change together).
-  `data-tauri-drag-region` marks what moves the window (`deep` on rows whose
-  buttons stay clickable); it is inert in a browser.
+- **The window has no title bar on macOS, and the lights are not moved.**
+  They stay where macOS draws them (x 9–69, centred 16px down in a 32px bar,
+  measured on macOS 27), and the page keeps that strip for them like a
+  native window: `--dial-titlebar` (32px) on top, the chat window and the
+  rail's content below it, the rail's first row centred on the chat window's
+  top strip (`globals.css`, "the desktop app's window"). **Never move the
+  lights again** (October 2026): the app used to set a custom position and
+  centre its rows on it, but AppKit puts moved buttons back on a title
+  change, a resize and a theme change (measured), tao re-applies only after
+  the first two, and the theme is set at every launch — so the lights sat at
+  the default height beside rows built for another one. In full screen the
+  strip goes (`data-fullscreen`); under a native title bar (Windows, Linux)
+  there is none. `data-tauri-drag-region` marks what moves the window
+  (`deep` on rows whose buttons stay clickable); it is inert in a browser.
+- **No brand mark in the app** (October 2026, the user's call: squeezed in
+  beside the traffic lights it looked lost). Under any `data-shell` the
+  rail's brand row goes, and the front door's mark (`dial-brand`) with it.
+  The website keeps both.
+- **A closed window gives its memory back** (`lib/release.ts`). On macOS
+  closing only hides the window, so the page stayed resident for a window
+  nobody could see — 314MB measured on a real account, 236MB of it the page's
+  own process. The app tells the page `window-closed`; five minutes later, if
+  nothing is in flight, the page calls `release_window` and the app destroys
+  the window: the page's process exits, and what stays in the Dock — the app
+  and WebKit's GPU and network helpers — measured ~55MB. The Dock builds
+  a fresh one, signed in and on the same thread, in about 0.3s. "In flight"
+  is **held by the component that owns it** with `useHoldPage` — ChatView
+  holds while streaming, generating, saving, after a failed save and with
+  attachments waiting — **plus any text typed into any field**, read from the
+  DOM so a new field is covered without remembering this. A new kind of
+  unsent state that is not text in a field needs its own `useHoldPage`.
 - **Unreachable is not signed out.** `getSession` throws `OfflineError` when
   the request never reached the server, and the session restore retries
   (backoff, and on `online`) behind a "Can't reach the server" note instead of
@@ -535,12 +564,23 @@ runs on the web and in the app, and switches mode at runtime.
 
 What the app depends on here, mirrored in `../Tauri`: the scheme name
 (`DESKTOP_SCHEME` in `lib/pkce.ts` and `tauri.conf.json`), the relay path, the
-command names, the `openrouter-code` event, the `data-shell` /
-`data-fullscreen` attributes, and the CSP — the app's (`tauri.conf.json`)
-mirrors `public/_headers` plus the API's origin.
+command names (the three session commands, `take_openrouter_code`,
+`release_window`), the `openrouter-code` and `window-closed` events, the
+`data-shell` / `data-fullscreen` attributes, the title-bar strip
+(`--dial-titlebar`, the height of the bar macOS draws the lights in), and the
+CSP — the app's (`tauri.conf.json`) mirrors `public/_headers` plus the API's
+origin.
 
 ### Rules learned the hard way
 
+- **The rail's resize handle must not live inside the rail.** The rail clips
+  its contents (it collapses by animating its width), so a handle centred on
+  its edge was half clipped away: 3px to aim at, beside an 8px gutter that did
+  nothing on the web and, in the desktop app, was part of the window's drag
+  region — grabbing the edge moved the window, and resizing looked removed.
+  `RailHandle` is now its own zero-width column between the rail and the chat
+  window, hit area from 4px inside the rail across the whole gutter, and the
+  width follows the pointer by the offset it was grabbed at.
 - **`'self'` does not cover `blob:` URLs, and local testing hid it.** Media
   became object URLs (phase 18) and is read back with `fetch(blob:)` whenever
   it leaves the tab — a follow-up turn in a thread with an image, a JSON
@@ -1013,7 +1053,9 @@ mirrors `public/_headers` plus the API's origin.
   split into `web/` and `../Tauri`; a native macOS app bundling this UI, with
   CORS and bearer sessions on the Worker, the token in the Keychain, OpenRouter
   connect through a deep link, and window controls set into the UI's own top
-  rows; the `blob:` CSP fix). Next product work: sub-agent delegation and
+  rows; the `blob:` CSP fix; then the token in whichever credential store the
+  platform has, no brand mark in the app, and a closed window releasing its
+  page). Next product work: sub-agent delegation and
   per-thread temperature (the wire already carries it).
 ## Design system (the law)
 
@@ -1118,7 +1160,8 @@ comment.
   needs a reason that survives the question "what happens when this disagrees
   with the server?" The desktop app keeps the same three in its own origin and
   one more thing outside the browser altogether: the session token, in the
-  Keychain — a credential, not a copy of anything the server holds.
+  system's credential store — a credential, not a copy of anything the server
+  holds.
 - **Never widen `run_worker_first` beyond `/v1/*`.** Static asset requests
   are free and do not invoke the Worker. Widening that glob puts every page
   load onto the billable path.

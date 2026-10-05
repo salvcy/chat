@@ -17,7 +17,8 @@
  *  - the session travels as `Authorization: Bearer`, because a same-site
  *    cookie is never sent across origins. The token arrives in a
  *    `set-auth-token` header (Better Auth's bearer plugin) and lives in the
- *    macOS Keychain, read and written through the app's own commands — never
+ *    system's credential store — the Keychain, Credential Manager, the
+ *    Secret Service — read and written through the app's own commands, never
  *    in web storage, where any script in the page could read it;
  *  - the live socket offers the token as a subprotocol (`openLiveSocket`).
  *
@@ -85,7 +86,7 @@ export class OfflineError extends Error {
 let token: string | null = null;
 let loaded: Promise<void> | null = null;
 
-/** Read the Keychain once per run; every request after that uses memory. */
+/** Read the credential store once per run; every request after that uses memory. */
 function loadToken(): Promise<void> {
   loaded ??= (async () => {
     try {
@@ -105,7 +106,8 @@ async function keepToken(next: string | null): Promise<void> {
     else await tauri()?.core.invoke("clear_session_token");
   } catch {
     // Still held in memory, so this run stays signed in; the next launch asks
-    // for the password again.
+    // for the password again. That is every launch on a Linux desktop with
+    // no Secret Service running.
   }
 }
 

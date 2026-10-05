@@ -21,6 +21,7 @@ import { keyFingerprint, useCredential } from "@/lib/credentials";
 import { useConversations, type DialMessage } from "@/lib/conversations";
 import { settingsOf } from "@/lib/store";
 import { exportConversation } from "@/lib/export";
+import { useReleaseWhenClosed } from "@/lib/release";
 import { useAccount } from "@/lib/session";
 import { DEFAULT_SETTINGS, type ChatSettings, type OpenRouterModel } from "@/lib/types";
 
@@ -54,6 +55,7 @@ export default function Home() {
   );
 
   const account = useAccount({ openThreadRef, onThreads: applyDelta });
+  useReleaseWhenClosed();
 
   /**
    * The conversation store only talks to the server once there is an account
@@ -513,10 +515,8 @@ export default function Home() {
         <div className="dial-rail-frame h-full py-2 pl-2" data-tauri-drag-region>
           {sidebar}
         </div>
-        <RailHandle
-          onCommit={(railWidth) => account.updateSettings({ railWidth })}
-        />
       </div>
+      <RailHandle onCommit={(railWidth) => account.updateSettings({ railWidth })} />
 
       <AnimatePresence>
         {sidebarOpen && (

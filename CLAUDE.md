@@ -32,6 +32,6 @@ the workspace.
   them.
 - **The two projects share a contract**, written down on both sides: the API
   origin, the app origins the Worker allows, the `belayet-chat` scheme and its
-  relay page, the native command names, the window-control geometry and the
+  relay page, the native command names, the title-bar strip and the
   CSP. The list is in `web/CLAUDE.md` under "The desktop app"; changing one
   side means changing the other.

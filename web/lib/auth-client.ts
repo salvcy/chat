@@ -181,7 +181,7 @@ export async function getSession(): Promise<SessionUser | null> {
     return null;
   }
   // A definite "nobody": a desktop token that no longer opens a session is
-  // dead weight in the Keychain.
+  // dead weight in the credential store.
   if (!payload?.user) await forgetSession();
   return payload?.user ?? null;
 }

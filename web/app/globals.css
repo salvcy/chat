@@ -274,6 +274,10 @@ button:disabled {
     visibility 0s linear 0s;
 }
 
+.dial-rail-collapsed .dial-rail-handle {
+  display: none;
+}
+
 .dial-rail-collapsed .dial-rail {
   width: 0 !important;
   opacity: 0;
@@ -285,57 +289,61 @@ button:disabled {
     visibility 0s linear 220ms;
 }
 
-/* ---- the macOS desktop app's window controls ----
-   The desktop app (../Tauri) hides the title bar and draws the traffic lights
-   over the page, so the page makes room for them in its own top rows instead
-   of under a bar of its own. `data-shell` is set pre-paint by the boot script
-   from what the app announces; `data-fullscreen` by the app while the window
-   is full screen, where macOS hides the lights and the room is not needed.
+/* ---- the desktop app's window ----
+   The desktop app (../Tauri) hides the title bar on macOS and leaves the
+   traffic lights where macOS puts them: three 14px buttons from x 9 to 69,
+   centred 16px down, in a 32px title bar (measured on macOS 27; earlier
+   releases draw a 28px bar, which this still clears). They are not moved:
+   AppKit puts moved buttons back on a title change, a resize and a theme
+   change, and the app sets the theme at every launch, so a custom position
+   did not hold.
 
-   The geometry agrees with TRAFFIC_LIGHTS in Tauri/src-tauri/src/lib.rs and
-   was measured from the native buttons: three 14px lights from x 18 to 78,
-   centred 32px from the top. --dial-lights-y is that centre line, and
-   --dial-lights-x the width they take from the window's left edge with a
-   12px gap. Every row they sit in is centred on the line — the rail's brand
-   row, the chat window's top strip when the rail is closed, the front door's
-   header. */
+   So the page keeps that strip for them, the way a native window does: the
+   top --dial-titlebar of the window is the lights' and a handle to drag the
+   window by, and everything starts below it. The chat window drops to its
+   foot; the rail's first row lines up with the chat window's top strip
+   (32 + 24 = 56, the strip's centre); the front door's header follows it.
+   In full screen macOS hides the lights and the strip goes (`data-fullscreen`,
+   set by the app). Under a native title bar (Windows, Linux) there is no
+   strip at all. `data-shell` is set pre-paint by the boot script from what
+   the app announces.
+
+   The app is named by its own window, Dock and taskbar, and has no brand
+   mark: the rail's brand row goes under any `data-shell`, and so does the
+   front door's mark. */
 :root {
-  --dial-lights-x: 90px;
-  --dial-lights-y: 32px;
+  --dial-titlebar: 32px;
 }
 
-/* Rail open: the lights sit in the brand row, ahead of the mark. The frame
-   pads the row down so its 40px centre lands on the lights' line. */
+:root[data-shell] .dial-rail-brand,
+:root[data-shell] .dial-brand {
+  display: none;
+}
+
+:root[data-shell] .dial-door-bar {
+  justify-content: flex-end;
+}
+
+:root[data-shell="macos"]:not([data-fullscreen]) .app-workspace {
+  margin-top: var(--dial-titlebar);
+}
+
+/* The rail's first row is New chat: 4px of margin, then 32px — centred on
+   the chat window's top strip when the frame starts 4px below the bar. */
 :root[data-shell="macos"]:not([data-fullscreen]) .dial-rail-frame {
-  padding-top: calc(var(--dial-lights-y) - 20px);
+  padding-top: calc(var(--dial-titlebar) + 4px);
 }
 
-:root[data-shell="macos"]:not([data-fullscreen]) .dial-rail-brand {
-  /* The frame's own 8px left padding is already behind the row. */
-  padding-left: calc(var(--dial-lights-x) - 8px);
-}
-
-/* Rail closed, or a narrow window: the lights sit in the chat window's top
-   strip, which starts 8px in — its 48px centre is the same line. */
-:root[data-shell="macos"]:not([data-fullscreen]).dial-rail-collapsed .dial-strip {
-  padding-left: calc(var(--dial-lights-x) - 8px);
-}
-
-/* The front door's header spans the window from its top edge. */
 :root[data-shell="macos"]:not([data-fullscreen]) .dial-door-bar {
-  padding-left: var(--dial-lights-x);
-  padding-top: calc(var(--dial-lights-y) * 2 - 56px);
+  height: calc(3.5rem + var(--dial-titlebar));
+  padding-top: var(--dial-titlebar);
 }
 
 @media (max-width: 767px) {
-  :root[data-shell="macos"]:not([data-fullscreen]) .dial-strip {
-    padding-left: calc(var(--dial-lights-x) - 8px);
-  }
-
-  /* A phone gets the window edge to edge; a narrow desktop window keeps it
-     inset, so the lights have a row to sit in like every other width. */
+  /* A phone gets the window edge to edge; a narrow desktop window keeps the
+     chat window inset, under the strip like every other width. */
   :root[data-shell="macos"]:not([data-fullscreen]) .app-workspace {
-    margin: 8px;
+    margin: var(--dial-titlebar) 8px 8px;
     border-radius: var(--radius-window);
     box-shadow: var(--dial-shadow-window);
   }

@@ -12,6 +12,7 @@
     "allow-session-token",
     "allow-set-session-token",
     "allow-clear-session-token",
-    "allow-take-openrouter-code"
+    "allow-take-openrouter-code",
+    "allow-release-window"
   ]
 }

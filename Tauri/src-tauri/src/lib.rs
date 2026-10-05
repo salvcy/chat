@@ -4,22 +4,29 @@
 //! it is served from inside the binary at `tauri://localhost` and opens with
 //! no network round trip. It talks to the same API as the website, at
 //! chat.belayet.app, across origins — the Worker allows this app's origins,
-//! and the session is a bearer token kept in the macOS Keychain instead of a
-//! cookie (`web/lib/api.ts`). Bundling also means the code that holds the
-//! vault key is the code in the installed app, not whatever a server sends.
+//! and the session is a bearer token kept in the system's credential store
+//! instead of a cookie (`web/lib/api.ts`). Bundling also means the code that
+//! holds the vault key is the code in the installed app, not whatever a
+//! server sends.
 //!
 //! What the native side provides:
 //!
 //! - `window.__CHAT_DESKTOP__` before any page script runs — the API's origin
 //!   and the platform. It is what switches the UI into desktop mode.
-//! - The session token's home: four commands over the Keychain, plus the
-//!   OpenRouter code that comes back through the `belayet-chat://` deep link
-//!   after the user approves in their browser.
-//! - A window without a title bar: the traffic lights sit over the page, in
-//!   rows the UI leaves room for (`web/app/globals.css`, "window controls").
+//! - The session token's home: commands over the system's credential store —
+//!   the Keychain on macOS, Credential Manager on Windows, the Secret Service
+//!   (GNOME Keyring, KWallet) on Linux — plus the OpenRouter code that comes
+//!   back through the `belayet-chat://` deep link after the user approves in
+//!   their browser.
+//! - A window without a title bar on macOS: the traffic lights stay where
+//!   macOS puts them, over a strip the UI keeps free for them
+//!   (`web/app/globals.css`, "the desktop app's window").
 //! - Links leave: anything that is not the bundled UI opens in the default
-//!   browser. Downloads land in Downloads and are revealed. On macOS closing
-//!   the window hides it, so a reply keeps streaming.
+//!   browser. Downloads land in Downloads and are revealed.
+//! - On macOS closing the window hides it, so a reply keeps streaming; once it
+//!   has been closed a while with nothing in flight, the page asks to be let
+//!   go and the window is destroyed, giving WebKit's memory back. The Dock
+//!   builds a new one (`release_window`, `web/lib/release.ts`).
 //!
 //! The bundled UI is the only content the window ever shows, and the only
 //! content the capabilities (`capabilities/default.json`) reach.
@@ -55,21 +62,13 @@ const MAIN_WINDOW: &str = "main";
 /// The web app's dark `chrome` token, behind the page while it loads.
 const CHROME: Color = Color(14, 14, 14, 255);
 
-/// Where the traffic lights sit: the close button's left edge, and the inset
-/// tao turns into the title-bar height. Measured from the native buttons, this
-/// puts three 14px lights from x 18 to 78 with their centre 32px from the top
-/// — the line the UI centres its top rows on (`--dial-lights-y` and
-/// `--dial-lights-x` in web/app/globals.css). Change them together; the
-/// centre comes out at `y - 2`.
-#[cfg(target_os = "macos")]
-const TRAFFIC_LIGHTS: (f64, f64) = (18.0, 34.0);
-
 /// The URL scheme the OpenRouter relay page opens (`web/lib/pkce.ts`).
 const DEEP_LINK_SCHEME: &str = "belayet-chat";
 
-/// The Keychain item: one per app, one per machine user.
-const KEYCHAIN_SERVICE: &str = "app.belayet.chat";
-const KEYCHAIN_ACCOUNT: &str = "session";
+/// The credential store item is named by the app's identifier, so a build
+/// with another identifier — the local one, `tauri.local.conf.json` — never
+/// reads or replaces the installed app's session. One per machine user.
+const CREDENTIAL_ACCOUNT: &str = "session";
 
 /// A Better Auth session token is under a hundred characters; anything far
 /// longer is not one.
@@ -153,15 +152,23 @@ fn download_handler<R: Runtime>(
 
 /* ------------------------------- session -------------------------------- */
 
-fn keychain() -> Result<keyring::Entry, String> {
-    keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(|error| error.to_string())
+/// The session's item in the system's credential store. Where there is no
+/// store to reach — a Linux desktop without a Secret Service running — every
+/// command fails, and the UI keeps the token in memory: signed in until the
+/// app quits, asked for the password at the next launch.
+fn credential<R: Runtime>(app: &AppHandle<R>) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(&app.config().identifier, CREDENTIAL_ACCOUNT)
+        .map_err(|error| error.to_string())
 }
 
-/// The stored session token, if any. Async so a Keychain prompt never blocks
-/// the main thread.
+/// The stored session token, if any. Async so a store that prompts — the
+/// Keychain asking about an item a differently signed build made — never
+/// blocks the main thread. A blank item is a signed-out one
+/// (`clear_session_token`).
 #[tauri::command]
-async fn session_token() -> Result<Option<String>, String> {
-    match keychain()?.get_password() {
+async fn session_token<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {
+    match credential(&app)?.get_password() {
+        Ok(token) if token.is_empty() => Ok(None),
         Ok(token) => Ok(Some(token)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(error) => Err(error.to_string()),
@@ -169,20 +176,28 @@ async fn session_token() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-async fn set_session_token(token: String) -> Result<(), String> {
+async fn set_session_token<R: Runtime>(app: AppHandle<R>, token: String) -> Result<(), String> {
     if token.is_empty() || token.len() > MAX_TOKEN_CHARS {
         return Err("not a session token".into());
     }
-    keychain()?
+    credential(&app)?
         .set_password(&token)
         .map_err(|error| error.to_string())
 }
 
+/// Signing out. The Keychain lets only the build that created an item delete
+/// it — a later build, signed the same way, may read and overwrite it but not
+/// remove it ("Invalid attempt to change the owner of this item", measured)
+/// — so where deleting is refused the token is overwritten with nothing,
+/// which `session_token` reads as signed out.
 #[tauri::command]
-async fn clear_session_token() -> Result<(), String> {
-    match keychain()?.delete_credential() {
+async fn clear_session_token<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    let entry = credential(&app)?;
+    match entry.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(error.to_string()),
+        Err(refused) => entry
+            .set_password("")
+            .map_err(|error| format!("{refused}; blanking it failed too: {error}")),
     }
 }
 
@@ -235,6 +250,61 @@ fn take_openrouter_code(pending: State<'_, PendingCode>) -> Option<String> {
 #[derive(Default)]
 struct FullScreen(AtomicBool);
 
+/// Where the main window is in its life. Only macOS leaves `Open`: elsewhere
+/// closing the window quits the app.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Phase {
+    #[default]
+    Open,
+    /// Closed by the user: hidden, with the page still running, so a reply
+    /// keeps streaming.
+    Closed,
+    /// Destroyed while closed, at the page's request, to give its memory
+    /// back. The app stays in the Dock and builds a new window when asked.
+    Released,
+    /// Asked for while the release was still taking the old window down:
+    /// built as soon as that one is gone.
+    Reopening,
+}
+
+#[derive(Default)]
+struct MainWindow(Mutex<Phase>);
+
+fn phase<R: Runtime>(app: &AppHandle<R>) -> std::sync::MutexGuard<'_, Phase> {
+    app.state::<MainWindow>()
+        .inner()
+        .0
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The page asks to be let go (`web/lib/release.ts`): the window was closed a
+/// while ago and nothing in it is in flight — no reply streaming, no turn
+/// unsaved, nothing typed. Honoured only while the window is still closed;
+/// decided on the main thread, where the Dock's reopen is handled too, so the
+/// two cannot cross.
+#[tauri::command]
+fn release_window<R: Runtime>(app: AppHandle<R>) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(window) = handle.get_webview_window(MAIN_WINDOW) else {
+            return;
+        };
+        let mut phase = phase(&handle);
+        if *phase != Phase::Closed || window.is_visible().unwrap_or(true) {
+            return;
+        }
+        *phase = Phase::Released;
+        drop(phase);
+        #[cfg(debug_assertions)]
+        eprintln!("chat: releasing the window");
+        if let Err(error) = window.destroy() {
+            eprintln!("chat: could not release the window: {error}");
+            *self::phase(&handle) = Phase::Closed;
+        }
+    });
+}
+
 /// macOS hides the traffic lights in full screen, so the UI drops the room it
 /// keeps for them (`data-fullscreen` on the root element).
 fn tell_page_fullscreen<R: Runtime>(app: &AppHandle<R>, fullscreen: bool) {
@@ -245,11 +315,40 @@ fn tell_page_fullscreen<R: Runtime>(app: &AppHandle<R>, fullscreen: bool) {
     }
 }
 
+/// Bring the window back: show it, or build it again after a release.
 fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let window = handle.get_webview_window(MAIN_WINDOW);
+        let mut phase = phase(&handle);
+        match (*phase, window) {
+            // Still on its way out; `on_main_window_destroyed` builds the next.
+            (Phase::Released | Phase::Reopening, Some(_)) => *phase = Phase::Reopening,
+            (_, Some(window)) => {
+                *phase = Phase::Open;
+                drop(phase);
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+            (_, None) => {
+                drop(phase);
+                if let Err(error) = open_main_window(&handle) {
+                    eprintln!("chat: could not open the window: {error}");
+                }
+            }
+        }
+    });
+}
+
+/// The old window is gone after a release; if it was asked for meanwhile,
+/// build the new one now that the label is free.
+fn on_main_window_destroyed<R: Runtime>(app: &AppHandle<R>) {
+    let reopen = *phase(app) == Phase::Reopening;
+    if reopen {
+        if let Err(error) = open_main_window(app) {
+            eprintln!("chat: could not open the window: {error}");
+        }
     }
 }
 
@@ -320,16 +419,21 @@ fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             let _ = window.set_title(&title);
         });
 
+    // The traffic lights are left where macOS puts them — x 9 to 69, centred
+    // 16px down in a 32px bar on macOS 27 — and the UI keeps that strip free
+    // (`--dial-titlebar`). They are deliberately not moved: AppKit puts moved
+    // buttons back on a title change, a resize and a theme change (measured),
+    // and tao re-applies a custom position after only the first two — the
+    // theme is set at every launch (`syncWindowTheme`), so moved lights ended
+    // up back at the default height, beside a layout built for the other one.
     #[cfg(target_os = "macos")]
     let builder = builder
         .title_bar_style(tauri::TitleBarStyle::Overlay)
-        .hidden_title(true)
-        .traffic_light_position(tauri::LogicalPosition::new(
-            TRAFFIC_LIGHTS.0,
-            TRAFFIC_LIGHTS.1,
-        ));
+        .hidden_title(true);
 
     let window = builder.build()?;
+    *phase(app) = Phase::Open;
+    app.state::<FullScreen>().0.store(false, Ordering::Relaxed);
     window.show()?;
     window.set_focus()?;
 
@@ -356,10 +460,10 @@ mod macos {
             AboutMetadata, Menu, MenuBuilder, MenuEvent, MenuItemBuilder, SubmenuBuilder,
             HELP_SUBMENU_ID, WINDOW_SUBMENU_ID,
         },
-        AppHandle, Manager, Runtime, Window, WindowEvent,
+        AppHandle, Emitter, Manager, Runtime, Window, WindowEvent,
     };
 
-    use super::MAIN_WINDOW;
+    use super::{Phase, MAIN_WINDOW};
 
     /// The standard menu bar, plus View → Reload, Back and Forward. There is no
     /// address bar, so Back is how the privacy page returns to the chat.
@@ -444,16 +548,27 @@ mod macos {
     /// ordered out — that leaves an empty black Space behind — the app is
     /// hidden instead, which takes the Space with it until the Dock brings
     /// both back.
+    ///
+    /// A hidden window is closed: the page is told, so it can ask to be
+    /// released once it has been closed a while (`super::release_window`).
+    /// A hidden app is not — switching back to it must find its window.
     pub fn hide_on_close<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
         if let WindowEvent::CloseRequested { api, .. } = event {
             api.prevent_close();
-            let hidden = if window.is_fullscreen().unwrap_or(false) {
-                window.app_handle().hide()
-            } else {
-                window.hide()
-            };
-            if let Err(error) = hidden {
+            let app = window.app_handle();
+            if window.is_fullscreen().unwrap_or(false) {
+                if let Err(error) = app.hide() {
+                    eprintln!("chat: could not hide the app: {error}");
+                }
+                return;
+            }
+            if let Err(error) = window.hide() {
                 eprintln!("chat: could not hide the window: {error}");
+                return;
+            }
+            *super::phase(app) = Phase::Closed;
+            if let Err(error) = app.emit_to(MAIN_WINDOW, "window-closed", ()) {
+                eprintln!("chat: could not tell the page it was closed: {error}");
             }
         }
     }
@@ -475,11 +590,13 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(PendingCode::default())
         .manage(FullScreen::default())
+        .manage(MainWindow::default())
         .invoke_handler(tauri::generate_handler![
             session_token,
             set_session_token,
             clear_session_token,
-            take_openrouter_code
+            take_openrouter_code,
+            release_window
         ])
         .on_window_event(on_window_event);
 
@@ -494,6 +611,15 @@ pub fn run() {
             app.deep_link().on_open_url(move |event| {
                 receive_links(&handle, &event.urls());
             });
+            // An AppImage is never installed, so nothing told the desktop
+            // about the scheme; the .deb and .rpm packages and the Windows
+            // installers register it, and macOS reads it from the bundle.
+            #[cfg(target_os = "linux")]
+            if app.env().appimage.is_some() {
+                if let Err(error) = app.deep_link().register_all() {
+                    eprintln!("chat: could not register the link scheme: {error}");
+                }
+            }
             open_main_window(app.handle())?;
             // A link that launched the app arrived before anything listened.
             if let Ok(Some(urls)) = app.deep_link().get_current() {
@@ -503,14 +629,22 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building the app")
-        .run(|app, event| {
+        .run(|app, event| match event {
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::Destroyed,
+                ..
+            } if label == MAIN_WINDOW => on_main_window_destroyed(app),
+            // A Mac app outlives its windows: a released window must not take
+            // the app with it. Quit does not come this way.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::ExitRequested {
+                code: None, api, ..
+            } => api.prevent_exit(),
             // The Dock icon, or opening the app again from Finder.
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { .. } = event {
-                show_main_window(app);
-            }
-            #[cfg(not(target_os = "macos"))]
-            let _ = (app, event);
+            tauri::RunEvent::Reopen { .. } => show_main_window(app),
+            _ => {}
         });
 }
 
