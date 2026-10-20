@@ -409,8 +409,20 @@ invoking a Worker.
   Esc), regenerate, edit-and-resend (truncate + resend), branch,
   jump-to-bottom, retry with a class-specific hint, and a **mid-stream
   snapshot every 1.2s** so closing the tab on a long answer no longer
-  throws it away.
-- `components/chat/Composer.tsx` — left, what goes in: attach and the
+  throws it away. **The composer lives in the transcript's scroller**,
+  `sticky` at its bottom after the transcript (October 2026, with the
+  glass): the conversation scrolls on under it, a wheel or a swipe over it
+  moves the conversation, and the pinned bottom is simply the scroller's
+  end. The resize observer that keeps the reader pinned watches the dock
+  as well, since a wrapping composer now lengthens what scrolls instead of
+  shrinking the viewport. The empty transcript is a flex column so the
+  greeting can fill it and sit on the docked composer.
+- `components/chat/Composer.tsx` — **liquid glass** (October 2026, the
+  user's call, after Apple's): `.dial-glass` in `globals.css`, the one
+  translucent surface. The tint, the blur and the rim are tuned so text
+  passing under it reads as soft streaks and a shark as a blurred shape,
+  while the placeholder and typed text stay crisp; the jump-to-latest
+  control is the same glass, thicker. Left, what goes in: attach and the
   `@image` tool; right, where it goes: the model dial and send; nothing
   else. **Web search is not a control**:
   `reconcileSettings` sets `search` to whether the model can call tools, the
@@ -533,14 +545,23 @@ invoking a Worker.
 - `components/tuner/StatusStrip.tsx` — the conversation's title and its
   running totals: thread cost · thread tokens · key balance. **No model** —
   that moved into the composer's dial (October 2026), where the choice is
-  made.
-- `components/sidebar/ConversationList.tsx` — brand, New chat, then a
+  made. **New chat sits at its right end wherever no rail is on screen** — a
+  phone, or the rail closed (October 2026, the user's call). From 768px it
+  takes no room while the rail is open and slides in on the rail's clock as
+  it closes (`.dial-strip-new`).
+- `components/sidebar/ConversationList.tsx` — one first row, the mark and
+  then New chat, as tall as the chat window's top strip and as far down, so
+  the two share a centre line (October 2026: the mark used to have a row of
+  its own above New chat; the desktop app's lights take its place). Then a
   "Chats" header whose search control grows right-to-left into a
   title/model filter (Escape closes and clears it); date grouping, pin,
   export, rename, delete. **One line per row** — model and cost moved to the
   row's tooltip, and the open thread's totals are always in the status
   strip. The ellipsis overlays the title on hover and opens a pop-in menu;
   delete asks twice.
+  The list fades the edge that has more beyond it (`.dial-scroll-edges`,
+  as in the model dial) instead of cutting off under a rule, so the account
+  footer has none.
 - `components/sidebar/RailHandle.tsx` / `RailToggle.tsx` — drag-to-resize
   (180–460px, double-click resets) and collapse (⌘B).
 - `components/chat/SelectionActions.tsx` — select text inside one answer and
@@ -615,9 +636,10 @@ runs on the web and in the app, and switches mode at runtime.
   `data-tauri-drag-region` marks what moves the window (`deep` on rows whose
   buttons stay clickable); it is inert in a browser.
 - **No brand mark in the app** (October 2026, the user's call: squeezed in
-  beside the traffic lights it looked lost). Under any `data-shell` the
-  rail's brand row goes, and the front door's mark (`dial-brand`) with it.
-  The website keeps both.
+  beside the traffic lights it looked lost). Under any `data-shell` the mark
+  at the start of the rail's first row (`dial-rail-brand`) goes, and the
+  front door's (`dial-brand`) with it. The website keeps both; there the
+  mark sits on the lights' line where the lights would.
 - **A closed window gives its memory back** (`lib/release.ts`). On macOS
   closing only hides the window, so the page stayed resident for a window
   nobody could see — 314MB measured on a real account, 236MB of it the page's
@@ -1181,10 +1203,20 @@ comment.
   1px ring plus soft layered stacks. In dark mode the ring becomes a faint
   *light* edge so it reads against the shadow. No backdrop blur on surfaces —
   the old glass was replaced by solid panels; overlays dim with `bg-black/30`
-  and a 2px blur only.
+  and a 2px blur only. **The one exception is the composer** (and the
+  jump-to-latest control over it): liquid glass, because the conversation
+  and the ocean pass under it (October 2026, the user's call).
 - **Radii:** `rounded-chip` 6 · `rounded-control` 8 · `rounded-card` 10 ·
   `rounded-window` 14 · pills `rounded-full`. The composer (20px) and user
   bubble (18px, 6px tail corner) are the deliberate exceptions.
+- **The mark is a slash in a squircle** (October 2026, the user's call; it
+  was three level bars). Foreground tile, background slash, so it inverts
+  with the theme (`components/ui/BrandMark.tsx`). The tile is Apple's
+  continuous corner at radius 6 on a 20 grid; the favicon
+  (`public/brand/chat-mark-v3.*`, its SVG inverting under a dark browser
+  theme) and the Windows and Linux app icons use it as is, and the macOS
+  icon puts the slash on Apple's own icon tile so it sits with the Dock
+  (`../Tauri/assets/`, `npm run icons` there). Change them together.
 - **Squircles in and around the composer** (October 2026, the user's call:
   "from a circly vibe to a squaricle vibe"). Send, attach, the image tool,
   the model dial and its panel, the effort slider, and the empty state's

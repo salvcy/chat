@@ -8,7 +8,8 @@ import type { SyncStatus } from "@/lib/session";
  * account, and the way into settings.
  *
  * It sits below the scrolling list as a `shrink-0` sibling, so the list can
- * scroll without carrying the footer with it.
+ * scroll without carrying the footer with it. No rule above it: the list
+ * fades out where there is more below, which is the edge.
  */
 export default function AccountButton({
   user,
@@ -24,7 +25,7 @@ export default function AccountButton({
   const failed = status.state === "error";
 
   return (
-    <div className="shrink-0 border-t border-line pt-1.5">
+    <div className="shrink-0 pt-1">
       <button
         onClick={onOpen}
         title={user ? "Account and settings" : "Sign in"}

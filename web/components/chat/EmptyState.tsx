@@ -16,10 +16,10 @@ function greetingFor(hour: number): string {
  * The empty state is an invitation, not a logo screen.
  *
  * Two lines, two weights of ink — who and when in the muted one, the question
- * in the full one — after Beautiful UI's harness greeting. It sits at the
- * bottom of the transcript area, so with the composer docked mid-canvas the
- * two read as one group; the first message lets the composer settle and this
- * scrolls away with the rest of the empty transcript.
+ * in the full one — after Beautiful UI's harness greeting. It fills the
+ * empty transcript and sits at its bottom, so with the composer docked
+ * mid-canvas the two read as one group; the first message lets the composer
+ * settle and this scrolls away with the rest of the empty transcript.
  *
  * Under it, the one useful piece of context: what the selected model can do.
  */
@@ -54,7 +54,7 @@ export default function EmptyState({
 
   return (
     <section
-      className="empty-state flex h-full flex-col justify-end px-1 pb-5"
+      className="empty-state flex flex-1 flex-col justify-end px-1 pb-5"
       style={{ animation: "dial-fade-up 420ms cubic-bezier(0.23,1,0.32,1) both" }}
     >
       {/* The ocean swims behind this; the pool keeps the words above clear water. */}

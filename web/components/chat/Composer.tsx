@@ -143,7 +143,7 @@ export default function Composer({
   return (
     <div className="px-3 pb-3 pt-2 sm:px-5">
       <div
-        className={`composer-surface relative rounded-[20px] ${
+        className={`composer-surface dial-glass relative rounded-[20px] ${
           dragging ? "bg-field" : ""
         }`}
         onDragEnter={(e) => {

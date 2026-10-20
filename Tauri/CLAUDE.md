@@ -249,7 +249,9 @@ Because the UI is on another origin than the API:
 
 ## Icons
 
-`assets/icon.svg` is the brand mark edge to edge (Windows, Linux);
-`assets/icon-macos.svg` puts it on Apple's 1024 grid. `npm run icons` renders
+`assets/icon.svg` is the brand mark — a slash in a squircle — edge to edge
+(Windows, Linux); `assets/icon-macos.svg` puts the slash on Apple's 1024
+grid, on Apple's own icon tile (continuous corners at its 185.4 radius) so it
+sits with the rest of the Dock. `npm run icons` renders
 both and keeps `icon.icns` from the second. If the mark changes in `../web`,
 change both.

@@ -222,27 +222,114 @@ button:disabled {
   box-shadow: var(--dial-shadow-window);
 }
 
-/* The composer floats over the end of the transcript, so it is the only
-   surface besides overlays that carries a card shadow at rest; focus firms
-   the ring rather than adding a glow. */
-.composer-surface {
-  background: var(--panel);
-  box-shadow: var(--dial-shadow-card);
+/* The composer is liquid glass (October 2026, the user's call, after
+   Apple's): the one translucent surface in the app. It is stuck to the
+   bottom of the transcript's scroller (ChatView), so a conversation scrolls
+   on under it and the empty chat's sharks swim beneath it — blurred and
+   saturated through a thin tint, so what passes is colour and motion, never
+   words competing with the ones being typed.
+
+   The glass is built from light, not colour: a tint of the window's own
+   white or near-black, a bright specular rim that catches the top-left and
+   fades round the sides (`::before`, a gradient border cut out with a
+   mask), an inner sheen, and a soft lift. Focus firms the edge, as it did
+   on the solid panel. WebKit — Safari and the desktop app — takes the
+   prefixed backdrop filter. `.dial-glass` is the material, so the
+   jump-to-latest control floating above it is the same glass — thicker
+   (`.dial-glass-thick`): a 32px button over a paragraph needs more of its
+   own colour than a composer does to stay legible. */
+:root {
+  --glass-tint: rgba(252, 252, 252, 0.4);
+  --glass-tint-focus: rgba(252, 252, 252, 0.6);
+  --glass-tint-thick: rgba(252, 252, 252, 0.78);
+  --glass-rim: rgba(255, 255, 255, 0.95);
+  --glass-rim-low: rgba(255, 255, 255, 0.5);
+  --glass-sheen: rgba(255, 255, 255, 0.35);
+  --glass-edge: rgba(0, 0, 0, 0.07);
+  --glass-edge-focus: rgba(0, 0, 0, 0.13);
+  --glass-lift: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 28px rgba(0, 0, 0, 0.08);
+  --glass-lift-focus: 0 2px 4px rgba(0, 0, 0, 0.05), 0 12px 36px rgba(0, 0, 0, 0.11);
+}
+
+.dark {
+  --glass-tint: rgba(30, 30, 30, 0.42);
+  --glass-tint-focus: rgba(30, 30, 30, 0.58);
+  --glass-tint-thick: rgba(30, 30, 30, 0.76);
+  --glass-rim: rgba(255, 255, 255, 0.24);
+  --glass-rim-low: rgba(255, 255, 255, 0.08);
+  --glass-sheen: rgba(255, 255, 255, 0.05);
+  --glass-edge: rgba(255, 255, 255, 0.07);
+  --glass-edge-focus: rgba(255, 255, 255, 0.14);
+  --glass-lift: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 32px rgba(0, 0, 0, 0.42);
+  --glass-lift-focus: 0 2px 4px rgba(0, 0, 0, 0.32), 0 14px 40px rgba(0, 0, 0, 0.5);
+}
+
+.dial-glass {
+  background: var(--glass-tint);
+  -webkit-backdrop-filter: blur(8px) saturate(180%);
+  backdrop-filter: blur(8px) saturate(180%);
+  box-shadow:
+    inset 0 0 0 1px var(--glass-sheen),
+    0 0 0 1px var(--glass-edge),
+    var(--glass-lift);
   transition:
+    background-color 150ms ease,
     box-shadow 150ms ease,
-    border-radius 150ms ease;
+    border-radius 150ms ease,
+    color 150ms ease,
+    scale 150ms ease;
+}
+
+.dial-glass-thick {
+  background: var(--glass-tint-thick);
+}
+
+/* The rim. The glass must be positioned (`relative`, `absolute`). */
+.dial-glass::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  padding: 1px;
+  border-radius: inherit;
+  background: linear-gradient(
+    165deg,
+    var(--glass-rim) 0%,
+    transparent 34%,
+    transparent 66%,
+    var(--glass-rim-low) 100%
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box exclude,
+    linear-gradient(#000 0 0);
+  pointer-events: none;
 }
 
 .composer-surface:focus-within {
+  background: var(--glass-tint-focus);
   box-shadow:
-    0 0 0 1px var(--line-strong),
-    var(--dial-shadow-md);
+    inset 0 0 0 1px var(--glass-sheen),
+    0 0 0 1px var(--glass-edge-focus),
+    var(--glass-lift-focus);
 }
 
-.dark .composer-surface:focus-within {
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.14),
-    0 4px 18px rgba(0, 0, 0, 0.35);
+/* Below the glass, the transcript would run on, sharp, through the strip
+   between the composer and the window's edge. It fades out there instead,
+   the way content softens at the edge of a scroll view under a floating
+   bar. Only in a conversation: the empty chat's dock is mid-canvas, and
+   the ocean swims through the space under it. */
+.composer-dock:not([data-empty])::before {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  height: 22px;
+  background: linear-gradient(to top, var(--background) 35%, transparent);
+  pointer-events: none;
 }
 
 /* Squircles — the composer's controls (send, attach, the model dial, the
@@ -371,7 +458,9 @@ button:disabled {
    of its centre only softly — a hunting shark cuts across — and dark blocks
    under the question made it unreadable for a second at a time. The pool is
    the window's own colour fading out past the text, so a shark slips under
-   it instead of through the words; the composer, a solid panel, needs none.
+   it instead of through the words. The composer needs none: it is glass,
+   and a shark passing under it blurs to colour and motion, which is the
+   point of it.
    It is a shadow, not a larger box: shadows paint outside an element without
    counting as overflow, and anything wider than the column gave the phone's
    transcript a horizontal scrollbar. */
@@ -415,6 +504,39 @@ button:disabled {
     visibility 0s linear 220ms;
 }
 
+/* New chat in the chat window's top strip, at its right end: for when the
+   rail is not on screen. A phone always has it. From 768px the rail is
+   there unless it is closed, so until then the button takes no room — no
+   width, and the strip's 4px gap before it taken back, so nothing beside it
+   shifts — and it opens on the rail's clock as the rail closes. Hidden, it
+   is out of the tab order too. Its own hover and press keep their
+   transitions, since this list replaces the button's. */
+@media (min-width: 768px) {
+  .dial-strip-new {
+    width: 0;
+    margin-left: -4px;
+    overflow: hidden;
+    opacity: 0;
+    visibility: hidden;
+    transition:
+      width 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      margin-left 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      opacity 160ms ease,
+      background-color 150ms ease,
+      color 150ms ease,
+      scale 150ms ease,
+      visibility 0s linear 220ms;
+  }
+
+  .dial-rail-collapsed .dial-strip-new {
+    width: 2rem;
+    margin-left: 0;
+    opacity: 1;
+    visibility: visible;
+    transition-delay: 0s;
+  }
+}
+
 /* ---- the desktop app's window ----
    The desktop app (../Tauri) hides the title bar on macOS and sets the
    traffic lights into the page's own top rows, so there is no bar above
@@ -435,8 +557,8 @@ button:disabled {
    set pre-paint by the boot script from what the app announces.
 
    The app is named by its own window, Dock and taskbar, and has no brand
-   mark: the rail's brand row goes under any `data-shell`, and so does the
-   front door's mark. */
+   mark: the mark at the start of the rail's first row goes under any
+   `data-shell`, and so does the front door's. */
 :root {
   --dial-lights-x: 90px;
   --dial-lights-y: 32px;
@@ -451,14 +573,11 @@ button:disabled {
   justify-content: flex-end;
 }
 
-/* Rail open: New chat shares the lights' row. The frame pads it down so the
-   row's 32px (after its 4px margin) is centred on the line, and the row
-   starts after the lights — a margin, not padding, so its highlight does
+/* Rail open: New chat shares the lights' row. That row is centred on the
+   line already — 48px tall from the frame's 8px, like the strip beside it —
+   and where the website puts its mark the lights take the room: the row
+   starts after them, by a margin rather than padding so its highlight does
    not run under them. */
-:root[data-shell="macos"]:not([data-fullscreen]) .dial-rail-frame {
-  padding-top: calc(var(--dial-lights-y) - 20px);
-}
-
 :root[data-shell="macos"]:not([data-fullscreen]) .dial-rail-new {
   /* The frame's own 8px left padding is already behind the row. */
   margin-left: calc(var(--dial-lights-x) - 8px);
@@ -866,7 +985,6 @@ button:disabled {
 /* Keep the blank canvas fully useful on short laptop/browser windows. */
 @media (min-width: 768px) and (max-height: 680px) {
   .empty-state {
-    min-height: 100%;
     padding-bottom: 1rem;
     padding-top: 1.5rem;
   }

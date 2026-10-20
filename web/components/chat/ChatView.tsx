@@ -680,6 +680,7 @@ export default function ChatView({
   const scrollRef = useRef<HTMLDivElement>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const regionRef = useRef<HTMLDivElement>(null);
+  const dockRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
   const scrollGeometryRef = useRef<{
     top: number;
@@ -875,12 +876,14 @@ export default function ChatView({
         measureAtBottom();
       });
     });
-    // Follow both kinds of geometry change: streaming alters the transcript's
-    // height, while a wrapping composer shrinks the scroller's viewport. The
-    // latter used to leave scrollTop unchanged and make every newly wrapped
-    // line look like an upward jump.
+    // Follow every geometry change: streaming alters the transcript's
+    // height, a resized window the scroller's, and a wrapping composer the
+    // end of what scrolls — it sits in the scroller, after the transcript.
+    // That last one used to leave scrollTop unchanged and make every newly
+    // wrapped line look like an upward jump.
     observer.observe(transcript);
     observer.observe(scroller);
+    if (dockRef.current) observer.observe(dockRef.current);
 
     return () => {
       cancelAnimationFrame(frame);
@@ -1339,64 +1342,111 @@ export default function ChatView({
           onScroll={onScroll}
           className="dial-scroll relative min-w-0 flex-1 overflow-y-auto overscroll-contain [overflow-anchor:none]"
         >
-          <div
-            ref={transcriptRef}
-            className={`dial-column px-4 pb-5 pt-2 sm:px-7 ${
-              shown.length === 0 ? "h-full" : ""
-            }`}
-          >
-            {shown.length === 0 && (
-              <EmptyState
-                settings={settings}
-                models={models}
-                userName={userName}
-                onOpenModel={() => onOpenSwitcher()}
-              />
-            )}
-
-            <div className="dial-rows">
-              {shown.map((m, idx) => (
-                <div key={m.id} data-message-index={idx}>
-                  <MessageBubble
-                    message={m}
-                    index={idx}
-                    streaming={
-                      (chatBusy || remoteLive) &&
-                      idx === shown.length - 1 &&
-                      m.role === "assistant"
-                    }
-                    onEdit={m.role === "user" && !occupied ? onBubbleEdit : undefined}
-                    onRegenerate={
-                      m.role === "assistant" && !occupied ? onBubbleRegenerate : undefined
-                    }
-                    onBranch={m.role === "assistant" && !occupied ? onBubbleBranch : undefined}
-                    onRetryImage={
-                      m.role === "assistant" && !occupied ? onBubbleRetryImage : undefined
-                    }
-                  />
-                </div>
-              ))}
-
-              {/* Between send and the first streamed chunk there is no
-                  assistant message to hang a status on, and the transcript
-                  used to sit silent. The same loader the thinking header
-                  uses — the same component, at the same offset — so the
-                  hand-off when the message arrives is seamless. */}
-              {(chatBusy || remoteLive) && shown[shown.length - 1]?.role === "user" && (
-                <div className="pb-1">
-                  <div className="dial-activity-block mb-3">
-                    <Activity steps={[]} live since={undefined} canSearch={false} />
-                  </div>
-                  {/* Where the reply's metrics row will be, so taking over
-                      moves nothing while the transcript is pinned to the
-                      bottom. */}
-                  <div className="min-h-8" />
-                </div>
+          {/* The transcript, then the composer — both in the scroller, the
+              composer stuck to its bottom, so the conversation scrolls on
+              under the glass and a wheel or a swipe over the composer still
+              moves it. At least the scroller's height, so a short thread
+              keeps the composer at the bottom. */}
+          <div className="flex min-h-full flex-col">
+            <div
+              ref={transcriptRef}
+              className={`dial-column flex-1 px-4 pb-5 pt-2 sm:px-7 ${
+                shown.length === 0 ? "flex flex-col" : ""
+              }`}
+            >
+              {shown.length === 0 && (
+                <EmptyState
+                  settings={settings}
+                  models={models}
+                  userName={userName}
+                  onOpenModel={() => onOpenSwitcher()}
+                />
               )}
+
+              <div className="dial-rows">
+                {shown.map((m, idx) => (
+                  <div key={m.id} data-message-index={idx}>
+                    <MessageBubble
+                      message={m}
+                      index={idx}
+                      streaming={
+                        (chatBusy || remoteLive) &&
+                        idx === shown.length - 1 &&
+                        m.role === "assistant"
+                      }
+                      onEdit={m.role === "user" && !occupied ? onBubbleEdit : undefined}
+                      onRegenerate={
+                        m.role === "assistant" && !occupied ? onBubbleRegenerate : undefined
+                      }
+                      onBranch={m.role === "assistant" && !occupied ? onBubbleBranch : undefined}
+                      onRetryImage={
+                        m.role === "assistant" && !occupied ? onBubbleRetryImage : undefined
+                      }
+                    />
+                  </div>
+                ))}
+
+                {/* Between send and the first streamed chunk there is no
+                    assistant message to hang a status on, and the transcript
+                    used to sit silent. The same loader the thinking header
+                    uses — the same component, at the same offset — so the
+                    hand-off when the message arrives is seamless. */}
+                {(chatBusy || remoteLive) && shown[shown.length - 1]?.role === "user" && (
+                  <div className="pb-1">
+                    <div className="dial-activity-block mb-3">
+                      <Activity steps={[]} live since={undefined} canSearch={false} />
+                    </div>
+                    {/* Where the reply's metrics row will be, so taking over
+                        moves nothing while the transcript is pinned to the
+                        bottom. */}
+                    <div className="min-h-8" />
+                  </div>
+                )}
+              </div>
+
+              {error && <ErrorPanel message={error.message} onRetry={retry} />}
+              {saveError && <SaveErrorPanel message={saveError} onRetry={retrySave} />}
             </div>
 
-            {error && <ErrorPanel message={error.message} onRetry={retry} />}
-            {saveError && <SaveErrorPanel message={saveError} onRetry={retrySave} />}
+            <div
+              ref={dockRef}
+              className="composer-dock dial-column sticky bottom-0 z-10"
+              data-empty={shown.length === 0 ? "true" : undefined}
+            >
+              <Composer
+                focusToken={composerFocus}
+                input={input}
+                setInput={updateComposerInput}
+                onSend={send}
+                onStop={stopAny}
+                busy={occupied}
+                elsewhere={remoteLive && !busy}
+                imageMode={imageMode}
+                imageModel={activeImageModel}
+                imageModelIsFallback={selectedImageModel === undefined}
+                onSelectImageTool={selectImageTool}
+                onRemoveImageTool={() => {
+                  setImageMode(false);
+                  setAttachmentError(null);
+                }}
+                settings={settings}
+                onSettingsChange={onSettingsChange}
+                models={models}
+                recentModels={recentModels}
+                onRecent={onRecent}
+                onOpenCatalog={onOpenSwitcher}
+                attachments={attachments}
+                attachmentError={attachmentError}
+                onAttachFiles={(files) => void addAttachments(files)}
+                onHeightSettled={followLatest}
+                onRemoveAttachment={(index) => {
+                  setAttachments((current) =>
+                    current.filter((_, currentIndex) => currentIndex !== index),
+                  );
+                  setAttachmentError(null);
+                }}
+              />
+            </div>
           </div>
         </div>
 
@@ -1414,7 +1464,7 @@ export default function ChatView({
             onClick={jumpToBottom}
             title="Jump to latest"
             aria-label="Jump to latest"
-            className="pointer-events-auto absolute bottom-32 left-1/2 z-20 flex size-8 -translate-x-1/2 items-center justify-center rounded-full bg-panel text-secondary shadow-raised transition-[color,transform] duration-150 hover:text-foreground active:scale-[0.94]"
+            className="dial-glass dial-glass-thick pointer-events-auto absolute bottom-36 left-1/2 z-20 flex size-8 -translate-x-1/2 items-center justify-center rounded-full text-secondary transition-[color,transform] duration-150 hover:text-foreground active:scale-[0.94]"
           >
             <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
               <path d="M8 3v10M3.5 8.5 8 13l4.5-4.5" />
@@ -1422,45 +1472,6 @@ export default function ChatView({
           </motion.button>
         )}
       </AnimatePresence>
-
-      <div
-        className="composer-dock dial-column"
-        data-empty={shown.length === 0 ? "true" : undefined}
-      >
-        <Composer
-          focusToken={composerFocus}
-          input={input}
-          setInput={updateComposerInput}
-          onSend={send}
-          onStop={stopAny}
-          busy={occupied}
-          elsewhere={remoteLive && !busy}
-          imageMode={imageMode}
-          imageModel={activeImageModel}
-          imageModelIsFallback={selectedImageModel === undefined}
-          onSelectImageTool={selectImageTool}
-          onRemoveImageTool={() => {
-            setImageMode(false);
-            setAttachmentError(null);
-          }}
-          settings={settings}
-          onSettingsChange={onSettingsChange}
-          models={models}
-          recentModels={recentModels}
-          onRecent={onRecent}
-          onOpenCatalog={onOpenSwitcher}
-          attachments={attachments}
-          attachmentError={attachmentError}
-          onAttachFiles={(files) => void addAttachments(files)}
-          onHeightSettled={followLatest}
-          onRemoveAttachment={(index) => {
-            setAttachments((current) =>
-              current.filter((_, currentIndex) => currentIndex !== index),
-            );
-            setAttachmentError(null);
-          }}
-        />
-      </div>
 
       <SelectionActions containerRef={transcriptRef} onQuote={quoteSelection} />
     </div>

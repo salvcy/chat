@@ -1,9 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 20 20">
-  <!-- The brand mark (web/public/brand/chat-mark-v2.svg) edge to edge, in its light-scheme colours: Windows and Linux. -->
-  <rect width="20" height="20" rx="5" fill="#111111"/>
-  <g fill="#f2f2f2">
-    <rect x="5" y="8.5" width="2" height="5" rx="1"/>
-    <rect x="9" y="5.5" width="2" height="8" rx="1"/>
-    <rect x="13" y="9.5" width="2" height="4" rx="1"/>
-  </g>
+  <!-- The brand mark (web/public/brand/chat-mark-v3.svg) edge to edge, in its light-scheme colours: Windows and Linux. -->
+  <path d="M9.172 0H10.828C13.469 0 14.79 0.126 16.211 0.449C17.763 1.014 18.986 2.237 19.551 3.789C19.874 5.21 20 6.531 20 9.172V10.828C20 13.469 19.874 14.79 19.551 16.211C18.986 17.763 17.763 18.986 16.211 19.551C14.79 19.874 13.469 20 10.828 20H9.172C6.531 20 5.21 19.874 3.789 19.551C2.237 18.986 1.014 17.763 0.449 16.211C0.126 14.79 0 13.469 0 10.828V9.172C0 6.531 0.126 5.21 0.449 3.789C1.014 2.237 2.237 1.014 3.789 0.449C5.21 0.126 6.531 0 9.172 0Z" fill="#111111"/>
+  <path d="M7.7 14.3 12.3 5.7" fill="none" stroke="#f2f2f2" stroke-width="2.1" stroke-linecap="round"/>
 </svg>

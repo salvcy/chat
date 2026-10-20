@@ -1,6 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import AccountButton from "./AccountButton";
 import GlideMenu from "@/components/ui/GlideMenu";
 import BrandMark from "@/components/ui/BrandMark";
@@ -91,6 +99,7 @@ export default function ConversationList({
   const [searchOpen, setSearchOpen] = useState(false);
   const [filter, setFilter] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -160,43 +169,68 @@ export default function ConversationList({
     return out;
   }, [conversations, filter]);
 
+  // Fade an edge of the list only where there is more beyond it
+  // (`.dial-scroll-edges`): rows slip under the header and the footer
+  // instead of being cut off at a line.
+  const edges = useCallback(() => {
+    const list = listRef.current;
+    if (!list) return;
+    list.toggleAttribute("data-above", list.scrollTop > 1);
+    list.toggleAttribute(
+      "data-below",
+      list.scrollTop + list.clientHeight < list.scrollHeight - 1,
+    );
+  }, []);
+
+  useLayoutEffect(() => edges(), [sections, edges]);
+
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const observer = new ResizeObserver(edges);
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, [edges]);
+
   return (
     <aside className="flex h-full w-full flex-col pr-1">
-      {/* brand — the desktop app has none (globals.css, "the desktop app's
-          window") */}
-      <div className="dial-rail-brand flex h-10 shrink-0 items-center px-2.5">
-        <BrandMark />
+      {/* The first row: the mark, then New chat. It is as tall as the chat
+          window's top strip and starts as far down, so the two share one
+          centre line. The desktop app has no mark: its traffic lights sit
+          on that line in its place (globals.css, "the desktop app's
+          window"). */}
+      <div className="flex h-12 shrink-0 items-center gap-2">
+        <BrandMark withName={false} className="dial-rail-brand shrink-0 pl-2.5" />
+        <GlideMenu
+          className="dial-rail-new @container min-w-0 flex-1"
+          highlightClassName="inset-x-0 rounded-control bg-hover-2"
+        >
+          <button
+            data-glide-row
+            type="button"
+            onClick={onNew}
+            title="New chat (⌘⇧K)"
+            className="group/new relative z-10 flex h-8 w-full items-center gap-2 rounded-control px-2 text-left text-[13.5px] font-medium text-secondary transition-[color,transform] duration-150 hover:text-foreground active:scale-[0.99]"
+          >
+            <span className="flex size-5 shrink-0 items-center justify-center">
+              <Glyph>
+                <path d="M11.2 2.8a1.7 1.7 0 0 1 2.4 2.4L7.4 11.4l-3.1.8.8-3.1Z" />
+                <path d="M13 9.5V13a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h3.5" />
+              </Glyph>
+            </span>
+            <span className="flex-1 truncate">New chat</span>
+            {/* Only where the row has room for it: after the mark, or the
+                desktop app's traffic lights, a narrow rail needs the space
+                for the label. */}
+            <span className="hidden font-mono text-[10.5px] text-muted opacity-0 transition-opacity group-hover/new:opacity-100 lg:@min-[9.5rem]:inline">
+              ⌘⇧K
+            </span>
+          </button>
+        </GlideMenu>
       </div>
 
-      {/* primary actions */}
-      <GlideMenu
-        className="dial-rail-new @container mt-1 shrink-0"
-        highlightClassName="inset-x-0 rounded-control bg-hover-2"
-      >
-        <button
-          data-glide-row
-          type="button"
-          onClick={onNew}
-          title="New chat (⌘⇧K)"
-          className="group/new relative z-10 flex h-8 w-full items-center gap-2 rounded-control px-2 text-left text-[13.5px] font-medium text-secondary transition-[color,transform] duration-150 hover:text-foreground active:scale-[0.99]"
-        >
-          <span className="flex size-5 shrink-0 items-center justify-center">
-            <Glyph>
-              <path d="M11.2 2.8a1.7 1.7 0 0 1 2.4 2.4L7.4 11.4l-3.1.8.8-3.1Z" />
-              <path d="M13 9.5V13a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h3.5" />
-            </Glyph>
-          </span>
-          <span className="flex-1 truncate">New chat</span>
-          {/* Only where the row has room for it: beside the desktop app's
-              traffic lights a narrow rail needs the space for the label. */}
-          <span className="hidden font-mono text-[10.5px] text-muted opacity-0 transition-opacity group-hover/new:opacity-100 lg:@min-[9.5rem]:inline">
-            ⌘⇧K
-          </span>
-        </button>
-      </GlideMenu>
-
       {/* chats header — label, and a search control that grows into a field */}
-      <div className="relative mx-0 mb-1 mt-4 h-8 shrink-0">
+      <div className="relative mx-0 mb-1 mt-2 h-8 shrink-0">
         <div
           aria-hidden={searchOpen}
           className={`absolute inset-0 flex items-center px-2 text-[12px] font-medium text-muted transition-[opacity,transform] duration-200 ${
@@ -270,7 +304,11 @@ export default function ConversationList({
       </div>
 
       {/* the list */}
-      <div className="dial-scroll-none min-h-0 flex-1 overflow-y-auto overflow-x-hidden pb-6">
+      <div
+        ref={listRef}
+        onScroll={edges}
+        className="dial-scroll-none dial-scroll-edges min-h-0 flex-1 overflow-y-auto overflow-x-hidden pb-6"
+      >
         {conversations.length === 0 && (
           <p className="px-2 py-3 text-[12.5px] leading-relaxed text-muted">
             Your conversations will appear here.

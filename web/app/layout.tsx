@@ -27,11 +27,11 @@ export const metadata: Metadata = {
    */
   icons: {
     icon: [
-      { url: "/brand/chat-mark-v2.svg", type: "image/svg+xml" },
-      { url: "/brand/chat-mark-v2-32.png", sizes: "32x32", type: "image/png" },
+      { url: "/brand/chat-mark-v3.svg", type: "image/svg+xml" },
+      { url: "/brand/chat-mark-v3-32.png", sizes: "32x32", type: "image/png" },
     ],
     shortcut: "/favicon.ico",
-    apple: { url: "/brand/chat-mark-v2-180.png", sizes: "180x180" },
+    apple: { url: "/brand/chat-mark-v3-180.png", sizes: "180x180" },
   },
 };
 

@@ -101,7 +101,7 @@ export default function MessageNavigator({
   return (
     <nav
       aria-label="Message navigator"
-      className="message-navigator pointer-events-none absolute bottom-4 right-2 top-4 z-30 w-14"
+      className="message-navigator pointer-events-none absolute bottom-36 right-2 top-4 z-30 w-14"
     >
       <div
         className="flex h-full flex-col justify-center"

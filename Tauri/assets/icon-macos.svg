@@ -1,15 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <!-- The same mark on Apple's 1024 icon grid: an 824 tile, its corner radius, room for the shadow. -->
+  <!-- The same slash on Apple's 1024 icon grid: an 824 tile in Apple's own icon shape (continuous corners at its 185.4 radius, so it sits with the rest of the Dock), room for the shadow. -->
   <defs>
     <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
       <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000000" flood-opacity="0.3"/>
     </filter>
   </defs>
-  <rect x="100" y="100" width="824" height="824" rx="185.4" fill="#111111" filter="url(#shadow)"/>
-  <rect x="101" y="101" width="822" height="822" rx="184.4" fill="none" stroke="#ffffff" stroke-opacity="0.12" stroke-width="2"/>
-  <g transform="translate(100 100) scale(41.2)" fill="#f2f2f2">
-    <rect x="5" y="8.5" width="2" height="5" rx="1"/>
-    <rect x="9" y="5.5" width="2" height="8" rx="1"/>
-    <rect x="13" y="9.5" width="2" height="4" rx="1"/>
-  </g>
+  <path d="M383.414 100H640.586C722.193 100 762.997 103.897 806.921 113.888C854.878 131.344 892.656 169.122 910.112 217.079C920.103 261.003 924 301.807 924 383.414V640.586C924 722.193 920.103 762.997 910.112 806.921C892.656 854.878 854.878 892.656 806.921 910.112C762.997 920.103 722.193 924 640.586 924H383.414C301.807 924 261.003 920.103 217.079 910.112C169.122 892.656 131.344 854.878 113.888 806.921C103.897 762.997 100 722.193 100 640.586V383.414C100 301.807 103.897 261.003 113.888 217.079C131.344 169.122 169.122 131.344 217.079 113.888C261.003 103.897 301.807 100 383.414 100Z" fill="#111111" filter="url(#shadow)"/>
+  <path d="M382.886 101H641.114C722.282 101 762.866 104.876 806.553 114.814C854.251 132.175 891.825 169.749 909.186 217.447C919.124 261.134 923 301.718 923 382.886V641.114C923 722.282 919.124 762.866 909.186 806.553C891.825 854.251 854.251 891.825 806.553 909.186C762.866 919.124 722.282 923 641.114 923H382.886C301.718 923 261.134 919.124 217.447 909.186C169.749 891.825 132.175 854.251 114.814 806.553C104.876 762.866 101 722.282 101 641.114V382.886C101 301.718 104.876 261.134 114.814 217.447C132.175 169.749 169.749 132.175 217.447 114.814C261.134 104.876 301.718 101 382.886 101Z" fill="none" stroke="#ffffff" stroke-opacity="0.12" stroke-width="2"/>
+  <path transform="translate(100 100) scale(41.2)" d="M7.7 14.3 12.3 5.7" fill="none" stroke="#f2f2f2" stroke-width="2.1" stroke-linecap="round"/>
 </svg>

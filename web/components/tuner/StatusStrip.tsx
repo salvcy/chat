@@ -30,7 +30,8 @@ export default function StatusStrip({
   threadCostUsd: number | undefined;
   threadTokens: number | undefined;
   onOpenSidebar: () => void;
-  /** Phones have no rail on screen, so the header carries "new chat". */
+  /** Where no rail is on screen (a phone, or the rail closed), the strip
+   *  carries New chat. */
   onNewChat: () => void;
   /** Rail collapse travels with the account, so it is persisted upward. */
   onRailCollapse: (collapsed: boolean) => void;
@@ -107,18 +108,22 @@ export default function StatusStrip({
             {credit}
           </span>
         )}
+        <ThemeToggle onCommit={onTheme} />
+        {/* Wherever the rail is not on screen — a phone, or the rail
+            closed — New chat moves up here, into the corner. On a wider
+            screen it slides in and out on the rail's own clock
+            (`.dial-strip-new`). */}
         <button
           onClick={onNewChat}
           aria-label="New chat"
-          title="New chat"
-          className="flex size-8 items-center justify-center rounded-control text-muted transition-[background-color,color,transform] duration-150 hover:bg-hover-2 hover:text-foreground active:scale-[0.96] md:hidden"
+          title="New chat (⌘⇧K)"
+          className="dial-strip-new flex size-8 shrink-0 items-center justify-center rounded-control text-muted transition-[background-color,color,transform] duration-150 hover:bg-hover-2 hover:text-foreground active:scale-[0.96]"
         >
-          <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <svg viewBox="0 0 16 16" className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
             <path d="M11.2 2.8a1.7 1.7 0 0 1 2.4 2.4L7.4 11.4l-3.1.8.8-3.1Z" />
             <path d="M13 9.5V13a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h3.5" />
           </svg>
         </button>
-        <ThemeToggle onCommit={onTheme} />
       </div>
     </header>
   );
