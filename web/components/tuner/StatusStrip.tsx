@@ -4,37 +4,31 @@ import { useEffect, useState } from "react";
 import ThemeToggle from "./ThemeToggle";
 import RailToggle from "@/components/sidebar/RailToggle";
 import { formatCost, formatTokens } from "@/lib/format";
-import { shortModelId } from "@/lib/capabilities";
 import { fetchKeyStatus, type KeyStatus } from "@/lib/account";
 
 /**
- * Context bar: where am I, what is tuned, and what has this thread used?
+ * Context bar: where am I, and what has this thread used?
  *
- * The previous strip led with the model and left the rest of the header
- * empty. This one treats the conversation as the primary context and the
- * model as an adjustable instrument beside it.
+ * It used to carry the model too, as a readout beside the title. The model
+ * moved into the composer (ModelDial), next to send, where the choice is
+ * actually made; ⌘K still opens the full palette from anywhere. What is left
+ * here is the conversation and its running totals.
  */
 export default function StatusStrip({
   title,
-  model,
-  ready,
   apiKey,
   threadCostUsd,
   threadTokens,
-  onOpenPalette,
   onOpenSidebar,
   onNewChat,
   onRailCollapse,
   onTheme,
 }: {
   title?: string;
-  model: string;
-  ready: boolean;
   /** The connected OpenRouter key; null before one is connected. */
   apiKey: string | null;
   threadCostUsd: number | undefined;
   threadTokens: number | undefined;
-  onOpenPalette: () => void;
   onOpenSidebar: () => void;
   /** Phones have no rail on screen, so the header carries "new chat". */
   onNewChat: () => void;
@@ -90,29 +84,9 @@ export default function StatusStrip({
         </svg>
       </button>
 
-      <div className="flex min-w-0 items-center gap-1.5">
-        <button
-          onClick={onOpenPalette}
-          title="Change model (⌘K)"
-          className="group flex h-8 min-w-0 items-center gap-2 rounded-control px-2 font-mono text-[12px] text-secondary transition-[background-color,color,transform] duration-150 hover:bg-hover-2 hover:text-foreground active:scale-[0.98]"
-        >
-          <span aria-hidden className="relative flex size-2 shrink-0 items-center justify-center">
-            <span className="absolute size-2 rounded-full bg-foreground/15" />
-            <span className="size-1 rounded-full bg-foreground/80" />
-          </span>
-          <span className="max-w-44 truncate">
-            {ready ? shortModelId(model) : ""}
-          </span>
-          <svg viewBox="0 0 12 12" className="h-3 w-3 shrink-0 text-muted transition-transform duration-200 group-hover:translate-y-px" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
-            <path d="m3.25 4.75 2.75 2.5 2.75-2.5" />
-          </svg>
-        </button>
-
-        <span className="hidden h-4 w-px shrink-0 bg-line sm:block" />
-        <p className="hidden min-w-0 max-w-[36vw] truncate px-1.5 text-[13px] text-secondary sm:block">
-          {title || "New conversation"}
-        </p>
-      </div>
+      <p className="min-w-0 truncate px-1.5 text-[13px] text-secondary">
+        {title || "New conversation"}
+      </p>
 
       <div className="ml-auto flex shrink-0 items-center gap-1">
         {Boolean(threadCostUsd || threadTokens) && (

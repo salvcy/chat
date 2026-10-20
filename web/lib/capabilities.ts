@@ -139,4 +139,15 @@ export function shortModelId(id: string): string {
   return id.split("/")[1] ?? id;
 }
 
+/**
+ * The name a person reads: "Claude Sonnet 4.6" from the catalog's
+ * "Anthropic: Claude Sonnet 4.6" — the provider is in the id, and repeating
+ * it in every label is what made them too long to sit beside send. Before the
+ * catalog loads, the short id.
+ */
+export function modelDisplayName(id: string, models: OpenRouterModel[]): string {
+  const name = modelFor(id, models)?.name;
+  return name ? name.replace(/^[^:]{1,40}:\s*/, "") : shortModelId(id);
+}
+
 export { DEFAULT_MODEL };

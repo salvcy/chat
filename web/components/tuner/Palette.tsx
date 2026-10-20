@@ -85,6 +85,7 @@ export default function Palette({
   commands,
   recentModels,
   onRecent,
+  initialQuery = "",
   onSelect,
   onClose,
 }: {
@@ -94,10 +95,12 @@ export default function Palette({
   /** Newest first, from the account's settings blob. */
   recentModels: readonly string[];
   onRecent?: (next: string[]) => void;
+  /** Opens already searching — what was typed into the composer's dial. */
+  initialQuery?: string;
   onSelect: (id: string) => void;
   onClose: () => void;
 }) {
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initialQuery);
   const [rawCursor, setCursor] = useState(0);
   const [scope, setScope] = useState<ModelScope>("all");
   const [settled, setSettled] = useState<string | null>(null);
@@ -109,7 +112,11 @@ export default function Palette({
   const term = (commandMode ? query.slice(1) : query).trim().toLowerCase();
 
   useEffect(() => {
-    inputRef.current?.focus();
+    const input = inputRef.current;
+    if (!input) return;
+    input.focus();
+    // Arriving with a query, the caret goes after it so typing continues.
+    input.setSelectionRange(input.value.length, input.value.length);
   }, []);
 
   const visibleCommands = useMemo(() => {

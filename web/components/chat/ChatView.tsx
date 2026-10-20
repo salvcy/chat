@@ -17,6 +17,7 @@ import MessageBubble from "./MessageBubble";
 import MessageNavigator from "./MessageNavigator";
 import SelectionActions from "./SelectionActions";
 import Button from "@/components/ui/Button";
+import Ocean from "@/components/ui/Ocean";
 import Activity from "./Activity";
 import type { DialMessage } from "@/lib/conversations";
 import { capabilitiesFor } from "@/lib/capabilities";
@@ -167,6 +168,8 @@ export default function ChatView({
   onSettingsChange,
   initialMessages,
   models,
+  recentModels,
+  onRecent,
   onOpenSwitcher,
   onBranch,
   saveTurn,
@@ -181,7 +184,11 @@ export default function ChatView({
   onSettingsChange: (patch: Partial<ChatSettings>) => void;
   initialMessages: DialMessage[];
   models: OpenRouterModel[];
-  onOpenSwitcher: () => void;
+  /** Newest first, from the account's settings blob. */
+  recentModels: readonly string[];
+  onRecent: (next: string[]) => void;
+  /** Open the full model palette, optionally already searching. */
+  onOpenSwitcher: (query?: string) => void;
   onBranch: (messages: DialMessage[], settings: ChatSettings) => void;
   saveTurn: (o: {
     id: string;
@@ -1308,7 +1315,24 @@ export default function ChatView({
   };
 
   return (
-    <>
+    // The chat's own stacking context, so the empty state's ocean can sit
+    // at -z under the transcript and the composer — above the window's
+    // background, below everything drawn on it — without lifting either.
+    <div className="relative isolate flex min-h-0 flex-1 flex-col">
+      <AnimatePresence>
+        {shown.length === 0 && (
+          <motion.div
+            key="ocean"
+            aria-hidden
+            className="pointer-events-none absolute inset-0 -z-10"
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.3, ease: "easeOut" }}
+          >
+            <Ocean className="h-full w-full" />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <div
         ref={regionRef}
         className="chat-scroll-region relative flex min-h-0 flex-1"
@@ -1329,7 +1353,7 @@ export default function ChatView({
                 settings={settings}
                 models={models}
                 userName={userName}
-                onOpenModel={onOpenSwitcher}
+                onOpenModel={() => onOpenSwitcher()}
               />
             )}
 
@@ -1425,6 +1449,9 @@ export default function ChatView({
           settings={settings}
           onSettingsChange={onSettingsChange}
           models={models}
+          recentModels={recentModels}
+          onRecent={onRecent}
+          onOpenCatalog={onOpenSwitcher}
           attachments={attachments}
           attachmentError={attachmentError}
           onAttachFiles={(files) => void addAttachments(files)}
@@ -1439,7 +1466,7 @@ export default function ChatView({
       </div>
 
       <SelectionActions containerRef={transcriptRef} onQuote={quoteSelection} />
-    </>
+    </div>
   );
 }
 

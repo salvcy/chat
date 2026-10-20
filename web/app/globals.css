@@ -245,6 +245,55 @@ button:disabled {
     0 4px 18px rgba(0, 0, 0, 0.35);
 }
 
+/* Squircles — the composer's controls (send, attach, the model dial, the
+   effort slider) are rounded squares, not circles or pills. `--sq` is the
+   radius a plain border-radius would use. Where the browser draws
+   superellipse corners (`corner-shape`), the radius grows to match the same
+   footprint with the continuous curve iOS icons have; everywhere else —
+   WebKit, so the desktop app — it is the rounded square, which is close. */
+.dial-squircle {
+  border-radius: var(--sq, 10px);
+}
+
+@supports (corner-shape: squircle) {
+  .dial-squircle {
+    corner-shape: squircle;
+    border-radius: calc(var(--sq, 10px) * 1.8);
+  }
+}
+
+/* The model dial's two views — reasoning and models — trade places
+   sideways while the panel eases to the new view's height. The height is
+   measured and written by the component: content changing under
+   `height: auto` changes no value, so there is nothing for CSS to
+   transition. */
+.dial-model-panel {
+  overflow: hidden;
+  transition: height 220ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+@keyframes dial-view-forward {
+  from {
+    opacity: 0;
+    transform: translateX(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes dial-view-back {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
 /* The empty state docks the composer mid-canvas, under the greeting; the
    first message lets it settle to the bottom on the same curve the rest of
    the interface uses. The offset is clamped so a short window keeps the
@@ -255,6 +304,32 @@ button:disabled {
 
 .composer-dock[data-empty="true"] {
   padding-bottom: clamp(0px, calc(38dvh - 150px), 30dvh);
+}
+
+/* The ASCII ocean (components/ui/Ocean.tsx) behind the front door and the
+   empty chat. It is the one place colour lives outside code: the sharks'
+   glints, the cyan wake and the red of a catch are the ocean's own, a named
+   exception the user chose (October 2026) rather than an accent the chrome
+   may borrow. It surfaces slowly, so a gate that is passed at once never
+   flashes it. */
+.dial-ocean {
+  animation: dial-fade-in 900ms ease-out 120ms both;
+}
+
+/* Clear water behind the empty chat's greeting. The ocean keeps sharks out
+   of its centre only softly — a hunting shark cuts across — and dark blocks
+   under the question made it unreadable for a second at a time. The pool is
+   the window's own colour fading out past the text, so a shark slips under
+   it instead of through the words; the composer, a solid panel, needs none.
+   It is a shadow, not a larger box: shadows paint outside an element without
+   counting as overflow, and anything wider than the column gave the phone's
+   transcript a horizontal scrollbar. */
+.dial-ocean-pool {
+  width: fit-content;
+  max-width: 100%;
+  border-radius: 28px;
+  background: var(--background);
+  box-shadow: 0 0 44px 22px var(--background);
 }
 
 /* ---- conversation rail geometry ----

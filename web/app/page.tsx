@@ -84,6 +84,8 @@ export default function Home() {
     ...DEFAULT_SETTINGS,
   }));
   const [paletteOpen, setPaletteOpen] = useState(false);
+  /** What the palette opens searching for — typed into the composer's dial. */
+  const [paletteQuery, setPaletteQuery] = useState("");
   /**
    * The id the chat is currently writing under, minted here rather than in
    * ChatView. A new thread already has its real id before the first send, so
@@ -353,7 +355,10 @@ export default function Home() {
       if (e.key.toLowerCase() === "k") {
         e.preventDefault();
         if (e.shiftKey) newConversation();
-        else setPaletteOpen((o) => !o);
+        else {
+          setPaletteQuery("");
+          setPaletteOpen((o) => !o);
+        }
       }
     };
     window.addEventListener("keydown", onKey);
@@ -422,7 +427,7 @@ export default function Home() {
 
   if (!account.user) {
     return (
-      <FrontDoor onTheme={(theme) => account.updateSettings({ theme })}>
+      <FrontDoor ocean onTheme={(theme) => account.updateSettings({ theme })}>
         <AuthPanel
           onSignIn={account.signIn}
           onSignUp={account.signUp}
@@ -452,7 +457,7 @@ export default function Home() {
        password. The theme is not persisted from here: the settings this
        device holds are placeholders until the real ones can be opened. */
     return (
-      <FrontDoor footer={signedInAs}>
+      <FrontDoor ocean footer={signedInAs}>
         <UnlockBar
           email={account.user.email}
           rememberDeviceKey={account.settings.rememberDeviceKey}
@@ -465,6 +470,7 @@ export default function Home() {
   if (!credential) {
     return (
       <FrontDoor
+        ocean
         footer={signedInAs}
         onTheme={(theme) => account.updateSettings({ theme })}
       >
@@ -551,12 +557,9 @@ export default function Home() {
       <main className="app-workspace relative m-2 flex min-w-0 flex-1 flex-col overflow-hidden rounded-window bg-background max-md:m-0 max-md:rounded-none max-md:shadow-none">
         <StatusStrip
           title={activeMeta?.title}
-          model={effective.model}
-          ready={conv.ready}
           apiKey={credential?.key ?? null}
           threadCostUsd={activeMeta?.totalCostUsd}
           threadTokens={activeMeta?.totalTokens}
-          onOpenPalette={() => setPaletteOpen(true)}
           onOpenSidebar={() => setSidebarOpen(true)}
           onNewChat={newConversation}
           onRailCollapse={(railCollapsed) =>
@@ -573,8 +576,13 @@ export default function Home() {
             onSettingsChange={changeSettings}
             initialMessages={view.messages}
             models={models}
+            recentModels={account.settings.recentModels}
+            onRecent={(recentModels) => account.updateSettings({ recentModels })}
             userName={account.user.name}
-            onOpenSwitcher={() => setPaletteOpen(true)}
+            onOpenSwitcher={(query = "") => {
+              setPaletteQuery(query);
+              setPaletteOpen(true);
+            }}
             onBranch={(messages, from) => void branch(messages, from)}
             saveTurn={conv.saveTurn}
             loadThread={conv.loadThread}
@@ -617,6 +625,7 @@ export default function Home() {
             commands={commands}
             recentModels={account.settings.recentModels}
             onRecent={(recentModels) => account.updateSettings({ recentModels })}
+            initialQuery={paletteQuery}
             onSelect={(model) => {
               changeSettings({ model });
               setPaletteOpen(false);

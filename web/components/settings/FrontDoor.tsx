@@ -3,6 +3,7 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 import BrandMark from "@/components/ui/BrandMark";
+import Ocean from "@/components/ui/Ocean";
 import ThemeToggle from "@/components/tuner/ThemeToggle";
 
 /**
@@ -17,32 +18,43 @@ import ThemeToggle from "@/components/tuner/ThemeToggle";
  * The page scrolls on its own: `body` is `overflow: hidden` for the chat
  * shell, and a sign-up form on a phone with the keyboard up is taller than
  * the viewport.
+ *
+ * The gates swim: the ASCII ocean fills the page behind the card, fixed to
+ * the viewport so it does not scroll with a tall form. Not while the session
+ * resolves — that screen is on show for a moment on every load, and the
+ * ocean would surface and vanish with it. Header, card and footer are
+ * positioned so they paint over the canvas.
  */
 export default function FrontDoor({
   children,
   footer,
   onTheme,
+  ocean = false,
 }: {
   children: ReactNode;
   /** Extra footer content — "signed in as …, sign out" on the inner gates. */
   footer?: ReactNode;
   onTheme?: (theme: "light" | "dark") => void;
+  /** The ASCII ocean behind the gate. */
+  ocean?: boolean;
 }) {
   return (
     <div className="app-shell flex h-[100dvh] flex-col overflow-y-auto">
+      {ocean && <Ocean className="fixed inset-0 h-full w-full" />}
+
       <header
-        className="dial-door-bar flex h-14 shrink-0 items-center justify-between px-4 sm:px-6"
+        className="dial-door-bar relative flex h-14 shrink-0 items-center justify-between px-4 sm:px-6"
         data-tauri-drag-region="deep"
       >
         <BrandMark className="dial-brand" />
         <ThemeToggle onCommit={onTheme ?? (() => {})} />
       </header>
 
-      <main className="flex flex-1 items-center justify-center px-4 py-6">
+      <main className="relative flex flex-1 items-center justify-center px-4 py-6">
         {children}
       </main>
 
-      <footer className="flex shrink-0 flex-wrap items-center justify-center gap-x-3 gap-y-1 px-4 pb-5 text-[11.5px] text-muted">
+      <footer className="relative flex shrink-0 flex-wrap items-center justify-center gap-x-3 gap-y-1 px-4 pb-5 text-[11.5px] text-muted">
         {footer}
         {footer && <span className="opacity-40">·</span>}
         <span>End-to-end encrypted</span>

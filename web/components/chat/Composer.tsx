@@ -4,23 +4,25 @@ import Image from "next/image";
 import FileGlyph from "./FileGlyph";
 import type { FileUIPart } from "ai";
 import { useEffect, useRef, useState } from "react";
-import EffortControl from "./EffortControl";
-import {
-  capabilitiesFor,
-  effortOptions,
-  shortModelId,
-} from "@/lib/capabilities";
+import ModelDial from "./ModelDial";
+import { capabilitiesFor, shortModelId } from "@/lib/capabilities";
 import type { ChatSettings, OpenRouterModel } from "@/lib/types";
 
 /**
  * The bottom instrument.
  *
- * The selected model already lives in the context bar, so repeating it here
- * only made the composer noisy. What is left is what a person actually
- * changes between turns: files, the image tool, and how hard the model
- * thinks. Web search is not a switch — every model that can search does, when
- * it needs to — and standing instructions live in settings, because they
- * belong to the person rather than to one conversation.
+ * What a person changes between turns, and nothing else. On the left, what
+ * goes in: files and the image tool. On the right, where it goes: the model
+ * dial (the model, and how hard it thinks, as one control — see ModelDial)
+ * and send. The model used to live in the header; it moved here because this
+ * is where the decision is made, right before sending. Web search is not a
+ * switch — every model that can search does, when it needs to — and standing
+ * instructions live in settings, because they belong to the person rather
+ * than to one conversation.
+ *
+ * The controls are squircles: rounded squares rather than circles and
+ * pills, the send button included, with an arrow pointing where the message
+ * goes.
  */
 export default function Composer({
   input,
@@ -37,6 +39,9 @@ export default function Composer({
   settings,
   onSettingsChange,
   models,
+  recentModels,
+  onRecent,
+  onOpenCatalog,
   attachments,
   attachmentError,
   onAttachFiles,
@@ -60,6 +65,11 @@ export default function Composer({
   settings: ChatSettings;
   onSettingsChange: (patch: Partial<ChatSettings>) => void;
   models: OpenRouterModel[];
+  /** Newest first, from the account's settings blob. */
+  recentModels: readonly string[];
+  onRecent: (next: string[]) => void;
+  /** Open the full model palette, searching for `query`. */
+  onOpenCatalog: (query: string) => void;
   attachments: FileUIPart[];
   attachmentError: string | null;
   onAttachFiles: (files: FileList) => void;
@@ -101,7 +111,6 @@ export default function Composer({
   }, [focusToken]);
 
   const caps = capabilitiesFor(settings.model, models);
-  const efforts = effortOptions(caps);
   // Always available now: a PDF can go to any model, because OpenRouter
   // converts it for the ones that cannot read files. Whether *images* are
   // accepted is enforced per file at intake, not by hiding the control.
@@ -124,7 +133,7 @@ export default function Composer({
   };
 
   const pill = (on: boolean) =>
-    `flex h-8 items-center gap-1.5 rounded-full px-2.5 text-[12.5px] font-medium transition-[background-color,color,transform] duration-150 active:scale-[0.97] disabled:pointer-events-none disabled:opacity-35 ${
+    `dial-squircle flex h-8 items-center gap-1.5 px-2.5 text-[12.5px] font-medium [--sq:10px] transition-[background-color,color,transform] duration-150 active:scale-[0.97] disabled:pointer-events-none disabled:opacity-35 ${
       on
         ? "bg-foreground text-background"
         : "text-secondary hover:bg-hover-2 hover:text-foreground"
@@ -296,7 +305,7 @@ export default function Composer({
                     : "Attach PDFs — this model does not accept images"
               }
               aria-label="Attach files"
-              className="flex size-8 items-center justify-center rounded-full text-muted transition-[background-color,color,transform] duration-150 hover:bg-hover-2 hover:text-foreground active:scale-[0.94] disabled:opacity-30"
+              className="dial-squircle flex size-8 items-center justify-center text-muted transition-[background-color,color,transform] duration-150 [--sq:10px] hover:bg-hover-2 hover:text-foreground active:scale-[0.94] disabled:opacity-30"
             >
               <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden>
                 <path d="M8 3v10M3 8h10" />
@@ -325,53 +334,58 @@ export default function Composer({
                   <path d="m4 4 8 8M12 4l-8 8" />
                 </svg>
               </button>
-            ) : caps.reasoning && efforts.length > 0 ? (
-              <EffortControl
-                value={settings.reasoning}
-                options={efforts}
-                defaultEffort={caps.defaultEffort}
-                onChange={(reasoning) => onSettingsChange({ reasoning })}
-              />
             ) : null}
           </div>
 
-          <button
-            onClick={
-              busy
-                ? onStop
-                : showImageSuggestion
-                  ? activateImageTool
-                  : onSend
-            }
-            disabled={!busy && !canSend}
-            aria-label={
-              busy
-                ? "Stop generating"
-                : showImageSuggestion
-                  ? "Use image tool"
-                  : "Send"
-            }
-            title={
-              busy
-                ? "Stop generating (Esc)"
-                : showImageSuggestion
-                  ? "Use image tool (Enter)"
-                  : "Send (Enter)"
-            }
-            className={`flex size-8 shrink-0 items-center justify-center rounded-full transition-[background-color,color,transform,box-shadow] duration-200 enabled:active:scale-[0.92] ${
-              busy || canSend
-                ? "bg-foreground text-background shadow-[inset_0_1px_0_rgba(255,255,255,0.14)]"
-                : "bg-line-strong text-muted"
-            }`}
-          >
-            {busy ? (
-              <span className="block size-2.5 rounded-[2.5px] bg-current" />
-            ) : (
-              <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                <path d="M8 12.75v-9.5M4 7.25l4-4 4 4" />
-              </svg>
-            )}
-          </button>
+          <div className="relative flex min-w-0 items-center gap-1.5">
+            <ModelDial
+              settings={settings}
+              models={models}
+              recentModels={recentModels}
+              imageMode={imageMode}
+              onSettingsChange={onSettingsChange}
+              onRecent={onRecent}
+              onOpenCatalog={onOpenCatalog}
+            />
+
+            <button
+              onClick={
+                busy
+                  ? onStop
+                  : showImageSuggestion
+                    ? activateImageTool
+                    : onSend
+              }
+              disabled={!busy && !canSend}
+              aria-label={
+                busy
+                  ? "Stop generating"
+                  : showImageSuggestion
+                    ? "Use image tool"
+                    : "Send"
+              }
+              title={
+                busy
+                  ? "Stop generating (Esc)"
+                  : showImageSuggestion
+                    ? "Use image tool (Enter)"
+                    : "Send (Enter)"
+              }
+              className={`dial-squircle group/send flex size-8 shrink-0 items-center justify-center transition-[background-color,color,transform,box-shadow] duration-200 [--sq:10px] enabled:active:scale-[0.92] ${
+                busy || canSend
+                  ? "bg-foreground text-background shadow-[inset_0_1px_0_rgba(255,255,255,0.14)]"
+                  : "bg-line-strong text-muted"
+              }`}
+            >
+              {busy ? (
+                <span className="block size-2.5 rounded-[2.5px] bg-current" />
+              ) : (
+                <svg viewBox="0 0 16 16" className="h-4 w-4 transition-transform duration-200 ease-out-strong group-enabled/send:group-hover/send:translate-x-0.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M3.25 8h9.5M8.75 4l4 4-4 4" />
+                </svg>
+              )}
+            </button>
+          </div>
         </div>
       </div>
     </div>

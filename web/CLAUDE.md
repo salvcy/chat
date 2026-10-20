@@ -389,20 +389,43 @@ invoking a Worker.
   jump-to-bottom, retry with a class-specific hint, and a **mid-stream
   snapshot every 1.2s** so closing the tab on a long answer no longer
   throws it away.
-- `components/chat/Composer.tsx` — attach, the `@image` tool, and the
-  effort control; nothing else. **Web search is not a control**:
+- `components/chat/Composer.tsx` — left, what goes in: attach and the
+  `@image` tool; right, where it goes: the model dial and send; nothing
+  else. **Web search is not a control**:
   `reconcileSettings` sets `search` to whether the model can call tools, the
   tool is attached to every such turn, and the model decides when to search
   (before the catalog loads it is off, because offering tools to a model
   that cannot take them fails the request). **The system prompt is not here
   either** — it is the account's instructions, edited in Settings →
-  Instructions and passed to the transport by ref. Send inverts to a stop
-  square while busy.
-- `components/chat/EffortControl.tsx` — the sparkle plus one word ("Medium",
-  or a muted "Think" when off), opening a sliding segmented control of
-  exactly the model's efforts with a one-line description of the selected
-  level. Arrow keys move along it; Escape closes it without stopping a
-  stream. It replaced a "Think · medium ⌄" dropdown.
+  Instructions and passed to the transport by ref. Send is a squircle with
+  a → (where the message goes), inverted when there is something to send,
+  and turns into a stop square while busy.
+- `components/chat/ModelDial.tsx` — **the model and its effort, as one small
+  control beside send** (October 2026, the user's design after ChatGPT's,
+  squared off). Closed: a squircle reading "Claude Sonnet 4.6 High" — name
+  without the provider (`modelDisplayName`), effort in muted ink while
+  thinking is on. Open: a panel whose two views trade places sideways, its
+  height eased by measuring (`.dial-model-panel`; `height: auto` cannot
+  transition). **Reasoning** first, because it is what changes between
+  turns: a header naming the model leads on (›) to the models, and under it
+  `EffortSlider`. **Models** is deliberately short — current, recents, then
+  OpenRouter's floating `~…-latest` aliases (never stale; ones the catalog
+  drops fall out), five rows — because the whole catalog is one keystroke
+  away: **typing any character in the list opens the palette already
+  searching for it** (`initialQuery`, caret after it), and the list's own
+  search field ("All 470 models… ⌘K") is that same door, for whoever reaches
+  for the mouse. A model with no reasoning mode, or the image tool, opens
+  straight onto the models. Picking records a recent, like the palette.
+  Escape closes it without stopping a stream; the panel anchors to the
+  composer's right group so its edge lines up with send's and a phone keeps
+  a margin. It replaced `EffortControl` (a sparkle + word opening a
+  segmented control, on the left) and the header's model readout.
+- `components/chat/EffortSlider.tsx` — exactly the model's efforts as a
+  stepped slider: a squircle track, a quiet fill up to the thumb, a 3px
+  square at every stop, and the thumb as the one inverted mark. It moves in
+  detents, not freely — nothing lies between levels, and each step is a
+  settings write to the account, so a drag across four levels makes four.
+  The thumb glides between them. `role="slider"`; arrows step, Home/End.
 - `components/chat/Metrics.tsx` — the per-message flight recorder. Collapsed
   = tok/s · duration · cost; expanded = provider, ttft, token split.
 - `lib/timeline.ts` — `buildTimeline(message, { streaming, holdRemarks })`
@@ -458,13 +481,16 @@ invoking a Worker.
   minimap beside the scrollbar. Compact markers use a springy proximity
   response (hovered, then neighboring bars), with no persistent single-marker
   highlight; hover/focus previews text, and click smooth-scrolls.
-- `components/tuner/Palette.tsx` — **the one floating surface.** ⌘K opens it
-  straight into model mode (the signature interaction must not cost an extra
-  keystroke); typing `>` switches the same surface to commands. Arrow-key
-  nav, recents, capability chips, a concrete `web` filter for models that can
-  call the app's search tool, and the tuner-tick on select.
-- `components/tuner/StatusStrip.tsx` — the readout the README always drew
-  and never got built: model · thread cost · thread tokens · key balance.
+- `components/tuner/Palette.tsx` — **the full catalog.** ⌘K opens it
+  straight into model mode, as do the empty state's model chip and typing
+  in the model dial's short list (which arrives as `initialQuery`); typing
+  `>` switches the same surface to commands. Arrow-key nav, recents,
+  capability chips, a concrete `web` filter for models that can call the
+  app's search tool, and the tuner-tick on select.
+- `components/tuner/StatusStrip.tsx` — the conversation's title and its
+  running totals: thread cost · thread tokens · key balance. **No model** —
+  that moved into the composer's dial (October 2026), where the choice is
+  made.
 - `components/sidebar/ConversationList.tsx` — brand, New chat, then a
   "Chats" header whose search control grows right-to-left into a
   title/model filter (Escape closes and clears it); date grouping, pin,
@@ -1055,7 +1081,9 @@ origin.
   connect through a deep link, and window controls set into the UI's own top
   rows; the `blob:` CSP fix; then the token in whichever credential store the
   platform has, no brand mark in the app, and a closed window releasing its
-  page). Next product work: sub-agent delegation and
+  page) · **20 ocean ✓** (ascii-sharks swimming behind the front door's
+  gates and the empty chat, in both themes, on the web and in the app).
+  Next product work: sub-agent delegation and
   per-thread temperature (the wire already carries it).
 ## Design system (the law)
 
@@ -1066,8 +1094,11 @@ a binary switch that is on (the `@image` tool, the send button) is an
 (the open thread, a segmented option, the effort control) is a
 **quiet fill or a lifted thumb**, because a permanently inverted block would
 be the loudest thing on screen. Syntax highlighting is the sole functional
-exception to monochrome. No default shadcn look, no purple gradients, no
-generic dark+neon SaaS aesthetic.
+exception to monochrome. The other exception is the ASCII ocean behind the
+front door and the empty chat (below): its shark glints, cyan wake and red
+catch are the ocean's own colours, kept by the user's choice (October 2026)
+over a monochrome version — never a palette the chrome may borrow. No default
+shadcn look, no purple gradients, no generic dark+neon SaaS aesthetic.
 
 The structure — solid hairlines, a layered shadow scale, tight radii, strong
 ease-out curves, gliding highlights — is adapted from **Beautiful UI**
@@ -1097,6 +1128,14 @@ comment.
 - **Radii:** `rounded-chip` 6 · `rounded-control` 8 · `rounded-card` 10 ·
   `rounded-window` 14 · pills `rounded-full`. The composer (20px) and user
   bubble (18px, 6px tail corner) are the deliberate exceptions.
+- **Squircles in and around the composer** (October 2026, the user's call:
+  "from a circly vibe to a squaricle vibe"). Send, attach, the image tool,
+  the model dial and its panel, the effort slider, and the empty state's
+  model chip and tags are rounded squares, never circles or pills.
+  `.dial-squircle` takes the radius from `--sq` (`[--sq:10px]`); where the
+  browser has `corner-shape` it becomes a true superellipse at 1.8× the
+  radius (the same footprint), and elsewhere — WebKit, so the desktop app —
+  it stays the rounded square. New controls there follow suit.
 - **Type split:** Geist Mono for anything the system *measured* (model
   slug, tok/s, latency, timestamps, costs, reasoning trace); Geist Sans for
   anything a person *authored* — messages, and interface labels and buttons,
@@ -1105,8 +1144,10 @@ comment.
 - **Layout:** centered reading column (`--dial-column`, 760px by default).
   Assistant messages get **no bubble** — bare text on the page. User
   messages are the only bubbles, right-aligned. This asymmetry is deliberate.
-- **Signature control:** the sticky top "tuner strip" — model switcher
-  styled as a channel readout, not a dropdown. Its palette select animation
+- **Signature control:** the model dial beside send — the model and how
+  hard it thinks, one squircle, opening onto an effort slider and a short
+  list that hands off to the palette. (It was the header's "tuner strip"
+  model readout until October 2026.) The palette's select animation
   (damped ~200ms with slight overshoot, a filled block inverting into place)
   is the one place motion may be expressive.
 - **One highlight per list.** Menus, the rail and the palette use
@@ -1121,6 +1162,26 @@ comment.
   selection was the heaviest thing on the page and flattened code colours.
   Keyboard focus is a visible 1.5px `muted` outline offset 2px; text fields
   are the exception (the caret is the affordance).
+- **The ASCII ocean** (`components/ui/Ocean.tsx` over `lib/ocean/`): schools
+  of fish and the sharks that hunt them, drawn as glyphs on a canvas, behind
+  the sign-in, unlock and connect-a-key gates and behind the empty chat's
+  greeting and composer. From ascii-sharks (github.com/stackedlol/ascii-sharks
+  @ c521e24): world, species and math as they were, the renderer and engine
+  adapted — the canvas is transparent so the surface it sits on is the water,
+  the grid, fish and wake have a light set, the backing store is released on
+  unmount, and it pauses while the page is hidden. Not on the
+  session-resolving screen (it is up for a moment on every load and the ocean
+  would flash). In the chat it lives in ChatView's own stacking context
+  (`isolate`, ocean at `-z-10`) so it sits on the window's background and
+  under the transcript and composer without lifting either; it fades out with
+  the first message. The greeting sits in a pool of clear water
+  (`.dial-ocean-pool`, a `box-shadow` of `--background`) because a hunting
+  shark crosses the centre and dark blocks under the question made it
+  unreadable — a shadow and not a wider box, which overflowed the phone's
+  transcript into a horizontal scrollbar. The engine is a lazy chunk (~11KB
+  gzipped), not part of the eager bundle. Theme follows `<html>`'s class
+  through a MutationObserver, never React state; reduced motion gets one
+  settled still frame.
 - **Work with no progress to show** gets `components/ui/Loader.tsx`: a 3×3
   pixel grid with a chevron wavefront, a shimmering label, and a live mono
   timer anchored to a real start time. Used for the gap before the first

@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { formatContext, formatInOutPrice } from "@/lib/format";
-import { modelFor, shortModelId } from "@/lib/capabilities";
+import { modelDisplayName, modelFor } from "@/lib/capabilities";
 import type { ChatSettings, OpenRouterModel } from "@/lib/types";
 
 function greetingFor(hour: number): string {
@@ -57,38 +57,41 @@ export default function EmptyState({
       className="empty-state flex h-full flex-col justify-end px-1 pb-5"
       style={{ animation: "dial-fade-up 420ms cubic-bezier(0.23,1,0.32,1) both" }}
     >
-      <h1 className="text-balance text-[27px] font-medium leading-[1.2] tracking-[-0.03em] sm:text-[32px]">
-        <span className="block text-muted">
-          {greetingFor(hour)}
-          {firstName ? `, ${firstName}` : ""}
-        </span>
-        <span className="block text-foreground">What are you working on?</span>
-      </h1>
+      {/* The ocean swims behind this; the pool keeps the words above clear water. */}
+      <div className="dial-ocean-pool">
+        <h1 className="text-balance text-[27px] font-medium leading-[1.2] tracking-[-0.03em] sm:text-[32px]">
+          <span className="block text-muted">
+            {greetingFor(hour)}
+            {firstName ? `, ${firstName}` : ""}
+          </span>
+          <span className="block text-foreground">What are you working on?</span>
+        </h1>
 
-      <div className="mt-4 flex min-w-0 flex-wrap items-center gap-1.5">
-        <button
-          onClick={onOpenModel}
-          className="group flex h-7 min-w-0 items-center gap-2 rounded-full bg-hover pl-2.5 pr-2 text-[12.5px] font-medium text-secondary transition-[background-color,color,transform] duration-150 hover:bg-hover-2 hover:text-foreground active:scale-[0.98]"
-          title="Change model (⌘K)"
-        >
-          <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-foreground/60" />
-          <span className="truncate">{model?.name ?? shortModelId(settings.model)}</span>
-          <svg viewBox="0 0 12 12" className="h-3 w-3 shrink-0 text-muted transition-transform duration-200 group-hover:translate-x-0.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-            <path d="m4.5 2.75 3.25 3.25-3.25 3.25" />
-          </svg>
-        </button>
-        {chips.length === 0 ? (
-          <span className="font-mono text-[11px] text-muted">loading capabilities…</span>
-        ) : (
-          chips.map((chip) => (
-            <span
-              key={chip}
-              className="flex h-6 items-center rounded-full px-2 font-mono text-[11px] text-muted shadow-hairline"
-            >
-              {chip}
-            </span>
-          ))
-        )}
+        <div className="mt-4 flex min-w-0 flex-wrap items-center gap-1.5">
+          <button
+            onClick={onOpenModel}
+            className="dial-squircle group flex h-7 min-w-0 items-center gap-2 bg-hover pl-2.5 pr-2 text-[12.5px] [--sq:9px] font-medium text-secondary transition-[background-color,color,transform] duration-150 hover:bg-hover-2 hover:text-foreground active:scale-[0.98]"
+            title="Change model (⌘K)"
+          >
+            <span aria-hidden className="size-1.5 shrink-0 rounded-[1.5px] bg-foreground/60" />
+            <span className="truncate">{modelDisplayName(settings.model, models)}</span>
+            <svg viewBox="0 0 12 12" className="h-3 w-3 shrink-0 text-muted transition-transform duration-200 group-hover:translate-x-0.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="m4.5 2.75 3.25 3.25-3.25 3.25" />
+            </svg>
+          </button>
+          {chips.length === 0 ? (
+            <span className="font-mono text-[11px] text-muted">loading capabilities…</span>
+          ) : (
+            chips.map((chip) => (
+              <span
+                key={chip}
+                className="dial-squircle flex h-6 items-center px-2 font-mono text-[11px] text-muted shadow-hairline [--sq:7px]"
+              >
+                {chip}
+              </span>
+            ))
+          )}
+        </div>
       </div>
     </section>
   );
