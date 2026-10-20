@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import ChatView from "@/components/chat/ChatView";
 import FrontDoor from "@/components/settings/FrontDoor";
+import Button from "@/components/ui/Button";
 import Loader from "@/components/ui/Loader";
 import ConversationList from "@/components/sidebar/ConversationList";
 import AuthPanel from "@/components/settings/AuthPanel";
@@ -102,6 +103,9 @@ export default function Home() {
     key: string;
     messages: DialMessage[];
   } | null>(null);
+  /** The thread whose read failed even after retrying, and a manual retry. */
+  const [loadFailed, setLoadFailed] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   /**
    * A realtime delta patches the rail, while the open transcript is owned by
@@ -151,20 +155,39 @@ export default function Home() {
     // so re-reading it here would overwrite a streaming thread with D1.
     if (!conv.ready || !id || id === draftId) return;
     let cancelled = false;
+    let retry: ReturnType<typeof setTimeout> | undefined;
 
-    void Promise.all([conv.getMeta(id), conv.loadMessages(id)]).then(
-      ([meta, messages]) => {
-        if (cancelled) return;
-        setSettings(settingsOf(meta));
-        setLoaded({ key: id, messages });
-      },
-    );
+    // A read that fails — the network blinked, a deploy swapped the Worker
+    // mid-request — is tried again quietly, then handed to the reader with a
+    // button. It used to have no failure path at all: one rejected read left
+    // the loader spinning until the page was reloaded.
+    const read = (tries: number) => {
+      void Promise.all([conv.getMeta(id), conv.loadMessages(id)]).then(
+        ([meta, messages]) => {
+          if (cancelled) return;
+          setSettings(settingsOf(meta));
+          setLoaded({ key: id, messages });
+          setLoadFailed(null);
+        },
+        (error: unknown) => {
+          if (cancelled) return;
+          if (tries < 3) {
+            retry = setTimeout(() => read(tries + 1), 800 * 2 ** tries);
+            return;
+          }
+          console.error("Couldn't open the conversation", error);
+          setLoadFailed(id);
+        },
+      );
+    };
+    read(0);
 
     return () => {
       cancelled = true;
+      clearTimeout(retry);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-resolve when the active thread changes
-  }, [conv.ready, conv.activeId, draftId]);
+  }, [conv.ready, conv.activeId, draftId, loadAttempt]);
 
   /**
    * What the chat actually renders. The empty state is derived rather than
@@ -590,6 +613,21 @@ export default function Home() {
             setActiveId={conv.setActiveId}
             instructions={account.settings.instructions}
           />
+        ) : loadFailed !== null && loadFailed === conv.activeId ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+            <p className="text-[13.5px] text-secondary">
+              Couldn’t open this conversation.
+            </p>
+            <Button
+              size="sm"
+              onClick={() => {
+                setLoadFailed(null);
+                setLoadAttempt((n) => n + 1);
+              }}
+            >
+              Try again
+            </Button>
+          </div>
         ) : (
           <div className="flex flex-1 items-center justify-center">
             <Loader timer={false} className="opacity-70" />

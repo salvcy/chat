@@ -650,6 +650,14 @@ origin.
   `RailHandle` is now its own zero-width column between the rail and the chat
   window, hit area from 4px inside the rail across the whole gutter, and the
   width follows the pointer by the offset it was grabbed at.
+- **A read with no failure path is a loader that never ends.** Opening a
+  conversation (`page.tsx`) chained only a success handler, so one rejected
+  read — a network blip, a deploy swapping the Worker mid-request — left the
+  chat window spinning until a reload, with nothing in the console to say
+  why (October 2026, seen once after a deploy). It now retries three times
+  (0.8s, 1.6s, 3.2s) and then says "Couldn't open this conversation" with
+  Try again. Anything else the shell waits on before rendering needs the
+  same: a retry, then a way out.
 - **`'self'` does not cover `blob:` URLs, and local testing hid it.** Media
   became object URLs (phase 18) and is read back with `fetch(blob:)` whenever
   it leaves the tab — a follow-up turn in a thread with an image, a JSON
