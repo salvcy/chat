@@ -514,6 +514,7 @@ name = "chat"
 version = "0.2.0"
 dependencies = [
  "keyring",
+ "objc2-app-kit",
  "serde_json",
  "tauri",
  "tauri-build",

@@ -28,6 +28,20 @@ tauri-plugin-window-state = "2.5.0"
 keyring = "4.2.0"
 serde_json = "1"
 
+# Putting the traffic lights back after macOS moves them (`macos::relight`),
+# and measuring them in debug builds. tao and wry build these already, so
+# nothing new is fetched.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "objc2-core-foundation",
+  "NSResponder",
+  "NSView",
+  "NSWindow",
+  "NSControl",
+  "NSButton",
+] }
+
 # Tauri's recommended release settings: the shell does almost no work of its
 # own, so size wins over speed.
 [profile.release]

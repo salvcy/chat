@@ -39,11 +39,6 @@ type TauriGlobal = {
       handler: (event: { payload: T }) => void,
     ): Promise<() => void>;
   };
-  window: {
-    getCurrentWindow(): {
-      setTheme(theme: "light" | "dark" | null): Promise<void>;
-    };
-  };
 };
 
 declare global {
@@ -208,10 +203,14 @@ export function onDesktopEvent(name: string, handler: () => void): () => void {
  * Match the window to the app's theme, so the native parts — the traffic
  * lights when unfocused, context menus, the window behind the page while it
  * resizes — agree with it. `system` hands the choice back to macOS.
+ *
+ * The app's own command rather than Tauri's `setTheme`: macOS moves the
+ * traffic lights back to their default place when the window's appearance
+ * changes, so the app sets the theme and then puts them back in the page's
+ * top row (`set_window_theme` in Tauri/src-tauri/src/lib.rs).
  */
 export function syncWindowTheme(theme: "light" | "dark" | "system"): void {
   void tauri()
-    ?.window.getCurrentWindow()
-    .setTheme(theme === "system" ? null : theme)
+    ?.core.invoke("set_window_theme", { theme: theme === "system" ? null : theme })
     .catch(() => undefined);
 }

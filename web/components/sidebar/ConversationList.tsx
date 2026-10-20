@@ -170,7 +170,7 @@ export default function ConversationList({
 
       {/* primary actions */}
       <GlideMenu
-        className="mt-1 shrink-0"
+        className="dial-rail-new @container mt-1 shrink-0"
         highlightClassName="inset-x-0 rounded-control bg-hover-2"
       >
         <button
@@ -187,7 +187,9 @@ export default function ConversationList({
             </Glyph>
           </span>
           <span className="flex-1 truncate">New chat</span>
-          <span className="hidden font-mono text-[10.5px] text-muted opacity-0 transition-opacity group-hover/new:opacity-100 lg:inline">
+          {/* Only where the row has room for it: beside the desktop app's
+              traffic lights a narrow rail needs the space for the label. */}
+          <span className="hidden font-mono text-[10.5px] text-muted opacity-0 transition-opacity group-hover/new:opacity-100 lg:@min-[9.5rem]:inline">
             ⌘⇧K
           </span>
         </button>

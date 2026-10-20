@@ -7,6 +7,7 @@ fn main() {
             "set_session_token",
             "clear_session_token",
             "take_openrouter_code",
+            "set_window_theme",
             "release_window",
         ]),
     ))

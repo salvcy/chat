@@ -8,11 +8,11 @@
     "core:event:allow-unlisten",
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize",
-    "core:window:allow-set-theme",
     "allow-session-token",
     "allow-set-session-token",
     "allow-clear-session-token",
     "allow-take-openrouter-code",
+    "allow-set-window-theme",
     "allow-release-window"
   ]
 }

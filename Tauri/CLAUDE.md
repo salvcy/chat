@@ -69,9 +69,10 @@ Because the UI is on another origin than the API:
   ("Chat Local", `app.belayet.chat.local`), so it has its own credential item
   and its own web data and never touches the installed app's session.
 - `src-tauri/capabilities/default.json` — what the UI may call: event
-  listen/unlisten, start dragging, toggle maximize, set theme, and the five app
-  commands. Local content only. `build.rs` declares the app commands so they
-  are behind this file rather than open by default.
+  listen/unlisten, start dragging, toggle maximize, and the six app commands
+  (the theme goes through `set_window_theme`, not Tauri's own `setTheme`).
+  Local content only. `build.rs` declares the app commands so they are
+  behind this file rather than open by default.
 - `assets/`, `scripts/icons.mjs`, `src-tauri/icons/` — icons (see Icons).
 
 ## How it works
@@ -88,18 +89,31 @@ Because the UI is on another origin than the API:
 - **Downloads** go to Downloads under the page's suggested name (wry's path,
   numbered when taken) and are revealed when done.
 - **The title bar is hidden on macOS** (`Overlay`, hidden title) and the
-  traffic lights stay **where macOS puts them**: x 9–69, centred 16px down in
-  a 32px bar (measured from the native buttons on macOS 27). The UI keeps that
-  strip free (`--dial-titlebar` in `../web/app/globals.css`) and starts
-  everything below it. Never set `traffic_light_position` again: AppKit puts
-  moved buttons back on a title change, a resize and a theme change, tao
-  re-applies after only the first two, and the theme is set at every launch —
-  the first install showed the lights back at the default height beside rows
-  centred on the custom one. In full screen macOS hides the lights and
-  the app sets `data-fullscreen` so the UI drops the strip — re-applied after
-  a reload. The UI shows no brand mark in the app.
-- **Theme:** the UI tells the window its theme (`setTheme`), so unfocused
-  lights, context menus and the backdrop match it.
+  traffic lights **sit in the page's top rows**: from x 18, centred 32px from
+  the top (`LIGHTS`; tao's inset is the centre plus 2), the line the UI
+  centres New chat, the chat window's top strip and the front door's header
+  on (`--dial-lights-x` / `--dial-lights-y` in `../web/app/globals.css` —
+  change both sides together). The user asked for this over the 32px strip
+  the window kept free above everything (October 2026). **They have to be
+  put back**: AppKit returns moved buttons to its default place whenever it
+  lays the title bar out — a new title, a new appearance, focus, a resize —
+  and tao places them only when its own view draws, which none of those
+  reliably cause. So after each of them, and after a page load, the app asks
+  that view to draw (`macos::relight`): on the main thread, queued behind the
+  change, and a draw follows the layout that moved them, so tao's placement
+  is the one that holds. The UI sets the theme through `set_window_theme`
+  (not Tauri's `setTheme`) so the app is told. The first version moved the
+  lights relying on tao alone and they sat at the default height beside rows
+  built for these; the second covered only the theme, and at a launch the
+  lights were back at the default until a settings change sent the theme
+  again (which of the others moved them was not pinned down — all are
+  covered now). Debug builds log the lights' position after each relight
+  (`chat: lights (…)`). In full
+  screen macOS hides the lights and the app sets `data-fullscreen` so the
+  UI drops the room — re-applied after a reload. The UI shows no brand mark
+  in the app.
+- **Theme:** the UI tells the window its theme (`set_window_theme`), so
+  unfocused lights, context menus and the backdrop match it.
 - **macOS:** standard menu bar plus View → Reload ⌘R, Back ⌘[, Forward ⌘].
   Closing the window hides it (a reply keeps streaming); the Dock or reopening
   shows it; Quit quits. The UI owns ⌘K, ⇧⌘K and ⌘B — never bind those. On

@@ -18,9 +18,9 @@
 //!   (GNOME Keyring, KWallet) on Linux — plus the OpenRouter code that comes
 //!   back through the `belayet-chat://` deep link after the user approves in
 //!   their browser.
-//! - A window without a title bar on macOS: the traffic lights stay where
-//!   macOS puts them, over a strip the UI keeps free for them
-//!   (`web/app/globals.css`, "the desktop app's window").
+//! - A window without a title bar on macOS: the traffic lights sit in the
+//!   page's own top rows, and are put back there whenever macOS moves them
+//!   (`LIGHTS`; `web/app/globals.css`, "the desktop app's window").
 //! - Links leave: anything that is not the bundled UI opens in the default
 //!   browser. Downloads land in Downloads and are revealed.
 //! - On macOS closing the window hides it, so a reply keeps streaming; once it
@@ -58,6 +58,14 @@ const API: &str = match option_env!("CHAT_API") {
 };
 
 const MAIN_WINDOW: &str = "main";
+
+/// Where the traffic lights sit: the close button's left edge, and the inset
+/// tao turns into the title-bar height. Three 14px lights from x 18 with
+/// their centre 32px from the top (it comes out at `y - 2`) — the line the
+/// page centres its top rows on (`--dial-lights-x` and `--dial-lights-y` in
+/// web/app/globals.css). Change them together.
+#[cfg(target_os = "macos")]
+const LIGHTS: (f64, f64) = (18.0, 34.0);
 
 /// The web app's dark `chrome` token, behind the page while it loads.
 const CHROME: Color = Color(14, 14, 14, 255);
@@ -283,6 +291,27 @@ fn phase<R: Runtime>(app: &AppHandle<R>) -> std::sync::MutexGuard<'_, Phase> {
 /// unsaved, nothing typed. Honoured only while the window is still closed;
 /// decided on the main thread, where the Dock's reopen is handled too, so the
 /// two cannot cross.
+/// The window's appearance, from the page's theme (`syncWindowTheme` in
+/// web/lib/api.ts); no theme follows the system. It is what unfocused lights,
+/// context menus and the window behind a resizing page are drawn in. On macOS
+/// a new appearance lays the title bar out again, which puts the traffic
+/// lights back at macOS's default place, so they are put back in the page's
+/// row afterwards.
+#[tauri::command]
+fn set_window_theme<R: Runtime>(app: AppHandle<R>, theme: Option<String>) -> Result<(), String> {
+    let theme = match theme.as_deref() {
+        Some("light") => Some(tauri::Theme::Light),
+        Some("dark") => Some(tauri::Theme::Dark),
+        _ => None,
+    };
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        window.set_theme(theme).map_err(|error| error.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    macos::relight(&app);
+    Ok(())
+}
+
 #[tauri::command]
 fn release_window<R: Runtime>(app: AppHandle<R>) {
     let handle = app.clone();
@@ -404,6 +433,10 @@ fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             {
                 tell_page_fullscreen(window.app_handle(), true);
             }
+            #[cfg(target_os = "macos")]
+            if payload.event() == PageLoadEvent::Finished {
+                macos::relight(window.app_handle());
+            }
         })
         .on_document_title_changed(move |window, title| {
             #[cfg(debug_assertions)]
@@ -417,19 +450,23 @@ fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                 title
             };
             let _ = window.set_title(&title);
+            // A new title lays the title bar out again (`LIGHTS`).
+            #[cfg(target_os = "macos")]
+            macos::relight(window.app_handle());
         });
 
-    // The traffic lights are left where macOS puts them — x 9 to 69, centred
-    // 16px down in a 32px bar on macOS 27 — and the UI keeps that strip free
-    // (`--dial-titlebar`). They are deliberately not moved: AppKit puts moved
-    // buttons back on a title change, a resize and a theme change (measured),
-    // and tao re-applies a custom position after only the first two — the
-    // theme is set at every launch (`syncWindowTheme`), so moved lights ended
-    // up back at the default height, beside a layout built for the other one.
+    // The traffic lights sit in the page's top rows (`LIGHTS`). AppKit puts
+    // moved buttons back whenever it lays the title bar out — a new title, a
+    // theme, focus, a resize — and tao places them only when its view draws,
+    // which none of those reliably cause. So after each of them the app asks
+    // for that draw (`macos::relight`); without it the lights sat at macOS's
+    // default height beside rows built for these, at the first launch and
+    // again whenever a conversation's title arrived.
     #[cfg(target_os = "macos")]
     let builder = builder
         .title_bar_style(tauri::TitleBarStyle::Overlay)
-        .hidden_title(true);
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(LIGHTS.0, LIGHTS.1));
 
     let window = builder.build()?;
     *phase(app) = Phase::Open;
@@ -450,7 +487,16 @@ fn on_window_event<R: Runtime>(window: &tauri::Window<R>, event: &WindowEvent) {
         }
     }
     #[cfg(target_os = "macos")]
-    macos::hide_on_close(window, event);
+    {
+        // Each of these lays the title bar out again (`LIGHTS`); a theme
+        // change here is the system's, under a window following it.
+        if let WindowEvent::ThemeChanged(_) | WindowEvent::Focused(_) | WindowEvent::Resized(_) =
+            event
+        {
+            macos::relight(window.app_handle());
+        }
+        macos::hide_on_close(window, event);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -464,6 +510,67 @@ mod macos {
     };
 
     use super::{Phase, MAIN_WINDOW};
+
+    /// Puts the traffic lights back at `LIGHTS`. tao places them whenever its
+    /// view draws, so this asks the view to draw: on the main thread, behind
+    /// whatever was queued before it (a new title or appearance), and a draw
+    /// follows the layout that moved them, so its placement is the one that
+    /// holds. Cheap enough to ask after anything that may have moved them.
+    pub fn relight<R: Runtime>(app: &AppHandle<R>) {
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let Some(window) = handle.get_webview_window(MAIN_WINDOW) else {
+                return;
+            };
+            let Ok(view) = window.ns_view() else {
+                return;
+            };
+            // SAFETY: tao's content view, owned by the window we just got, on
+            // the main thread.
+            let view = unsafe { &*view.cast::<objc2_app_kit::NSView>() };
+            view.setNeedsDisplay(true);
+        });
+        #[cfg(debug_assertions)]
+        log_lights(app, "relight");
+    }
+
+    /// Debug builds log where the lights are a moment after anything that may
+    /// have moved them: x from the close button's left edge to the zoom
+    /// button's right, and the centre from the window's top.
+    #[cfg(debug_assertions)]
+    pub fn log_lights<R: Runtime>(app: &AppHandle<R>, why: &'static str) {
+        let handle = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let inner = handle.clone();
+            let _ = handle.run_on_main_thread(move || {
+                use objc2_app_kit::{NSWindow, NSWindowButton};
+                let Some(window) = inner.get_webview_window(MAIN_WINDOW) else {
+                    return;
+                };
+                let Ok(ns_window) = window.ns_window() else {
+                    return;
+                };
+                // SAFETY: the window's own NSWindow, on the main thread.
+                let ns_window = unsafe { &*ns_window.cast::<NSWindow>() };
+                let (Some(close), Some(zoom)) = (
+                    ns_window.standardWindowButton(NSWindowButton::CloseButton),
+                    ns_window.standardWindowButton(NSWindowButton::ZoomButton),
+                ) else {
+                    return;
+                };
+                let height = ns_window.frame().size.height;
+                let first = close.convertRect_toView(close.bounds(), None);
+                let last = zoom.convertRect_toView(zoom.bounds(), None);
+                eprintln!(
+                    "chat: lights ({why}) x {:.1}-{:.1}, centre {:.1} from the top",
+                    first.origin.x,
+                    last.origin.x + last.size.width,
+                    height - (first.origin.y + first.size.height / 2.0)
+                );
+            });
+        });
+    }
 
     /// The standard menu bar, plus View → Reload, Back and Forward. There is no
     /// address bar, so Back is how the privacy page returns to the chat.
@@ -596,6 +703,7 @@ pub fn run() {
             set_session_token,
             clear_session_token,
             take_openrouter_code,
+            set_window_theme,
             release_window
         ])
         .on_window_event(on_window_event);

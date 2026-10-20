@@ -594,20 +594,26 @@ runs on the web and in the app, and switches mode at runtime.
   code arriving any other way exchanges for nothing.
 - **Google sign-in is refused in the app**: its redirect would finish in the
   browser and set the cookie there.
-- **The window has no title bar on macOS, and the lights are not moved.**
-  They stay where macOS draws them (x 9–69, centred 16px down in a 32px bar,
-  measured on macOS 27), and the page keeps that strip for them like a
-  native window: `--dial-titlebar` (32px) on top, the chat window and the
-  rail's content below it, the rail's first row centred on the chat window's
-  top strip (`globals.css`, "the desktop app's window"). **Never move the
-  lights again** (October 2026): the app used to set a custom position and
-  centre its rows on it, but AppKit puts moved buttons back on a title
-  change, a resize and a theme change (measured), tao re-applies only after
-  the first two, and the theme is set at every launch — so the lights sat at
-  the default height beside rows built for another one. In full screen the
-  strip goes (`data-fullscreen`); under a native title bar (Windows, Linux)
-  there is none. `data-tauri-drag-region` marks what moves the window
-  (`deep` on rows whose buttons stay clickable); it is inert in a browser.
+- **The window has no title bar on macOS, and the lights sit in the page's
+  top rows** (October 2026, the user's call: the 32px strip kept free above
+  everything read as an empty bar across the window). The app places them
+  from x 18 with their centre 32px from the top (`LIGHTS` in `lib.rs`), the
+  line the page centres its rows on (`--dial-lights-x` 90px, the room they
+  take with a 12px gap, and `--dial-lights-y` 32px, in `globals.css`, "the
+  desktop app's window"): rail open, New chat shares their row after them;
+  rail closed or a narrow window, the chat window's top strip — 8px in, its
+  48px centre on the same line — starts its controls after them; the front
+  door's header is 64px with the same room. The chat window rises to the
+  same 8px margin as its other sides. **Moved lights have to be put back**:
+  AppKit returns them to its default place whenever it lays the title bar
+  out (a title, a theme, focus, a resize), and the app puts them back after
+  each (`relight` in `lib.rs`). The page sets the window's theme through the
+  app's `set_window_theme` command, never Tauri's `setTheme`, so the app
+  knows when the appearance changed. In full
+  screen the lights are hidden and none of this applies (`data-fullscreen`);
+  under a native title bar (Windows, Linux) there are none in the page.
+  `data-tauri-drag-region` marks what moves the window (`deep` on rows whose
+  buttons stay clickable); it is inert in a browser.
 - **No brand mark in the app** (October 2026, the user's call: squeezed in
   beside the traffic lights it looked lost). Under any `data-shell` the
   rail's brand row goes, and the front door's mark (`dial-brand`) with it.
@@ -634,10 +640,10 @@ runs on the web and in the app, and switches mode at runtime.
 What the app depends on here, mirrored in `../Tauri`: the scheme name
 (`DESKTOP_SCHEME` in `lib/pkce.ts` and `tauri.conf.json`), the relay path, the
 command names (the three session commands, `take_openrouter_code`,
-`release_window`), the `openrouter-code` and `window-closed` events, the
-`data-shell` / `data-fullscreen` attributes, the title-bar strip
-(`--dial-titlebar`, the height of the bar macOS draws the lights in), and the
-CSP — the app's (`tauri.conf.json`) mirrors `public/_headers` plus the API's
+`set_window_theme`, `release_window`), the `openrouter-code` and
+`window-closed` events, the `data-shell` / `data-fullscreen` attributes, the
+lights' line (`--dial-lights-x` / `--dial-lights-y` here, `LIGHTS` there),
+and the CSP — the app's (`tauri.conf.json`) mirrors `public/_headers` plus the API's
 origin.
 
 ### Rules learned the hard way
