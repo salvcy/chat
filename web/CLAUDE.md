@@ -420,7 +420,11 @@ invoking a Worker.
   either** — it is the account's instructions, edited in Settings →
   Instructions and passed to the transport by ref. Send is a squircle with
   a → (where the message goes), inverted when there is something to send,
-  and turns into a stop square while busy.
+  and turns into a stop square while busy. **Enter sends; Enter with any
+  modifier is a new line** (`enterToSend` in `lib/keys.ts`, shared with the
+  edit-message field). Shift+Enter inserts one natively, but ⌘, Ctrl and
+  Option do not, so checking only for Shift let ⌘Enter send; those insert
+  the line themselves, through `insertText` so undo still works.
 - `components/chat/ModelDial.tsx` — **the model and its effort, as one small
   control beside send** (October 2026, the user's design after ChatGPT's,
   squared off). Closed: a squircle reading "Claude Sonnet 4.6 High" — name
@@ -440,10 +444,17 @@ invoking a Worker.
   **Since revised (October 2026): the models view is a search.** Its field
   has the focus and filters the whole catalog in place (the palette's
   every-word match, names that start with the query first, provider beside
-  each result, six rows); arrows move, Enter takes, Escape clears then
-  closes. The palette is the extended view — prices, context, capabilities
-  — opened by the expand button beside the field, ⌘K inside the dial, or
-  the "N more in the full catalog" row, all three carrying the query.
+  each result); arrows move, Page Up/Down a screenful, Enter takes, Escape
+  clears then closes. **And the list scrolls through all of it**: every
+  match, or with nothing typed the short list and then "All models", the
+  rest of the catalog by provider. It has no visible bar, so the edge with
+  more beyond it fades (`.dial-scroll-edges`, `data-above` / `data-below`);
+  rows are memoized so the cursor crossing 470 of them repaints two; and
+  the keyboard scrolls its row into view from the key handler, never from
+  an effect on the cursor, so hovering a row at the faded edge does not
+  move the list. The palette is the extended view — prices, context,
+  capabilities — opened by the expand button beside the field or ⌘K inside
+  the dial, both carrying the query.
   Escape closes it without stopping a stream; the panel anchors to the
   composer's right group so its edge lines up with send's and a phone keeps
   a margin. It replaced `EffortControl` (a sparkle + word opening a

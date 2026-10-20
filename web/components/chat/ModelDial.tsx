@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import EffortSlider, { EFFORT_DESCRIPTION, EFFORT_LABEL } from "./EffortSlider";
 import GlideMenu from "@/components/ui/GlideMenu";
 import { nextRecents } from "@/components/tuner/Palette";
@@ -26,8 +26,8 @@ const LATEST = [
   "~x-ai/grok-latest",
 ];
 const QUICK_ROWS = 5;
-/** Search results shown inline before the rest is the catalog's job. */
-const SEARCH_ROWS = 6;
+/** A row's height (`h-9`), for paging the list a screenful at a time. */
+const ROW_PX = 36;
 
 /** The current model, then recents, then the latest aliases — five at most. */
 function quickModels(
@@ -50,7 +50,11 @@ function quickModels(
  * must appear in the id or the name — with names that start with the query
  * first, since that is usually the one being typed.
  */
-function searchModels(query: string, models: OpenRouterModel[]): string[] {
+function searchModels(
+  query: string,
+  models: OpenRouterModel[],
+  names: ReadonlyMap<string, string>,
+): string[] {
   const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
   if (tokens.length === 0) return [];
   const head = tokens.join(" ");
@@ -59,7 +63,7 @@ function searchModels(query: string, models: OpenRouterModel[]): string[] {
     return tokens.every((t) => hay.includes(t));
   });
   const leading = (m: OpenRouterModel) =>
-    displayName(m.id, models).toLowerCase().startsWith(head) ? 0 : 1;
+    (names.get(m.id) ?? m.id).toLowerCase().startsWith(head) ? 0 : 1;
   return matched
     .map((m, i) => ({ m, i }))
     .sort((a, b) => leading(a.m) - leading(b.m) || a.i - b.i)
@@ -70,6 +74,79 @@ function searchModels(query: string, models: OpenRouterModel[]): string[] {
 function providerOf(id: string): string {
   return id.split("/")[0].replace(/^~/, "");
 }
+
+/** The rest of the catalog, under the short list: by provider, then by name. */
+function restOfCatalog(
+  shown: readonly string[],
+  models: OpenRouterModel[],
+  names: ReadonlyMap<string, string>,
+): string[] {
+  const skip = new Set(shown);
+  return models
+    .filter((m) => !skip.has(m.id))
+    .map((m) => ({ id: m.id, provider: providerOf(m.id), name: names.get(m.id) ?? m.id }))
+    .sort((a, b) => a.provider.localeCompare(b.provider) || a.name.localeCompare(b.name))
+    .map(({ id }) => id);
+}
+
+/**
+ * One model in the list. Memoized: the whole catalog can be on the list, and
+ * the cursor moving under the pointer should repaint two rows, not 470.
+ */
+const ModelRow = memo(function ModelRow({
+  id,
+  index,
+  name,
+  provider,
+  current,
+  active,
+  onHover,
+  onPick,
+}: {
+  id: string;
+  index: number;
+  name: string;
+  /** Shown where the list is no longer the person's own short list. */
+  provider: string | null;
+  current: boolean;
+  active: boolean;
+  onHover: (index: number) => void;
+  onPick: (id: string) => void;
+}) {
+  return (
+    <button
+      id={`dial-model-${index}`}
+      type="button"
+      role="option"
+      aria-selected={current}
+      tabIndex={-1}
+      data-row={index}
+      data-glide-row
+      data-glide-active={active}
+      onMouseMove={() => onHover(index)}
+      onClick={() => onPick(id)}
+      title={id}
+      className="relative z-10 flex h-9 w-full items-center gap-2 px-2.5 text-left outline-none"
+    >
+      <span
+        className={`min-w-0 flex-1 truncate text-[13.5px] ${
+          current ? "font-medium text-foreground" : "text-secondary"
+        }`}
+      >
+        {name}
+      </span>
+      {current ? (
+        <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 shrink-0 text-foreground" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <path d="m3.5 8.5 3 3 6-6.5" />
+        </svg>
+      ) : (
+        provider && (
+          <span className="shrink-0 font-mono text-[10.5px] text-muted">{provider}</span>
+        )
+      )}
+    </button>
+  );
+});
 
 const Sparkle = ({ className = "" }: { className?: string }) => (
   <svg viewBox="0 0 16 16" className={className} fill="currentColor" aria-hidden>
@@ -89,13 +166,15 @@ const Sparkle = ({ className = "" }: { className?: string }) => (
  *
  * The models view is a search, not a menu. Its field has the focus, so
  * typing filters the whole catalog in place — the list eases to the new
- * height as it narrows — and with nothing typed it shows the short list:
- * current, recents, the newest of the big families. Arrow keys move through
- * the results and Enter takes one, so a model change never leaves the
- * keyboard. The palette is the extended view, for comparing prices, context
- * and capabilities: the expand button beside the field opens it, as does ⌘K
- * from inside the dial and the "more" row under a long result — and all
- * three carry what was typed, so the search goes on where it was.
+ * height as it narrows — and with nothing typed it opens on the short list
+ * (current, recents, the newest of the big families) with the rest of the
+ * catalog below it, by provider. Either way the list scrolls through all of
+ * it, its edges fading where there is more. Arrow keys move through the
+ * results, Page Up/Down a screenful, and Enter takes one, so a model change
+ * never leaves the keyboard. The palette is the extended view, for comparing
+ * prices, context and capabilities: the expand button beside the field opens
+ * it, as does ⌘K from inside the dial — both carrying what was typed, so the
+ * search goes on where it was.
  *
  * Height is measured and written to the panel, so changes ease rather than
  * snap (see `.dial-model-panel`).
@@ -138,15 +217,28 @@ export default function ModelDial({
   const name = displayName(settings.model, models);
   const thinking = canTune && settings.reasoning !== "off";
 
+  const listing = open && shown === "models";
   const searching = query.trim().length > 0;
-  const matches = useMemo(
-    () => (searching ? searchModels(query, models) : []),
-    [searching, query, models],
+  const names = useMemo(
+    () => new Map(models.map((m) => [m.id, displayName(m.id, models)])),
+    [models],
   );
-  const rows = searching
-    ? matches.slice(0, SEARCH_ROWS)
-    : quickModels(settings.model, recentModels, models);
-  const more = searching ? matches.length - rows.length : 0;
+  const matches = useMemo(
+    () => (listing && searching ? searchModels(query, models, names) : []),
+    [listing, searching, query, models, names],
+  );
+  const quick = useMemo(
+    () => quickModels(settings.model, recentModels, models),
+    [settings.model, recentModels, models],
+  );
+  const rest = useMemo(
+    () => (listing && !searching ? restOfCatalog(quick, models, names) : []),
+    [listing, searching, quick, models, names],
+  );
+  const rows = useMemo(
+    () => (searching ? matches : [...quick, ...rest]),
+    [searching, matches, quick, rest],
+  );
   // Clamped on read: a narrowing result must not leave the cursor past the end.
   const cursor = Math.min(active, Math.max(rows.length - 1, 0));
 
@@ -166,6 +258,35 @@ export default function ModelDial({
     close(true);
   };
 
+  // Stable for the memoized rows, always calling the latest `choose`.
+  const chooseRef = useRef(choose);
+  useLayoutEffect(() => {
+    chooseRef.current = choose;
+  });
+  const pick = useCallback((id: string) => chooseRef.current(id), []);
+  const hover = useCallback((index: number) => setActive(index), []);
+
+  // The keyboard's row is scrolled to here, not in an effect on the cursor:
+  // a row the pointer moves onto at the faded edge must not scroll the list
+  // out from under it.
+  const moveTo = (index: number) => {
+    setActive(index);
+    listRef.current
+      ?.querySelector<HTMLElement>(`[data-row="${index}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  };
+
+  // Fade an edge only where there is more to scroll to (`.dial-scroll-edges`).
+  const edges = useCallback(() => {
+    const list = listRef.current;
+    if (!list) return;
+    list.toggleAttribute("data-above", list.scrollTop > 1);
+    list.toggleAttribute(
+      "data-below",
+      list.scrollTop + list.clientHeight < list.scrollHeight - 1,
+    );
+  }, []);
+
   const openCatalog = () => {
     close();
     onOpenCatalog(query.trim());
@@ -174,6 +295,8 @@ export default function ModelDial({
   const search = (next: string) => {
     setQuery(next);
     setActive(0);
+    // A new result starts at its top.
+    if (listRef.current) listRef.current.scrollTop = 0;
   };
 
   // Outside presses close it.
@@ -196,12 +319,9 @@ export default function ModelDial({
     target?.focus({ preventScroll: true });
   }, [open, shown]);
 
-  // Keep the keyboard's row in view in a long result.
-  useEffect(() => {
-    listRef.current
-      ?.querySelector<HTMLElement>(`[data-row="${cursor}"]`)
-      ?.scrollIntoView({ block: "nearest" });
-  }, [cursor]);
+  useLayoutEffect(() => {
+    if (listing) edges();
+  }, [listing, rows, edges]);
 
   // The panel's height follows its content, eased (see `.dial-model-panel`).
   // Each view is its own element, so the observer moves with it; only the
@@ -388,12 +508,18 @@ export default function ModelDial({
                         value={query}
                         onChange={(e) => search(e.target.value)}
                         onKeyDown={(e) => {
-                          if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                          const step =
+                            e.key === "ArrowDown" || e.key === "ArrowUp"
+                              ? 1
+                              : e.key === "PageDown" || e.key === "PageUp"
+                                ? Math.max(1, Math.floor((listRef.current?.clientHeight ?? 0) / ROW_PX) - 1)
+                                : 0;
+                          if (step > 0 && rows.length > 0) {
                             e.preventDefault();
-                            setActive(
-                              e.key === "ArrowDown"
-                                ? Math.min(rows.length - 1, cursor + 1)
-                                : Math.max(0, cursor - 1),
+                            moveTo(
+                              e.key === "ArrowDown" || e.key === "PageDown"
+                                ? Math.min(rows.length - 1, cursor + step)
+                                : Math.max(0, cursor - step),
                             );
                           } else if (e.key === "Enter" && !e.nativeEvent.isComposing) {
                             e.preventDefault();
@@ -438,51 +564,44 @@ export default function ModelDial({
                     </button>
                   </div>
 
-                  <div ref={listRef} id="dial-model-list" role="listbox" aria-label="Models" className="dial-scroll-none max-h-[230px] overflow-y-auto">
+                  <div
+                    ref={listRef}
+                    id="dial-model-list"
+                    role="listbox"
+                    aria-label="Models"
+                    onScroll={edges}
+                    className="dial-scroll-none dial-scroll-edges max-h-[min(272px,42vh)] scroll-py-5 overflow-y-auto overscroll-contain"
+                  >
                     <GlideMenu
                       mode="active"
                       activeKey={rows.length > 0 ? `${cursor}-${query}` : null}
                       highlightClassName="dial-squircle inset-x-0 bg-hover [--sq:9px]"
                     >
-                      {rows.map((id, i) => {
-                        const current = id === settings.model;
-                        return (
-                          <button
-                            key={id}
-                            id={`dial-model-${i}`}
-                            type="button"
-                            role="option"
-                            aria-selected={current}
-                            tabIndex={-1}
-                            data-row={i}
-                            data-glide-row
-                            data-glide-active={i === cursor}
-                            onMouseMove={() => i !== cursor && setActive(i)}
-                            onClick={() => choose(id)}
-                            title={id}
-                            className="relative z-10 flex h-9 w-full items-center gap-2 px-2.5 text-left outline-none"
-                          >
-                            <span
-                              className={`min-w-0 flex-1 truncate text-[13.5px] ${
-                                current ? "font-medium text-foreground" : "text-secondary"
-                              }`}
+                      {rows.map((id, i) => (
+                        <Fragment key={id}>
+                          {!searching && i === quick.length && (
+                            <div
+                              role="presentation"
+                              className="flex items-baseline justify-between px-2.5 pb-1.5 pt-3 text-[11.5px] text-muted"
                             >
-                              {displayName(id, models)}
-                            </span>
-                            {current ? (
-                              <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 shrink-0 text-foreground" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                                <path d="m3.5 8.5 3 3 6-6.5" />
-                              </svg>
-                            ) : (
-                              searching && (
-                                <span className="shrink-0 font-mono text-[10.5px] text-muted">
-                                  {providerOf(id)}
-                                </span>
-                              )
-                            )}
-                          </button>
-                        );
-                      })}
+                              <span>All models</span>
+                              <span className="font-mono text-[10.5px] tabular-nums">
+                                {rest.length}
+                              </span>
+                            </div>
+                          )}
+                          <ModelRow
+                            id={id}
+                            index={i}
+                            name={names.get(id) ?? displayName(id, models)}
+                            provider={searching || i >= quick.length ? providerOf(id) : null}
+                            current={id === settings.model}
+                            active={i === cursor}
+                            onHover={hover}
+                            onPick={pick}
+                          />
+                        </Fragment>
+                      ))}
                     </GlideMenu>
 
                     {searching && rows.length === 0 && (
@@ -491,19 +610,6 @@ export default function ModelDial({
                       </p>
                     )}
                   </div>
-
-                  {more > 0 && (
-                    <button
-                      type="button"
-                      onClick={openCatalog}
-                      className="dial-squircle mt-1 flex h-8 w-full items-center justify-between gap-2 px-2.5 text-[12px] text-muted transition-colors duration-150 [--sq:9px] hover:bg-hover hover:text-foreground"
-                    >
-                      <span>
-                        {more} more in the full catalog
-                      </span>
-                      <span className="dial-kbd hidden sm:inline-flex">⌘K</span>
-                    </button>
-                  )}
                 </>
               )}
             </div>

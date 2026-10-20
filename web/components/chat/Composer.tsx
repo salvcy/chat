@@ -6,6 +6,7 @@ import type { FileUIPart } from "ai";
 import { useEffect, useRef, useState } from "react";
 import ModelDial from "./ModelDial";
 import { capabilitiesFor, shortModelId } from "@/lib/capabilities";
+import { enterToSend } from "@/lib/keys";
 import type { ChatSettings, OpenRouterModel } from "@/lib/types";
 
 /**
@@ -219,16 +220,9 @@ export default function Composer({
               onAttachFiles(e.clipboardData.files);
             }
           }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-              e.preventDefault();
-              if (showImageSuggestion) {
-                activateImageTool();
-                return;
-              }
-              onSend();
-            }
-          }}
+          onKeyDown={(e) =>
+            enterToSend(e, showImageSuggestion ? activateImageTool : onSend)
+          }
           placeholder={
             busy
               ? elsewhere

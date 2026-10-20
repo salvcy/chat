@@ -740,6 +740,49 @@ button:disabled {
   mask-image: linear-gradient(to bottom, transparent 0, #000 var(--dial-fade));
 }
 
+/* A scrolling list with no visible bar (the model dial's) fades the edge
+   that has more beyond it, and only that edge: at the top of the list the
+   first row is crisp, at the end the last one is. The list sets
+   `data-above` / `data-below` as it scrolls; the lengths are registered so
+   a fade eases in rather than switching on. */
+@property --dial-edge-top {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --dial-edge-bottom {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+.dial-scroll-edges {
+  transition:
+    --dial-edge-top 180ms ease-out,
+    --dial-edge-bottom 180ms ease-out;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--dial-edge-top),
+    #000 calc(100% - var(--dial-edge-bottom)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--dial-edge-top),
+    #000 calc(100% - var(--dial-edge-bottom)),
+    transparent 100%
+  );
+}
+.dial-scroll-edges[data-above] {
+  --dial-edge-top: 20px;
+}
+.dial-scroll-edges[data-below] {
+  --dial-edge-bottom: 20px;
+}
+
 /* Horizontal scrollbars (code blocks, tables, the composer control row). */
 .dial-scroll::-webkit-scrollbar:horizontal {
   height: 6px;

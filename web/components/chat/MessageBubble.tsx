@@ -11,6 +11,7 @@ import MessageActions from "./MessageActions";
 import Metrics from "./Metrics";
 import Activity from "./Activity";
 import type { DialMessage } from "@/lib/conversations";
+import { enterToSend } from "@/lib/keys";
 import { textOf } from "@/lib/store";
 import { answerTextOf, buildTimeline, WORK_KEY, type Block } from "@/lib/timeline";
 import {
@@ -217,10 +218,7 @@ const MessageBubble = memo(function MessageBubble({
                   e.target.style.height = `${Math.min(e.target.scrollHeight, 320)}px`;
                 }}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    commit();
-                  }
+                  enterToSend(e, commit);
                   if (e.key === "Escape") setEditing(false);
                 }}
                 className="dial-scroll max-h-[320px] w-full resize-none bg-transparent text-[15px] leading-relaxed text-foreground outline-none"
