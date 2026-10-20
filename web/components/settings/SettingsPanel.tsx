@@ -13,8 +13,11 @@ import { keyFingerprint, looksLikeKey } from "@/lib/credentials";
 import {
   FONT_STACKS,
   FONTS,
+  GLASS_LEVELS,
   INSTRUCTIONS_MAX,
   OCEAN_PLACES,
+  OCEAN_SPEED_FACTOR,
+  OCEAN_SPEEDS,
   TEXT_SIZES,
   THEMES,
   WIDTHS,
@@ -42,8 +45,8 @@ import type { AccountUsage } from "@/lib/settings";
  * and the files themselves, browsable and decrypted in place;
  * **Appearance** is a page of different controls for different kinds of
  * choice — pictures for theme and typeface, sliders for scales, switches
- * for on/off — instead of the same segmented bar five times, and the ASCII
- * ocean, place by place.
+ * for on/off — instead of the same segmented bar five times, the
+ * composer's glass, and the ASCII ocean, its speed and its places.
  */
 
 export type Section = "account" | "instructions" | "privacy" | "appearance";
@@ -396,6 +399,59 @@ function ScaleRow({
         <div className="min-w-0 flex-1">{children}</div>
         <span className="flex w-4 shrink-0 justify-center text-muted" aria-hidden>
           {high}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** Frosted is a filled pane, clear an empty one. */
+const GlassGlyph = ({ clear }: { clear: boolean }) => (
+  <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
+    <rect x="2.5" y="2.5" width="11" height="11" rx="3.5" fill={clear ? "none" : "currentColor"} fillOpacity={clear ? undefined : 0.35} />
+    {clear && <path d="m5.5 10.5 5-5" strokeLinecap="round" opacity="0.6" />}
+  </svg>
+);
+
+/** One chevron for slow water, two for fast. */
+const SpeedGlyph = ({ fast }: { fast: boolean }) => (
+  <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+    {fast ? <path d="m4 4.5 3.5 3.5L4 11.5M8.5 4.5 12 8l-3.5 3.5" /> : <path d="m6.5 4.5 3.5 3.5-3.5 3.5" />}
+  </svg>
+);
+
+/** "0.5" → "½×": the ocean's speed as a multiplier, the way a player shows it. */
+function speedText(factor: number): string {
+  const whole = Math.floor(factor);
+  const part = factor - whole;
+  const fraction = part === 0.25 ? "¼" : part === 0.5 ? "½" : part === 0.75 ? "¾" : "";
+  return `${whole > 0 || !fraction ? whole : ""}${fraction}×`;
+}
+
+/**
+ * The composer's glass over the end of a conversation, so the transparency
+ * slider shows what it does here rather than only under the composer behind
+ * this dialog. It is the real material (`.dial-glass`), reading the same
+ * root variables the slider writes.
+ */
+function GlassPreview() {
+  return (
+    <div
+      aria-hidden
+      className="dial-squircle relative mb-2 h-[100px] overflow-hidden bg-background shadow-hairline [--sq:11px]"
+    >
+      <p className="px-3.5 pt-3 text-[12.5px] leading-[1.6] text-foreground/85">
+        Sharks hunt the edges of a school, where the stragglers swim. A dense
+        school confuses them, so the fish at its centre are safer than the
+        ones that wander off alone — and the whole school bolts when only its
+        edge has seen the shark.
+      </p>
+      <div className="dial-glass absolute inset-x-2.5 bottom-2.5 flex h-[38px] items-center justify-between rounded-[14px] pl-3.5 pr-[5px]">
+        <span className="text-[12.5px] text-muted">Ask anything…</span>
+        <span className="dial-squircle flex size-7 items-center justify-center bg-foreground text-background [--sq:9px]">
+          <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3.25 8h9.5M8.75 4l4 4-4 4" />
+          </svg>
         </span>
       </div>
     </div>
@@ -879,6 +935,25 @@ export default function SettingsPanel({
                 />
               </Row>
 
+              <Row label="Glass">
+                <GlassPreview />
+                <ScaleRow
+                  title="Transparency"
+                  value={settings.glass}
+                  low={<GlassGlyph clear={false} />}
+                  high={<GlassGlyph clear />}
+                >
+                  <StepSlider
+                    size="sm"
+                    label="Glass transparency"
+                    value={settings.glass}
+                    options={GLASS_LEVELS}
+                    onChange={(glass) => onUpdate({ glass })}
+                    valueText={(glass) => glass}
+                  />
+                </ScaleRow>
+              </Row>
+
               <Row label="ASCII ocean">
                 <div
                   className={`dial-squircle relative h-[104px] overflow-hidden bg-background shadow-hairline transition-opacity duration-300 [--sq:11px] ${
@@ -902,6 +977,26 @@ export default function SettingsPanel({
                     checked={settings.ocean}
                     onChange={(ocean) => onUpdate({ ocean })}
                   />
+                  <div
+                    inert={!settings.ocean}
+                    className={`transition-opacity duration-200 ${settings.ocean ? "" : "opacity-45"}`}
+                  >
+                    <ScaleRow
+                      title="Swim speed"
+                      value={speedText(OCEAN_SPEED_FACTOR[settings.oceanSpeed])}
+                      low={<SpeedGlyph fast={false} />}
+                      high={<SpeedGlyph fast />}
+                    >
+                      <StepSlider
+                        size="sm"
+                        label="Swim speed"
+                        value={settings.oceanSpeed}
+                        options={OCEAN_SPEEDS}
+                        onChange={(oceanSpeed) => onUpdate({ oceanSpeed })}
+                        valueText={(speed) => speedText(OCEAN_SPEED_FACTOR[speed])}
+                      />
+                    </ScaleRow>
+                  </div>
                 </div>
                 <div
                   className={`mt-1 border-t border-line pt-1 transition-opacity duration-200 ${

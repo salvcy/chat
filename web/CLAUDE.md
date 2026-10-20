@@ -248,9 +248,10 @@ was derived with them, so they never change with the domain.
   full size with Download and Open conversation; **Appearance** — a
   different control for each kind of choice instead of five stacked
   segmented bars: theme as miniature windows, typeface as "Aa" tiles, text
-  size and column width as `StepSlider`s, density as a `Switch`, and the
-  ASCII ocean with a live preview, a master switch and one switch per
-  place.
+  size and column width as `StepSlider`s, density as a `Switch`, the
+  composer's glass transparency as a `StepSlider` over a preview of the
+  glass on text, and the ASCII ocean with a live preview, a master switch,
+  a swim-speed `StepSlider` and one switch per place.
 - `components/sidebar/AccountButton.tsx` — the rail footer. `shrink-0`
   sibling of the scrolling list, same reason as the header.
 
@@ -422,7 +423,13 @@ invoking a Worker.
   translucent surface. The tint, the blur and the rim are tuned so text
   passing under it reads as soft streaks and a shark as a blurred shape,
   while the placeholder and typed text stay crisp; the jump-to-latest
-  control is the same glass, thicker. Left, what goes in: attach and the
+  control is the same glass, thicker. **How see-through is the person's**
+  (Settings → Appearance → Glass, October 2026): `glass` is an appearance
+  field, `frosted` (the tuning above, and the default) → `light` → `thin`
+  → `clear`, written to the root by the boot script and `applyAppearance`
+  as `--glass-k` (scales the tint, focused and not) and `--glass-blur`. The
+  rim, sheen and edge do not thin, and neither does the jump button's thick
+  glass, which has to stay legible over a paragraph. Left, what goes in: attach and the
   `@image` tool; right, where it goes: the model dial and send; nothing
   else. **Web search is not a control**:
   `reconcileSettings` sets `search` to whether the model can call tools, the
@@ -1205,7 +1212,8 @@ comment.
   the old glass was replaced by solid panels; overlays dim with `bg-black/30`
   and a 2px blur only. **The one exception is the composer** (and the
   jump-to-latest control over it): liquid glass, because the conversation
-  and the ocean pass under it (October 2026, the user's call).
+  and the ocean pass under it (October 2026, the user's call), and how
+  clear it is is a setting.
 - **Radii:** `rounded-chip` 6 · `rounded-control` 8 · `rounded-card` 10 ·
   `rounded-window` 14 · pills `rounded-full`. The composer (20px) and user
   bubble (18px, 6px tail corner) are the deliberate exceptions.
@@ -1263,10 +1271,24 @@ comment.
   would flash). In the chat it lives in ChatView's own stacking context
   (`isolate`, ocean at `-z-10`) so it sits on the window's background and
   under the transcript and composer without lifting either.
+  **Who swims is set in `Ocean.tsx`** (`CAST`): a classic shark as the
+  lead, a hammerhead, a great hammerhead and a smaller classic. Without a
+  cast the engine falls back to ascii-sharks' landing hero, four classic
+  sharks — which is why no hammerhead swam in the app until October 2026,
+  though the renderer always drew them; the settings preview passes its own
+  smaller pair.
+  **How fast it swims is the person's**: `oceanSpeed` (¼× to 2×,
+  `OCEAN_SPEED_FACTOR`) is the speed of the ocean's clock, not of the
+  sharks alone — fish, sharks, tail beats and wakes all keep its time, so a
+  slow ocean is slow motion and not a different hunt (a shark sped up alone
+  empties the water; one slowed alone never eats). The boot script and
+  `applyAppearance` write it to `data-ocean-speed`, which every `<Ocean>`
+  watches beside `data-ocean`; slower than 1× the engine shrinks its step
+  so motion stays smooth every frame, faster it takes more steps.
   **Where it swims is the person's** (Settings → Appearance): a master
   switch and five places — `newchat`, `chat`, `signin`, `unlock`, `connect`
   (`OCEAN_PLACES`; all but `chat` on by default). They are appearance
-  fields (`ocean`, `oceanPlaces`), synced with the account and mirrored to
+  fields (`ocean`, `oceanPlaces`, `oceanSpeed`), synced with the account and mirrored to
   `dial:appearance`, because the sign-in screen has to know before anyone
   has signed in; the boot script and `applyAppearance` write them to
   `data-ocean` on the root, and every `<Ocean place=…>` watches that
@@ -1316,7 +1338,7 @@ comment.
   an unauthenticated visitor has no app to show.
 - **The browser stores exactly three kinds of things, and none of them is a
   conversation.** One `localStorage` key (`dial:appearance` — appearance,
-  rail geometry, where the ocean swims, and the non-sensitive remember/lock
+  rail geometry, where and how fast the ocean swims, the glass, and the non-sensitive remember/lock
   preference), an optional
   account-scoped IndexedDB record (the non-extractable vault key, because no
   other web storage can hold one safely), and the Cache API copy of

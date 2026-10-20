@@ -4,10 +4,11 @@
  *
  * From ascii-sharks (github.com/stackedlol/ascii-sharks @ c521e24) — world,
  * species and math as they were, the renderer adapted for this app's themes
- * (see renderer.ts). This file is the original engine plus three things the
+ * (see renderer.ts). This file is the original engine plus four things the
  * app needed: a theme switch, a pause while the page is hidden (a closed
  * desktop window keeps its page until it is released, and must not animate
- * for nobody), and handing the canvas's backing store back on destroy.
+ * for nobody), handing the canvas's backing store back on destroy, and a
+ * speed for the whole ocean's clock (Settings → Appearance).
  */
 import { AsciiRenderer } from "./renderer.ts";
 import { World, type SharkSpec } from "./world.ts";
@@ -30,6 +31,8 @@ export class OceanEngine {
   private resizeObserver: ResizeObserver;
   private intersectionObserver: IntersectionObserver;
   private disposed = false;
+  /** Simulated seconds per real second. */
+  private speed = 1;
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -65,6 +68,15 @@ export class OceanEngine {
       if (!this.disposed && this.reducedMotion.matches) this.drawStill();
     });
     this.schedule();
+  }
+
+  /**
+   * Run the ocean's clock faster or slower. Everything keeps time with it —
+   * fish, sharks, tail beats, wakes — so a slow ocean is slow motion, not a
+   * different hunt.
+   */
+  setSpeed(speed: number) {
+    this.speed = Number.isFinite(speed) ? Math.min(4, Math.max(0.1, speed)) : 1;
   }
 
   /** Light or dark water. A still frame (reduced motion) is repainted at once. */
@@ -107,15 +119,21 @@ export class OceanEngine {
   private frame = (now: number) => {
     const dt = Math.min(0.1, (now - this.last) / 1000);
     this.last = now;
-    this.acc += dt;
+    // Simulated time. Slower than real time, the step shrinks with it, so a
+    // slow ocean still moves every frame rather than in jumps; faster, it
+    // takes more steps of the usual size.
+    const sim = dt * this.speed;
+    const step = STEP * Math.min(1, this.speed);
+    const maxSteps = Math.ceil(MAX_STEPS * Math.max(1, this.speed));
+    this.acc += sim;
     let steps = 0;
-    while (this.acc >= STEP && steps < MAX_STEPS) {
-      this.world.step(STEP);
-      this.acc -= STEP;
+    while (this.acc >= step && steps < maxSteps) {
+      this.world.step(step);
+      this.acc -= step;
       steps++;
     }
-    if (steps === MAX_STEPS) this.acc = 0;
-    this.renderer.render(this.world, dt);
+    if (steps === maxSteps) this.acc = 0;
+    this.renderer.render(this.world, sim);
     this.raf = requestAnimationFrame(this.frame);
   };
 

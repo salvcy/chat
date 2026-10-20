@@ -237,10 +237,19 @@ button:disabled {
    prefixed backdrop filter. `.dial-glass` is the material, so the
    jump-to-latest control floating above it is the same glass — thicker
    (`.dial-glass-thick`): a 32px button over a paragraph needs more of its
-   own colour than a composer does to stay legible. */
+   own colour than a composer does to stay legible.
+
+   How see-through it is is a setting (Settings → Appearance → Glass):
+   `--glass-k` scales the composer's tint and `--glass-blur` is its blur,
+   both written on the root by `applyAppearance` and the boot script. 1 and
+   8px, the defaults below, are the glass as designed; the jump button's
+   thick glass and the rim do not thin, so the edge stays and the button
+   stays legible. */
 :root {
-  --glass-tint: rgba(252, 252, 252, 0.4);
-  --glass-tint-focus: rgba(252, 252, 252, 0.6);
+  --glass-k: 1;
+  --glass-blur: 8px;
+  --glass-tint: rgb(252 252 252 / calc(0.4 * var(--glass-k)));
+  --glass-tint-focus: rgb(252 252 252 / calc(0.6 * var(--glass-k)));
   --glass-tint-thick: rgba(252, 252, 252, 0.78);
   --glass-rim: rgba(255, 255, 255, 0.95);
   --glass-rim-low: rgba(255, 255, 255, 0.5);
@@ -252,8 +261,8 @@ button:disabled {
 }
 
 .dark {
-  --glass-tint: rgba(30, 30, 30, 0.42);
-  --glass-tint-focus: rgba(30, 30, 30, 0.58);
+  --glass-tint: rgb(30 30 30 / calc(0.42 * var(--glass-k)));
+  --glass-tint-focus: rgb(30 30 30 / calc(0.58 * var(--glass-k)));
   --glass-tint-thick: rgba(30, 30, 30, 0.76);
   --glass-rim: rgba(255, 255, 255, 0.24);
   --glass-rim-low: rgba(255, 255, 255, 0.08);
@@ -266,8 +275,8 @@ button:disabled {
 
 .dial-glass {
   background: var(--glass-tint);
-  -webkit-backdrop-filter: blur(8px) saturate(180%);
-  backdrop-filter: blur(8px) saturate(180%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
   box-shadow:
     inset 0 0 0 1px var(--glass-sheen),
     0 0 0 1px var(--glass-edge),
@@ -282,6 +291,8 @@ button:disabled {
 
 .dial-glass-thick {
   background: var(--glass-tint-thick);
+  -webkit-backdrop-filter: blur(8px) saturate(180%);
+  backdrop-filter: blur(8px) saturate(180%);
 }
 
 /* The rim. The glass must be positioned (`relative`, `absolute`). */

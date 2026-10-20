@@ -42,6 +42,28 @@ export const DEFAULT_OCEAN_PLACES: readonly OceanPlace[] = [
   "connect",
 ];
 
+/**
+ * How fast the ocean runs, as steps on a slider. It is the ocean's clock,
+ * not the sharks' top speed: fish and sharks slow down or speed up together,
+ * so the hunt plays out the same — a shark sped up alone would empty the
+ * water in a minute, and one slowed alone would never catch anything.
+ */
+export const OCEAN_SPEEDS = ["slowest", "slower", "normal", "faster", "fastest"] as const;
+export const OCEAN_SPEED_FACTOR: Record<OceanSpeed, number> = {
+  slowest: 0.25,
+  slower: 0.5,
+  normal: 1,
+  faster: 1.5,
+  fastest: 2,
+};
+
+/**
+ * How see-through the composer's glass is. `frosted` is the glass as it was
+ * designed and the default; each step thins the tint and the blur toward
+ * `clear`, where what passes underneath is nearly sharp.
+ */
+export const GLASS_LEVELS = ["frosted", "light", "thin", "clear"] as const;
+
 /** Instructions ride along with every request; keep them a paragraph or ten. */
 export const INSTRUCTIONS_MAX = 8000;
 
@@ -51,6 +73,8 @@ export type TextSize = (typeof TEXT_SIZES)[number];
 export type Width = (typeof WIDTHS)[number];
 export type Density = (typeof DENSITIES)[number];
 export type OceanPlace = (typeof OCEAN_PLACES)[number];
+export type OceanSpeed = (typeof OCEAN_SPEEDS)[number];
+export type Glass = (typeof GLASS_LEVELS)[number];
 
 /**
  * The part of the settings that has to be readable before first paint.
@@ -74,6 +98,8 @@ export type Appearance = {
   /** The ASCII ocean at all — off keeps `oceanPlaces` for when it returns. */
   ocean: boolean;
   oceanPlaces: OceanPlace[];
+  oceanSpeed: OceanSpeed;
+  glass: Glass;
 };
 
 export type UserSettings = Appearance & {
@@ -113,6 +139,8 @@ export const DEFAULT_APPEARANCE: Appearance = {
   railCollapsed: false,
   ocean: true,
   oceanPlaces: [...DEFAULT_OCEAN_PLACES],
+  oceanSpeed: "normal",
+  glass: "frosted",
 };
 
 export const DEFAULT_SETTINGS: UserSettings = {
@@ -163,6 +191,8 @@ export function normalizeAppearance(raw: unknown): Appearance {
     oceanPlaces: Array.isArray(input.oceanPlaces)
       ? OCEAN_PLACES.filter((place) => (input.oceanPlaces as unknown[]).includes(place))
       : [...DEFAULT_OCEAN_PLACES],
+    oceanSpeed: coerce(input.oceanSpeed, OCEAN_SPEEDS, DEFAULT_APPEARANCE.oceanSpeed),
+    glass: coerce(input.glass, GLASS_LEVELS, DEFAULT_APPEARANCE.glass),
   };
 }
 
@@ -241,6 +271,14 @@ const ROW_GAP: Record<Density, string> = {
   compact: "1.5rem",
 };
 
+/** How much of the glass's tint is left (`--glass-k`), and its blur. */
+const GLASS: Record<Glass, { tint: string; blur: string }> = {
+  frosted: { tint: "1", blur: "8px" },
+  light: { tint: "0.62", blur: "6px" },
+  thin: { tint: "0.32", blur: "4px" },
+  clear: { tint: "0.1", blur: "2px" },
+};
+
 export function applyAppearance(settings: Appearance): void {
   const root = document.documentElement;
   root.style.setProperty("--dial-font", FONT_STACKS[settings.font]);
@@ -252,8 +290,11 @@ export function applyAppearance(settings: Appearance): void {
   // the whole list on every pointer move during a drag.
   root.style.setProperty("--dial-rail-w", `${settings.railWidth}px`);
   root.classList.toggle("dial-rail-collapsed", settings.railCollapsed);
+  root.style.setProperty("--glass-k", GLASS[settings.glass].tint);
+  root.style.setProperty("--glass-blur", GLASS[settings.glass].blur);
   // Read by every Ocean on the page through an observer, like the theme.
   root.dataset.ocean = oceanAttribute(settings);
+  root.dataset.oceanSpeed = String(OCEAN_SPEED_FACTOR[settings.oceanSpeed]);
   applyTheme(settings.theme);
 }
 

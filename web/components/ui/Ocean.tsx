@@ -6,14 +6,30 @@ import type { SharkSpec } from "@/lib/ocean/world";
 import { DEFAULT_OCEAN_PLACES, type OceanPlace } from "@/lib/settings";
 
 /**
+ * Who swims in the app's oceans. Without a cast the engine fills the water
+ * with ascii-sharks' landing hero — four of the same shark — so no
+ * hammerhead ever swam here although the renderer draws them (October 2026,
+ * the user asked where they were). The lead stays the classic shark and the
+ * biggest; a hammerhead and a great hammerhead swim between it and a
+ * smaller classic, all at the hero's depths.
+ */
+const CAST: SharkSpec[] = [
+  { kind: "classic", size: 1 },
+  { kind: "hammerhead", size: 0.84 },
+  { kind: "greathammer", size: 0.77 },
+  { kind: "classic", size: 0.7 },
+];
+
+/**
  * The ASCII ocean (`lib/ocean`): sharks hunting schools of fish, behind the
  * front door's gates and the chat.
  *
  * Every ocean has a place, and swims only where the person has said it may:
  * `data-ocean` on the root lists the places (Settings → Appearance), set
  * pre-paint by the boot script and afterwards by `applyAppearance`, so the
- * sign-in screen knows before anyone has signed in. The component watches
- * that attribute and the theme class with one observer rather than through
+ * sign-in screen knows before anyone has signed in; `data-ocean-speed`
+ * beside it is how fast the ocean's clock runs. The component watches
+ * those attributes and the theme class with one observer rather than through
  * React — the same way every other appearance value reaches the page — and
  * starts, fades out or repaints without re-rendering anything. A place that
  * is off never loads the engine; one turned off fades and then lets the
@@ -42,7 +58,7 @@ export default function Ocean({
   fishCount?: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const cast = useRef({ sharks, fishCount });
+  const cast = useRef({ sharks: sharks ?? CAST, fishCount });
   const placeRef = useRef(place);
   const syncRef = useRef<() => void>(() => {});
 
@@ -51,6 +67,7 @@ export default function Ocean({
     if (!canvas) return;
     const root = document.documentElement;
     const isDark = () => root.classList.contains("dark");
+    const speed = () => Number(root.dataset.oceanSpeed ?? 1);
     const wanted = () => {
       const here = placeRef.current;
       if (here === "preview") return true;
@@ -74,6 +91,7 @@ export default function Ocean({
           loading = false;
           if (gone || !wanted() || engine) return;
           engine = new OceanEngine(canvas, { ...cast.current, dark: isDark() });
+          engine.setSpeed(speed());
         })
         // Decoration: if the chunk cannot load (a deploy replaced it under
         // an old page, or the network went), the water simply stays empty.
@@ -96,11 +114,12 @@ export default function Ocean({
       if (wanted()) start();
       else stop();
       engine?.setTheme(isDark());
+      engine?.setSpeed(speed());
     };
     syncRef.current = sync;
 
     const observer = new MutationObserver(sync);
-    observer.observe(root, { attributes: true, attributeFilter: ["class", "data-ocean"] });
+    observer.observe(root, { attributes: true, attributeFilter: ["class", "data-ocean", "data-ocean-speed"] });
     sync();
     return () => {
       gone = true;
