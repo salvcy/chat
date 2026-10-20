@@ -6,9 +6,12 @@ import {
   displayBlob,
   downloadPayloadBlob,
   forgetDisplayedBlobs,
+  listStoredBlobs,
   pinBlobThread,
+  readStoredBlob,
   uploadBlob,
   uploadPayloadBlob,
+  type StoredFile,
 } from "./blob";
 import { openRecord, sealRecord, toBase64Url } from "./crypto";
 import {
@@ -158,6 +161,24 @@ export function setVaultKey(key: CryptoKey | null): void {
 
 export function setEncryption(mode: string): void {
   encrypted = mode !== "none";
+}
+
+/**
+ * The account's images and attachments, for Settings → Privacy → Storage.
+ * Listing needs no key — it is ids and sizes — but opening one does, and an
+ * encrypted account without its key reads nothing.
+ */
+export async function listStoredFiles(): Promise<StoredFile[]> {
+  assertUnlocked();
+  return listStoredBlobs();
+}
+
+/** One stored file, decrypted here with the vault key. */
+export async function readStoredFile(
+  blobId: string,
+): Promise<{ bytes: Uint8Array; mediaType: string }> {
+  assertUnlocked();
+  return readStoredBlob(blobId, vaultKey);
 }
 
 export class LockedError extends Error {

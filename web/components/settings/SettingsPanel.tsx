@@ -1,18 +1,26 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import Button from "@/components/ui/Button";
+import Ocean from "@/components/ui/Ocean";
 import Segmented from "@/components/ui/Segmented";
+import StepSlider from "@/components/ui/StepSlider";
+import Switch from "@/components/ui/Switch";
+import StorageBrowser, { formatBytes } from "./StorageBrowser";
 import type { SessionUser } from "@/lib/auth-client";
 import { keyFingerprint, looksLikeKey } from "@/lib/credentials";
 import {
-  DENSITIES,
+  FONT_STACKS,
   FONTS,
   INSTRUCTIONS_MAX,
+  OCEAN_PLACES,
   TEXT_SIZES,
   THEMES,
   WIDTHS,
+  type Font,
+  type OceanPlace,
+  type Theme,
   type UserSettings,
 } from "@/lib/settings";
 import type { SyncStatus } from "@/lib/session";
@@ -27,13 +35,20 @@ import type { AccountUsage } from "@/lib/settings";
  * custom properties before the network is involved, so they feel instant
  * regardless of connection.
  *
- * State is shown by fill, never colour: the selected segment is a lifted
- * thumb that slides between peers.
+ * Four tabs, each about one thing (October 2026, after the user called the
+ * old panel a mess): **Account** is who you are and what you pay with — the
+ * OpenRouter key lives here now, not on a tab of its own; **Instructions**;
+ * **Privacy** is what is kept and how — encryption, this device's unlock,
+ * and the files themselves, browsable and decrypted in place;
+ * **Appearance** is a page of different controls for different kinds of
+ * choice — pictures for theme and typeface, sliders for scales, switches
+ * for on/off — instead of the same segmented bar five times, and the ASCII
+ * ocean, place by place.
  */
 
-export type Section = "account" | "instructions" | "keys" | "appearance";
+export type Section = "account" | "instructions" | "privacy" | "appearance";
 
-const SECTIONS: Section[] = ["account", "instructions", "keys", "appearance"];
+const SECTIONS: Section[] = ["account", "instructions", "privacy", "appearance"];
 
 /** A few starting points — cheaper than staring at an empty box. */
 const PRESETS: Array<{ label: string; text: string }> = [
@@ -50,6 +65,14 @@ const PRESETS: Array<{ label: string; text: string }> = [
     text: "You are a senior engineer reviewing code. Prefer correctness over agreement. Point out failure modes, edge cases and simpler alternatives. Show code, not prose about code.",
   },
 ];
+
+const OCEAN_LABEL: Record<OceanPlace, { title: string; detail: string }> = {
+  newchat: { title: "New chat", detail: "Behind the greeting, until the first message." },
+  chat: { title: "In conversations", detail: "In the margins around a chat, clear of the text." },
+  signin: { title: "Sign in", detail: "The front door, before you sign in." },
+  unlock: { title: "Unlock", detail: "When this device asks for your password." },
+  connect: { title: "Connect a key", detail: "While OpenRouter is being connected." },
+};
 
 /**
  * Standing instructions — the system prompt for every conversation.
@@ -111,7 +134,7 @@ function Instructions({
             key={preset.label}
             type="button"
             onClick={() => change(preset.text)}
-            className="h-6 rounded-full bg-hover px-2.5 text-[12px] text-secondary transition-[background-color,color,transform] duration-150 hover:bg-hover-2 hover:text-foreground active:scale-[0.97]"
+            className="dial-squircle h-6 bg-hover px-2.5 text-[12px] text-secondary transition-[background-color,color,transform] duration-150 [--sq:7px] hover:bg-hover-2 hover:text-foreground active:scale-[0.97]"
           >
             {preset.label}
           </button>
@@ -120,7 +143,7 @@ function Instructions({
           <button
             type="button"
             onClick={() => change("")}
-            className="ml-auto h-6 rounded-full px-2 text-[12px] text-muted transition-colors hover:text-foreground"
+            className="ml-auto h-6 px-2 text-[12px] text-muted transition-colors hover:text-foreground"
           >
             Clear
           </button>
@@ -131,16 +154,6 @@ function Instructions({
 }
 
 /* ------------------------------- primitives ---------------------------- */
-
-/** Bytes, at the precision a person actually reads. */
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const mb = bytes / (1024 * 1024);
-  if (mb < 1) return `${(bytes / 1024).toFixed(0)} KB`;
-  if (mb < 100) return `${mb.toFixed(1)} MB`;
-  const gb = mb / 1024;
-  return gb >= 1 ? `${gb.toFixed(2)} GB` : `${mb.toFixed(0)} MB`;
-}
 
 /**
  * A usage bar.
@@ -175,10 +188,10 @@ function Meter({
         aria-valuemax={100}
         aria-valuenow={Math.round(ratio * 100)}
         aria-label={label}
-        className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-hover-2"
+        className="dial-squircle mt-2 h-1.5 w-full overflow-hidden bg-hover-2 [--sq:3px]"
       >
         <div
-          className="h-full rounded-full bg-foreground transition-[width] duration-300 ease-out"
+          className="dial-squircle h-full bg-foreground transition-[width] duration-300 ease-out [--sq:3px]"
           style={{ width: `${Math.max(ratio * 100, used > 0 ? 1.5 : 0)}%` }}
         />
       </div>
@@ -198,21 +211,202 @@ function Row({
   children,
 }: {
   label: string;
-  hint?: string;
-  children: React.ReactNode;
+  hint?: ReactNode;
+  children: ReactNode;
 }) {
   return (
     <div className="py-4">
       <div className="mb-2.5 flex items-baseline justify-between gap-3">
         <span className="text-[13px] font-medium text-foreground">{label}</span>
-        {hint && (
-          <span className="font-mono text-[11px] text-muted">{hint}</span>
-        )}
+        {hint && <span className="font-mono text-[11px] text-muted">{hint}</span>}
       </div>
       {children}
     </div>
   );
 }
+
+/** A label and a sentence on the left, a switch on the right. */
+function SwitchRow({
+  title,
+  detail,
+  checked,
+  onChange,
+  disabled = false,
+}: {
+  title: string;
+  detail: string;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <label
+      className={`flex items-center justify-between gap-4 py-2 ${
+        disabled ? "opacity-45" : "cursor-pointer"
+      }`}
+    >
+      <span className="min-w-0">
+        <span className="block text-[12.5px] font-medium text-foreground">{title}</span>
+        <span className="block text-[11.5px] leading-relaxed text-muted">{detail}</span>
+      </span>
+      <Switch checked={checked} onChange={onChange} disabled={disabled} label={title} />
+    </label>
+  );
+}
+
+/* ----------------------------- appearance parts ------------------------- */
+
+const MINI: Record<"light" | "dark", { chrome: string; window: string; line: string; ink: string; faint: string }> = {
+  light: { chrome: "#f1f1f1", window: "#fcfcfc", line: "#e2e2e2", ink: "#111111", faint: "#d4d4d4" },
+  dark: { chrome: "#0e0e0e", window: "#161616", line: "#272727", ink: "#f2f2f2", faint: "#3a3a3a" },
+};
+
+/** A thumbnail of the app in one palette: rail, window, a few lines, the composer. */
+function MiniWindow({ tone }: { tone: "light" | "dark" }) {
+  const p = MINI[tone];
+  return (
+    <div className="absolute inset-0" style={{ background: p.chrome }}>
+      <div className="absolute bottom-2 left-2 top-2 flex w-[22%] flex-col gap-[5px] pt-1">
+        {[0.9, 0.7, 0.8].map((w, i) => (
+          <span key={i} className="block h-[3px] rounded-[1px]" style={{ width: `${w * 100}%`, background: p.faint }} />
+        ))}
+      </div>
+      <div
+        className="absolute bottom-2 left-[30%] right-2 top-2 rounded-[5px]"
+        style={{ background: p.window, boxShadow: `0 0 0 1px ${p.line}` }}
+      >
+        <span className="absolute left-2 top-2.5 block h-[3px] w-[46%] rounded-[1px]" style={{ background: p.ink, opacity: 0.75 }} />
+        <span className="absolute left-2 top-[18px] block h-[3px] w-[62%] rounded-[1px]" style={{ background: p.faint }} />
+        <span
+          className="absolute bottom-1.5 left-2 right-2 h-[9px] rounded-[3px]"
+          style={{ background: p.window, boxShadow: `0 0 0 1px ${p.line}` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ThemeCards({ value, onChange }: { value: Theme; onChange: (theme: Theme) => void }) {
+  return (
+    <div role="radiogroup" aria-label="Theme" className="grid grid-cols-3 gap-2.5">
+      {THEMES.map((theme) => {
+        const selected = theme === value;
+        return (
+          <button
+            key={theme}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            onClick={() => onChange(theme)}
+            className="group/theme flex flex-col gap-1.5 text-left"
+          >
+            <span
+              className={`dial-squircle relative block aspect-[16/10] w-full overflow-hidden transition-[box-shadow,transform] duration-200 ease-out-strong [--sq:10px] group-active/theme:scale-[0.98] ${
+                selected
+                  ? "shadow-[0_0_0_1.5px_var(--foreground)]"
+                  : "shadow-hairline group-hover/theme:shadow-[0_0_0_1px_var(--line-strong)]"
+              }`}
+            >
+              {theme === "system" ? (
+                <>
+                  <MiniWindow tone="light" />
+                  <span className="absolute inset-0" style={{ clipPath: "polygon(58% 0, 100% 0, 100% 100%, 42% 100%)" }}>
+                    <MiniWindow tone="dark" />
+                  </span>
+                </>
+              ) : (
+                <MiniWindow tone={theme} />
+              )}
+            </span>
+            <span className="flex items-center gap-1.5 px-0.5 text-[12px] font-medium">
+              <span className={selected ? "text-foreground" : "text-secondary"}>
+                {theme === "system" ? "System" : theme === "light" ? "Light" : "Dark"}
+              </span>
+              {selected && (
+                <svg viewBox="0 0 16 16" className="h-3 w-3 text-foreground" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="m3.5 8.5 3 3 6-6.5" />
+                </svg>
+              )}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+const FONT_LABEL: Record<Font, string> = { geist: "Geist", system: "System", serif: "Serif" };
+
+function TypefaceTiles({ value, onChange }: { value: Font; onChange: (font: Font) => void }) {
+  return (
+    <div role="radiogroup" aria-label="Typeface" className="grid grid-cols-3 gap-2.5">
+      {FONTS.map((font) => {
+        const selected = font === value;
+        return (
+          <button
+            key={font}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            onClick={() => onChange(font)}
+            className={`dial-squircle flex h-[68px] flex-col items-start justify-between px-3 py-2.5 text-left transition-[background-color,box-shadow,transform] duration-200 ease-out-strong [--sq:10px] active:scale-[0.98] ${
+              selected
+                ? "bg-hover-2 shadow-[0_0_0_1.5px_var(--foreground)]"
+                : "bg-hover shadow-hairline hover:bg-hover-2"
+            }`}
+          >
+            <span
+              className={`text-[22px] leading-none tracking-[-0.02em] ${selected ? "text-foreground" : "text-secondary"}`}
+              style={{ fontFamily: FONT_STACKS[font] }}
+            >
+              Aa
+            </span>
+            <span className="text-[11.5px] font-medium text-muted">{FONT_LABEL[font]}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** A slider with a small glyph at each end, for the reading scales. */
+function ScaleRow({
+  title,
+  value,
+  children,
+  low,
+  high,
+}: {
+  title: string;
+  value: string;
+  children: ReactNode;
+  low: ReactNode;
+  high: ReactNode;
+}) {
+  return (
+    <div className="py-2">
+      <div className="mb-2 flex items-baseline justify-between gap-3">
+        <span className="text-[12.5px] font-medium text-foreground">{title}</span>
+        <span className="font-mono text-[11px] text-muted">{value}</span>
+      </div>
+      <div className="flex items-center gap-3">
+        <span className="flex w-4 shrink-0 justify-center text-muted" aria-hidden>
+          {low}
+        </span>
+        <div className="min-w-0 flex-1">{children}</div>
+        <span className="flex w-4 shrink-0 justify-center text-muted" aria-hidden>
+          {high}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+const WidthGlyph = ({ wide }: { wide: boolean }) => (
+  <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" aria-hidden>
+    {wide ? <path d="M2 5h12M2 8h12M2 11h9" /> : <path d="M5 5h6M5 8h6M5 11h4" />}
+  </svg>
+);
 
 /* -------------------------------- panel -------------------------------- */
 
@@ -230,6 +424,8 @@ export default function SettingsPanel({
   onRefreshUsage,
   onClose,
   onSignInRequested,
+  titles = {},
+  onOpenConversation,
   initialSection = "account",
 }: {
   user: SessionUser | null;
@@ -245,9 +441,14 @@ export default function SettingsPanel({
   onRefreshUsage: () => Promise<void>;
   onClose: () => void;
   onSignInRequested: () => void;
+  /** Conversation titles by thread id, for the storage browser. */
+  titles?: Record<string, string>;
+  /** Close settings and open this conversation. */
+  onOpenConversation?: (threadId: string) => void;
   initialSection?: Section;
 }) {
   const [section, setSection] = useState<Section>(initialSection);
+  const [browsing, setBrowsing] = useState(false);
   const [keyDraft, setKeyDraft] = useState("");
   const [keyError, setKeyError] = useState<string | null>(null);
   const [confirmDestroy, setConfirmDestroy] = useState(false);
@@ -271,6 +472,18 @@ export default function SettingsPanel({
     setKeyError(null);
   };
 
+  const togglePlace = (place: OceanPlace, on: boolean) => {
+    const next = new Set(settings.oceanPlaces);
+    if (on) next.add(place);
+    else next.delete(place);
+    onUpdate({ oceanPlaces: OCEAN_PLACES.filter((p) => next.has(p)) });
+  };
+
+  const changeSection = (next: Section) => {
+    setSection(next);
+    setBrowsing(false);
+  };
+
   return (
     <div
       role="dialog"
@@ -282,7 +495,7 @@ export default function SettingsPanel({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[86vh] w-full max-w-[480px] flex-col overflow-hidden rounded-window bg-panel shadow-overlay"
+        className="dial-squircle flex max-h-[86vh] w-full max-w-[500px] flex-col overflow-hidden bg-panel shadow-overlay [--sq:16px]"
         style={{ animation: "dial-pop-in 200ms cubic-bezier(0.23,1,0.32,1) both" }}
       >
         {/* header */}
@@ -295,7 +508,7 @@ export default function SettingsPanel({
               type="button"
               onClick={onClose}
               aria-label="Close settings"
-              className="flex size-7 items-center justify-center rounded-control text-muted transition-colors hover:bg-hover-2 hover:text-foreground"
+              className="dial-squircle flex size-7 items-center justify-center text-muted transition-colors [--sq:8px] hover:bg-hover-2 hover:text-foreground"
             >
               <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden>
                 <path d="m4 4 8 8M12 4l-8 8" />
@@ -308,11 +521,11 @@ export default function SettingsPanel({
               label="Settings section"
               value={section}
               options={SECTIONS}
-              onChange={setSection}
+              onChange={changeSection}
               labels={{
                 account: "Account",
                 instructions: "Instructions",
-                keys: "Keys",
+                privacy: "Privacy",
                 appearance: "Appearance",
               }}
             />
@@ -328,7 +541,7 @@ export default function SettingsPanel({
                   <div className="flex items-center gap-3 py-4">
                     <span
                       aria-hidden
-                      className="flex size-10 shrink-0 items-center justify-center rounded-full bg-foreground text-[15px] font-semibold text-background"
+                      className="dial-squircle flex size-10 shrink-0 items-center justify-center bg-foreground text-[15px] font-semibold text-background [--sq:11px]"
                     >
                       {(user.name || user.email).trim().charAt(0).toUpperCase()}
                     </span>
@@ -340,90 +553,63 @@ export default function SettingsPanel({
                     </div>
                   </div>
 
-                  {usage && (
-                    <Row label="Storage">
-                      <div className="space-y-3.5">
-                        <Meter
-                          label="Files"
-                          used={usage.blobBytes}
-                          total={usage.blobQuota}
-                          detail={`${formatBytes(usage.blobBytes)} of ${formatBytes(usage.blobQuota)}`}
-                        />
-                        <div className="flex items-baseline justify-between gap-3 font-mono text-[11px] text-muted">
-                          <span>
-                            {usage.blobCount === 1
-                              ? "1 image or attachment"
-                              : `${usage.blobCount} images and attachments`}
-                          </span>
-                          <span>
-                            {usage.threads === 1
-                              ? "1 conversation"
-                              : `${usage.threads} conversations`}
-                            {" · "}
-                            {usage.messages === 1
-                              ? "1 message"
-                              : `${usage.messages} messages`}
-                          </span>
-                        </div>
-                      </div>
-                    </Row>
-                  )}
-
-                  <Row label="Chat history">
-                    <p className="text-[12.5px] leading-relaxed text-secondary">
+                  <Row
+                    label="OpenRouter key"
+                    hint={
+                      settings.openrouterKey
+                        ? keyFingerprint(settings.openrouterKey)
+                        : "not set"
+                    }
+                  >
+                    <p className="mb-3 text-[12.5px] leading-relaxed text-secondary">
+                      Requests go from this device straight to OpenRouter, so
+                      the key is only ever used here.
                       {encrypted
-                        ? "End-to-end encrypted. Your password derives the key, so the server stores ciphertext it cannot read."
-                        : "Stored in your account. This sign-in method supplies no key, so the server can read it."}
+                        ? " It is encrypted with your password before it is saved to your account."
+                        : " It is saved to your account so it follows you between devices."}
                     </p>
-                    <div className="mt-2.5 flex items-center gap-2">
-                      <Button
-                        size="xs"
-                        onClick={() => void onSync()}
-                        disabled={status.state === "syncing"}
-                      >
-                        {status.state === "syncing" ? "Syncing…" : "Sync now"}
-                      </Button>
-                      <span className="font-mono text-[11px] text-muted">
-                        {status.state === "error"
-                          ? status.message
-                          : status.state === "idle" && status.at
-                            ? "up to date"
-                            : ""}
-                      </span>
-                    </div>
+                    {settings.openrouterKey ? (
+                      <div className="flex items-center gap-2">
+                        <code className="dial-squircle flex h-[30px] flex-1 items-center truncate bg-field px-3 font-mono text-[12px] text-secondary shadow-hairline [--sq:8px]">
+                          sk-or-v1-{"…"}
+                          {settings.openrouterKey.slice(-6)}
+                        </code>
+                        <Button onClick={() => onUpdate({ openrouterKey: null })}>
+                          Remove
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="flex gap-2">
+                        <input
+                          type="password"
+                          value={keyDraft}
+                          onChange={(e) => {
+                            setKeyDraft(e.target.value);
+                            setKeyError(null);
+                          }}
+                          onKeyDown={(e) => e.key === "Enter" && saveKey()}
+                          placeholder="sk-or-v1-…"
+                          autoComplete="off"
+                          spellCheck={false}
+                          aria-label="OpenRouter API key"
+                          className="dial-input h-[34px]! min-w-0 flex-1 font-mono text-[12.5px]!"
+                        />
+                        <Button variant="primary" onClick={saveKey} disabled={!keyDraft.trim()} className="h-[34px]!">
+                          Save
+                        </Button>
+                      </div>
+                    )}
+                    {keyError && (
+                      <p className="mt-2 text-[12px] text-foreground">{keyError}</p>
+                    )}
                   </Row>
-
-                  {encrypted && (
-                    <Row
-                      label="Device unlock"
-                      hint={deviceKeyStored ? "saved here" : "session only"}
-                    >
-                      <p className="mb-2.5 text-[12.5px] leading-relaxed text-secondary">
-                        {settings.rememberDeviceKey
-                          ? "This browser keeps a non-exportable unlock key, so refreshes do not ask for your password."
-                          : "The unlock key stays in memory only. Closing or refreshing the app requires your password again."}
-                      </p>
-                      <Segmented
-                        label="Device unlock"
-                        value={settings.rememberDeviceKey ? "remember" : "lock"}
-                        options={["remember", "lock"] as const}
-                        onChange={(next) =>
-                          onUpdate({ rememberDeviceKey: next === "remember" })
-                        }
-                        labels={{ remember: "Remember browser", lock: "Lock on exit" }}
-                      />
-                      <p className="mt-2 text-[11.5px] leading-relaxed text-muted">
-                        A synced preference — the key itself never leaves this browser.
-                      </p>
-                    </Row>
-                  )}
 
                   <Row label="Session">
                     <Button size="xs" onClick={() => void onSignOut().then(onClose)}>
                       Sign out
                     </Button>
                     <p className="mt-2 text-[11.5px] leading-relaxed text-muted">
-                      Removes this browser&apos;s unlock key. Your history stays in
+                      Removes this device&apos;s unlock key. Your history stays in
                       your account.
                     </p>
                   </Row>
@@ -471,14 +657,10 @@ export default function SettingsPanel({
                   </p>
                   <button
                     onClick={onSignInRequested}
-                    className="mt-4 w-full rounded-full bg-foreground px-4 py-2.5 text-[13px] font-medium text-background transition-opacity hover:opacity-90"
+                    className="dial-squircle mt-4 w-full bg-foreground px-4 py-2.5 text-[13px] font-medium text-background transition-opacity [--sq:10px] hover:opacity-90"
                   >
                     Sign in or create an account
                   </button>
-                  <p className="mt-3 font-mono text-[10px] leading-relaxed text-muted">
-                    account settings carry your key and preferences between
-                    devices
-                  </p>
                 </div>
               )}
             </div>
@@ -517,105 +699,230 @@ export default function SettingsPanel({
             </div>
           )}
 
-          {section === "keys" && (
-            <div className="divide-y divide-line">
-              <Row
-                label="OpenRouter key"
-                hint={
-                  settings.openrouterKey
-                    ? keyFingerprint(settings.openrouterKey)
-                    : "not set"
-                }
-              >
-                <p className="mb-3 text-[12.5px] leading-relaxed text-secondary">
-                  Requests go from your browser straight to OpenRouter, so the
-                  key is only ever used here.
-                  {user
-                    ? encrypted
-                      ? " It is encrypted with your password before it is saved to your account."
-                      : " It is saved to your account so it follows you between devices."
-                    : " Sign in to carry it to other devices."}
-                </p>
-
-                {settings.openrouterKey ? (
-                  <div className="flex items-center gap-2">
-                    <code className="flex h-[30px] flex-1 items-center truncate rounded-control bg-field px-3 font-mono text-[12px] text-secondary shadow-hairline">
-                      sk-or-v1-{"…"}
-                      {settings.openrouterKey.slice(-6)}
-                    </code>
-                    <Button onClick={() => onUpdate({ openrouterKey: null })}>
-                      Remove
-                    </Button>
-                  </div>
+          {section === "privacy" &&
+            (browsing ? (
+              <div>
+                <div className="sticky top-0 z-20 -mx-5 flex items-center gap-2 border-b border-line bg-panel px-3 py-2">
+                  <button
+                    type="button"
+                    onClick={() => setBrowsing(false)}
+                    aria-label="Back to privacy"
+                    className="dial-squircle flex size-8 items-center justify-center text-muted transition-colors [--sq:9px] hover:bg-hover hover:text-foreground"
+                  >
+                    <svg viewBox="0 0 12 12" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                      <path d="M7.5 2.75 4.25 6l3.25 3.25" />
+                    </svg>
+                  </button>
+                  <span className="text-[13px] font-medium text-foreground">Files</span>
+                  <span className="ml-auto font-mono text-[10.5px] text-muted">
+                    {encrypted ? "decrypted on this device" : "stored in your account"}
+                  </span>
+                </div>
+                <StorageBrowser titles={titles} onOpenConversation={onOpenConversation} />
+              </div>
+            ) : (
+              <div className="divide-y divide-line">
+                {!user ? (
+                  <p className="py-4 text-[13px] leading-relaxed text-secondary">
+                    Sign in to see what your account keeps.
+                  </p>
                 ) : (
-                  <div className="flex gap-2">
-                    <input
-                      type="password"
-                      value={keyDraft}
-                      onChange={(e) => {
-                        setKeyDraft(e.target.value);
-                        setKeyError(null);
-                      }}
-                      onKeyDown={(e) => e.key === "Enter" && saveKey()}
-                      placeholder="sk-or-v1-…"
-                      autoComplete="off"
-                      spellCheck={false}
-                      aria-label="OpenRouter API key"
-                      className="dial-input h-[34px]! min-w-0 flex-1 font-mono text-[12.5px]!"
-                    />
-                    <Button variant="primary" onClick={saveKey} disabled={!keyDraft.trim()} className="h-[34px]!">
-                      Save
-                    </Button>
-                  </div>
+                  <>
+                    <Row label="Chat history" hint={encrypted ? "end-to-end encrypted" : undefined}>
+                      <p className="text-[12.5px] leading-relaxed text-secondary">
+                        {encrypted
+                          ? "Your password derives the key, so the server stores ciphertext it cannot read — messages, settings, images and attachments alike."
+                          : "Stored in your account. This sign-in method supplies no key, so the server can read it."}
+                      </p>
+                      <div className="mt-2.5 flex items-center gap-2">
+                        <Button
+                          size="xs"
+                          onClick={() => void onSync()}
+                          disabled={status.state === "syncing"}
+                        >
+                          {status.state === "syncing" ? "Syncing…" : "Sync now"}
+                        </Button>
+                        <span className="font-mono text-[11px] text-muted">
+                          {status.state === "error"
+                            ? status.message
+                            : status.state === "idle" && status.at
+                              ? "up to date"
+                              : ""}
+                        </span>
+                      </div>
+                    </Row>
+
+                    {encrypted && (
+                      <Row
+                        label="Device unlock"
+                        hint={deviceKeyStored ? "saved here" : "session only"}
+                      >
+                        <p className="mb-2.5 text-[12.5px] leading-relaxed text-secondary">
+                          {settings.rememberDeviceKey
+                            ? "This device keeps a non-exportable unlock key, so refreshes do not ask for your password."
+                            : "The unlock key stays in memory only. Closing or refreshing the app asks for your password again."}
+                        </p>
+                        <Segmented
+                          label="Device unlock"
+                          value={settings.rememberDeviceKey ? "remember" : "lock"}
+                          options={["remember", "lock"] as const}
+                          onChange={(next) =>
+                            onUpdate({ rememberDeviceKey: next === "remember" })
+                          }
+                          labels={{ remember: "Remember this device", lock: "Lock on exit" }}
+                        />
+                        <p className="mt-2 text-[11.5px] leading-relaxed text-muted">
+                          A synced preference — the key itself never leaves this device.
+                        </p>
+                      </Row>
+                    )}
+
+                    <Row label="Storage">
+                      {usage ? (
+                        <div className="space-y-3.5">
+                          <Meter
+                            label="Files"
+                            used={usage.blobBytes}
+                            total={usage.blobQuota}
+                            detail={`${formatBytes(usage.blobBytes)} of ${formatBytes(usage.blobQuota)}`}
+                          />
+                          <div className="flex items-baseline justify-between gap-3 font-mono text-[11px] text-muted">
+                            <span>
+                              {usage.threads === 1 ? "1 conversation" : `${usage.threads} conversations`}
+                              {" · "}
+                              {usage.messages === 1 ? "1 message" : `${usage.messages} messages`}
+                            </span>
+                          </div>
+                        </div>
+                      ) : (
+                        <p className="font-mono text-[11px] text-muted">reading…</p>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setBrowsing(true)}
+                        className="dial-squircle group/files mt-3.5 flex w-full items-center gap-3 bg-hover px-3 py-2.5 text-left transition-colors duration-150 [--sq:10px] hover:bg-hover-2"
+                      >
+                        <span className="dial-squircle flex size-8 shrink-0 items-center justify-center bg-panel text-secondary shadow-hairline [--sq:9px]">
+                          <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                            <rect x="2" y="2" width="5" height="5" rx="1.3" />
+                            <rect x="9" y="2" width="5" height="5" rx="1.3" />
+                            <rect x="2" y="9" width="5" height="5" rx="1.3" />
+                            <rect x="9" y="9" width="5" height="5" rx="1.3" />
+                          </svg>
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-[12.5px] font-medium text-foreground">
+                            Browse files
+                          </span>
+                          {/* No count here: the account's object count includes
+                              records spilled to R2, which are not files. */}
+                          <span className="block text-[11.5px] text-muted">
+                            Images and attachments{encrypted ? ", decrypted on this device" : ""}
+                          </span>
+                        </span>
+                        <svg viewBox="0 0 12 12" className="h-3 w-3 shrink-0 text-muted transition-transform duration-200 group-hover/files:translate-x-0.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                          <path d="m4.5 2.75 3.25 3.25-3.25 3.25" />
+                        </svg>
+                      </button>
+                    </Row>
+                  </>
                 )}
-                {keyError && (
-                  <p className="mt-2 text-[12px] text-foreground">{keyError}</p>
-                )}
-              </Row>
-            </div>
-          )}
+              </div>
+            ))}
 
           {section === "appearance" && (
             <div className="divide-y divide-line">
               <Row label="Theme">
-                <Segmented
-                  label="Theme"
-                  value={settings.theme}
-                  options={THEMES}
-                  onChange={(theme) => onUpdate({ theme })}
-                />
+                <ThemeCards value={settings.theme} onChange={(theme) => onUpdate({ theme })} />
               </Row>
-              <Row label="Typeface" hint="system uses no webfont">
-                <Segmented
-                  value={settings.font}
-                  options={FONTS}
-                  onChange={(font) => onUpdate({ font })}
-                />
+
+              <Row label="Typeface" hint={settings.font === "system" ? "no webfont" : undefined}>
+                <TypefaceTiles value={settings.font} onChange={(font) => onUpdate({ font })} />
               </Row>
-              <Row label="Text size">
-                <Segmented
+
+              <Row label="Reading">
+                <ScaleRow
+                  title="Text size"
                   value={settings.textSize}
-                  options={TEXT_SIZES}
-                  onChange={(textSize) => onUpdate({ textSize })}
-                />
-              </Row>
-              <Row label="Column width">
-                <Segmented
+                  low={<span className="text-[10px] font-medium">A</span>}
+                  high={<span className="text-[15px] font-medium">A</span>}
+                >
+                  <StepSlider
+                    size="sm"
+                    label="Text size"
+                    value={settings.textSize}
+                    options={TEXT_SIZES}
+                    onChange={(textSize) => onUpdate({ textSize })}
+                    valueText={(size) => size}
+                  />
+                </ScaleRow>
+                <ScaleRow
+                  title="Column width"
                   value={settings.width}
-                  options={WIDTHS}
-                  onChange={(width) => onUpdate({ width })}
+                  low={<WidthGlyph wide={false} />}
+                  high={<WidthGlyph wide />}
+                >
+                  <StepSlider
+                    size="sm"
+                    label="Column width"
+                    value={settings.width}
+                    options={WIDTHS}
+                    onChange={(width) => onUpdate({ width })}
+                    valueText={(width) => width}
+                  />
+                </ScaleRow>
+                <SwitchRow
+                  title="Compact spacing"
+                  detail="Less room between messages."
+                  checked={settings.density === "compact"}
+                  onChange={(compact) => onUpdate({ density: compact ? "compact" : "comfortable" })}
                 />
               </Row>
-              <Row label="Density">
-                <Segmented
-                  value={settings.density}
-                  options={DENSITIES}
-                  onChange={(density) => onUpdate({ density })}
-                  labels={{ comfortable: "roomy", compact: "compact" }}
-                />
+
+              <Row label="ASCII ocean">
+                <div
+                  className={`dial-squircle relative h-[104px] overflow-hidden bg-background shadow-hairline transition-opacity duration-300 [--sq:11px] ${
+                    settings.ocean ? "" : "opacity-35"
+                  }`}
+                >
+                  <Ocean
+                    place="preview"
+                    className="h-full w-full"
+                    sharks={[
+                      { kind: "classic", size: 0.5 },
+                      { kind: "hammerhead", size: 0.42 },
+                    ]}
+                    fishCount={30}
+                  />
+                </div>
+                <div className="mt-2.5">
+                  <SwitchRow
+                    title="Sharks and fish"
+                    detail="Drawn in text, swimming behind the app."
+                    checked={settings.ocean}
+                    onChange={(ocean) => onUpdate({ ocean })}
+                  />
+                </div>
+                <div
+                  className={`mt-1 border-t border-line pt-1 transition-opacity duration-200 ${
+                    settings.ocean ? "" : "pointer-events-none"
+                  }`}
+                >
+                  {OCEAN_PLACES.map((place) => (
+                    <SwitchRow
+                      key={place}
+                      title={OCEAN_LABEL[place].title}
+                      detail={OCEAN_LABEL[place].detail}
+                      checked={settings.oceanPlaces.includes(place)}
+                      onChange={(on) => togglePlace(place, on)}
+                      disabled={!settings.ocean}
+                    />
+                  ))}
+                </div>
               </Row>
             </div>
           )}
+
           {/* Signed in, the link lives beside "delete account". Signed out
               there is no such row, and dropping the only route to the policy
               from this panel would be a regression. */}

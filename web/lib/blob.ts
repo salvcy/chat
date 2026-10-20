@@ -361,3 +361,79 @@ export async function displayBlob(
     downloading.delete(cacheKey);
   }
 }
+
+/* ------------------------------- the account's files ----------------------------- */
+
+/** One stored file, as the storage view lists it — nothing sealed in here. */
+export type StoredFile = {
+  id: string;
+  /** Ciphertext size in R2, which is what the quota counts. */
+  size: number;
+  uploaded: number;
+  /** `g` blobs are images a model made; `f` blobs are what the person attached. */
+  kind: "generated" | "attachment";
+  threadId: string;
+};
+
+/**
+ * Every image and attachment the account holds, newest first.
+ *
+ * The listing is metadata the server already has — ids, sizes, times — and
+ * says nothing about what a file is. The type and the pixels come from
+ * `readStoredBlob`, in this tab, with the vault key.
+ */
+export async function listStoredBlobs(): Promise<StoredFile[]> {
+  const files: StoredFile[] = [];
+  let cursor: string | null = null;
+  do {
+    const response = await apiFetch(
+      cursor ? `${API}?cursor=${encodeURIComponent(cursor)}` : API,
+    );
+    if (!response.ok) throw await errorFrom(response);
+    const page = (await response.json()) as {
+      files: Array<{ id: string; size: number; uploaded: number }>;
+      cursor: string | null;
+    };
+    for (const file of page.files) {
+      files.push({
+        ...file,
+        kind: /\.g\.\d+\.\d+$/.test(file.id) ? "generated" : "attachment",
+        threadId: file.id.split("/")[0],
+      });
+    }
+    cursor = page.cursor;
+  } while (cursor && files.length < 10_000);
+  return files.sort((a, b) => b.uploaded - a.uploaded);
+}
+
+/**
+ * What a decrypted file is, from its first bytes.
+ *
+ * The media type is part of the sealed message, not the object, so the
+ * storage view — which reads objects, not messages — asks the bytes. Only
+ * the formats this app accepts or generates are recognised.
+ */
+export function sniffMediaType(bytes: Uint8Array): string {
+  const at = (offset: number, ...expected: number[]) =>
+    expected.every((byte, i) => bytes[offset + i] === byte);
+  if (at(0, 0x89, 0x50, 0x4e, 0x47)) return "image/png";
+  if (at(0, 0xff, 0xd8, 0xff)) return "image/jpeg";
+  if (at(0, 0x47, 0x49, 0x46, 0x38)) return "image/gif";
+  if (at(0, 0x52, 0x49, 0x46, 0x46) && at(8, 0x57, 0x45, 0x42, 0x50)) return "image/webp";
+  if (at(4, 0x66, 0x74, 0x79, 0x70) && (at(8, 0x61, 0x76, 0x69, 0x66) || at(8, 0x68, 0x65, 0x69, 0x63))) {
+    return at(8, 0x61, 0x76, 0x69, 0x66) ? "image/avif" : "image/heic";
+  }
+  if (at(0, 0x25, 0x50, 0x44, 0x46)) return "application/pdf";
+  return "application/octet-stream";
+}
+
+/** Download, authenticate and decrypt one stored file, with its type. */
+export async function readStoredBlob(
+  blobId: string,
+  key: CryptoKey | null,
+): Promise<{ bytes: Uint8Array; mediaType: string }> {
+  const response = await fetchPacked(blobId);
+  if (!response.ok) throw await errorFrom(response);
+  const bytes = await unpack(blobId, new Uint8Array(await response.arrayBuffer()), key);
+  return { bytes, mediaType: sniffMediaType(bytes) };
+}

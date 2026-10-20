@@ -29,6 +29,19 @@ export const TEXT_SIZES = ["small", "medium", "large"] as const;
 export const WIDTHS = ["narrow", "medium", "wide"] as const;
 export const DENSITIES = ["comfortable", "compact"] as const;
 
+/**
+ * Where the ASCII ocean (components/ui/Ocean.tsx) may swim. `chat` is the
+ * one not on by default: around a conversation, in the margins outside the
+ * reading column, it animates for as long as someone reads.
+ */
+export const OCEAN_PLACES = ["newchat", "chat", "signin", "unlock", "connect"] as const;
+export const DEFAULT_OCEAN_PLACES: readonly OceanPlace[] = [
+  "newchat",
+  "signin",
+  "unlock",
+  "connect",
+];
+
 /** Instructions ride along with every request; keep them a paragraph or ten. */
 export const INSTRUCTIONS_MAX = 8000;
 
@@ -37,6 +50,7 @@ export type Font = (typeof FONTS)[number];
 export type TextSize = (typeof TEXT_SIZES)[number];
 export type Width = (typeof WIDTHS)[number];
 export type Density = (typeof DENSITIES)[number];
+export type OceanPlace = (typeof OCEAN_PLACES)[number];
 
 /**
  * The part of the settings that has to be readable before first paint.
@@ -45,7 +59,8 @@ export type Density = (typeof DENSITIES)[number];
  * theme cannot wait for a network round trip and a decryption without the
  * page visibly flashing the wrong one, and the cloud copy is sealed — it is
  * not readable at all until after sign-in. Nothing in here identifies anyone
- * or costs anything if read: five enums and a sidebar width.
+ * or costs anything if read: enums, a sidebar width, and where the ocean
+ * swims — which the sign-in screen has to know before anyone has signed in.
  */
 export type Appearance = {
   theme: Theme;
@@ -56,6 +71,9 @@ export type Appearance = {
   /** Rail geometry, in pixels. Clamped to the drag handle's own bounds. */
   railWidth: number;
   railCollapsed: boolean;
+  /** The ASCII ocean at all — off keeps `oceanPlaces` for when it returns. */
+  ocean: boolean;
+  oceanPlaces: OceanPlace[];
 };
 
 export type UserSettings = Appearance & {
@@ -93,6 +111,8 @@ export const DEFAULT_APPEARANCE: Appearance = {
   density: "comfortable",
   railWidth: 272,
   railCollapsed: false,
+  ocean: true,
+  oceanPlaces: [...DEFAULT_OCEAN_PLACES],
 };
 
 export const DEFAULT_SETTINGS: UserSettings = {
@@ -139,6 +159,10 @@ export function normalizeAppearance(raw: unknown): Appearance {
     density: coerce(input.density, DENSITIES, DEFAULT_APPEARANCE.density),
     railWidth: clampRail(input.railWidth),
     railCollapsed: input.railCollapsed === true,
+    ocean: input.ocean !== false,
+    oceanPlaces: Array.isArray(input.oceanPlaces)
+      ? OCEAN_PLACES.filter((place) => (input.oceanPlaces as unknown[]).includes(place))
+      : [...DEFAULT_OCEAN_PLACES],
   };
 }
 
@@ -191,7 +215,7 @@ export function normalizeSettings(raw: unknown): UserSettings {
  * must be readable before first paint without a hydration mismatch.
  */
 
-const FONT_STACKS: Record<Font, string> = {
+export const FONT_STACKS: Record<Font, string> = {
   // The loaded webfont, with the platform stack behind it.
   geist: "var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif",
   // No download at all — whatever the OS already considers correct.
@@ -228,7 +252,14 @@ export function applyAppearance(settings: Appearance): void {
   // the whole list on every pointer move during a drag.
   root.style.setProperty("--dial-rail-w", `${settings.railWidth}px`);
   root.classList.toggle("dial-rail-collapsed", settings.railCollapsed);
+  // Read by every Ocean on the page through an observer, like the theme.
+  root.dataset.ocean = oceanAttribute(settings);
   applyTheme(settings.theme);
+}
+
+/** `data-ocean` on the root: the places the ocean may swim, space-separated. */
+export function oceanAttribute(settings: Pick<Appearance, "ocean" | "oceanPlaces">): string {
+  return settings.ocean ? settings.oceanPlaces.join(" ") : "";
 }
 
 /**

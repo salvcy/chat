@@ -33,9 +33,13 @@ export class OceanEngine {
 
   constructor(
     private canvas: HTMLCanvasElement,
-    { sharks, dark = true }: { sharks?: SharkSpec[]; dark?: boolean } = {},
+    {
+      sharks,
+      fishCount,
+      dark = true,
+    }: { sharks?: SharkSpec[]; fishCount?: number; dark?: boolean } = {},
   ) {
-    this.world = new World(sharks);
+    this.world = new World(sharks, fishCount);
     this.renderer = new AsciiRenderer(canvas, dark);
     this.renderer.setFontFamily(getComputedStyle(canvas).fontFamily);
     this.reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");

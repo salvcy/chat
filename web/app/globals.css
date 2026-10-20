@@ -307,13 +307,64 @@ button:disabled {
 }
 
 /* The ASCII ocean (components/ui/Ocean.tsx) behind the front door and the
-   empty chat. It is the one place colour lives outside code: the sharks'
-   glints, the cyan wake and the red of a catch are the ocean's own, a named
+   chat. It is the one place colour lives outside code: the sharks' glints,
+   the cyan wake and the red of a catch are the ocean's own, a named
    exception the user chose (October 2026) rather than an accent the chrome
    may borrow. It surfaces slowly, so a gate that is passed at once never
-   flashes it. */
+   flashes it, and leaves quicker when its place is switched off.
+   `data-live` is written by the component. */
 .dial-ocean {
-  animation: dial-fade-in 900ms ease-out 120ms both;
+  opacity: 0;
+  transition: opacity 400ms ease-out;
+}
+
+.dial-ocean[data-live] {
+  opacity: 1;
+  transition: opacity 900ms ease-out 120ms;
+}
+
+/* In a conversation the ocean swims in the margins: the reading column is
+   masked out with a feathered edge, so no glyph ever sits under text. The
+   gap opens from the centre as the first message arrives (the two lengths
+   are registered so the gradient can animate), and where the window is no
+   wider than the column there are no margins and so no ocean. */
+@property --ocean-gap {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --ocean-feather {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+.dial-ocean-layer {
+  --ocean-gap: 0px;
+  --ocean-feather: 0px;
+  transition:
+    --ocean-gap 700ms cubic-bezier(0.23, 1, 0.32, 1),
+    --ocean-feather 700ms cubic-bezier(0.23, 1, 0.32, 1);
+  -webkit-mask-image: linear-gradient(
+    to right,
+    #000 calc(50% - var(--ocean-gap) - var(--ocean-feather)),
+    transparent calc(50% - var(--ocean-gap)),
+    transparent calc(50% + var(--ocean-gap)),
+    #000 calc(50% + var(--ocean-gap) + var(--ocean-feather))
+  );
+  mask-image: linear-gradient(
+    to right,
+    #000 calc(50% - var(--ocean-gap) - var(--ocean-feather)),
+    transparent calc(50% - var(--ocean-gap)),
+    transparent calc(50% + var(--ocean-gap)),
+    #000 calc(50% + var(--ocean-gap) + var(--ocean-feather))
+  );
+}
+
+.dial-ocean-layer[data-margins] {
+  --ocean-gap: calc(var(--dial-column) / 2);
+  --ocean-feather: 56px;
 }
 
 /* Clear water behind the empty chat's greeting. The ocean keeps sharks out

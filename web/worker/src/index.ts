@@ -953,6 +953,38 @@ async function deleteBlobPrefix(
   }
 }
 
+/**
+ * The account's files — generated images (`g`) and attachments (`f`) — for
+ * Settings → Privacy → Storage. Metadata only: ids, sizes and upload times,
+ * a page of 500 per R2 list. What each file *is* — its type, its pixels —
+ * stays sealed; the browser downloads and decrypts the ones it shows.
+ * Spilled payloads (`p`) are records that did not fit in D1, not files, and
+ * are left out.
+ */
+async function listBlobs(
+  request: Request,
+  env: Env,
+  userId: string,
+): Promise<Response> {
+  const cursor = new URL(request.url).searchParams.get("cursor") ?? undefined;
+  if (cursor !== undefined && cursor.length > 1024) return fail("invalid cursor", 400);
+  const prefix = `${userId}/`;
+  let page: R2Objects;
+  try {
+    page = await env.BLOBS.list({ prefix, limit: 500, cursor });
+  } catch {
+    return fail("invalid cursor", 400);
+  }
+  const files = page.objects
+    .map((object) => ({
+      id: object.key.slice(prefix.length),
+      size: object.size,
+      uploaded: object.uploaded.getTime(),
+    }))
+    .filter((file) => BLOB_ID.test(file.id) && !/\.p\.\d+\.\d+$/.test(file.id));
+  return json({ files, cursor: page.truncated ? page.cursor : null });
+}
+
 /** Every image, attachment and spilled payload belonging to one thread. */
 async function deleteThreadBlobs(
   env: Env,
@@ -1361,6 +1393,11 @@ async function route(
       if (!state) throw new Unauthorized();
       return state;
     };
+
+    if (pathname === "/v1/blobs") {
+      if (request.method !== "GET") return fail("method not allowed", 405);
+      return await listBlobs(request, env, userId);
+    }
 
     const blobMatch = pathname.match(/^\/v1\/blobs\/(.+)$/);
     if (blobMatch) {

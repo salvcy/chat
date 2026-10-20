@@ -52,12 +52,12 @@ export default function Segmented<T extends string>({
           move(-1);
         }
       }}
-      className={`relative grid h-8 select-none rounded-full bg-hover-2 p-0.5 ${className}`}
+      className={`dial-squircle relative grid h-8 select-none bg-hover-2 p-0.5 [--sq:10px] ${className}`}
       style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}
     >
       <span
         aria-hidden
-        className="absolute inset-y-0.5 left-0.5 rounded-full bg-panel shadow-btn transition-transform duration-200 ease-out-strong"
+        className="dial-squircle absolute inset-y-0.5 left-0.5 bg-panel shadow-btn transition-transform duration-200 ease-out-strong [--sq:8px]"
         style={{
           width: `calc((100% - 4px) / ${options.length})`,
           transform: `translateX(${index * 100}%)`,
@@ -73,11 +73,11 @@ export default function Segmented<T extends string>({
             aria-checked={active}
             tabIndex={active ? 0 : -1}
             onClick={() => onChange(option)}
-            className={`relative z-10 truncate rounded-full px-1.5 text-[12.5px] font-medium capitalize transition-colors duration-150 ${
+            className={`relative z-10 truncate px-1.5 text-[12.5px] font-medium transition-colors duration-150 ${
               active ? "text-foreground" : "text-muted hover:text-secondary"
             }`}
           >
-            {labels?.[option] ?? option}
+            {labels?.[option] ?? option.charAt(0).toUpperCase() + option.slice(1)}
           </button>
         );
       })}

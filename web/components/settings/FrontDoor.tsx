@@ -4,6 +4,7 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import BrandMark from "@/components/ui/BrandMark";
 import Ocean from "@/components/ui/Ocean";
+import type { OceanPlace } from "@/lib/settings";
 import ThemeToggle from "@/components/tuner/ThemeToggle";
 
 /**
@@ -20,27 +21,28 @@ import ThemeToggle from "@/components/tuner/ThemeToggle";
  * the viewport.
  *
  * The gates swim: the ASCII ocean fills the page behind the card, fixed to
- * the viewport so it does not scroll with a tall form. Not while the session
- * resolves — that screen is on show for a moment on every load, and the
- * ocean would surface and vanish with it. Header, card and footer are
- * positioned so they paint over the canvas.
+ * the viewport so it does not scroll with a tall form — wherever the person
+ * has allowed it (sign in, unlock, connect a key; Settings → Appearance).
+ * Not while the session resolves — that screen is on show for a moment on
+ * every load, and the ocean would surface and vanish with it. Header, card
+ * and footer are positioned so they paint over the canvas.
  */
 export default function FrontDoor({
   children,
   footer,
   onTheme,
-  ocean = false,
+  ocean,
 }: {
   children: ReactNode;
   /** Extra footer content — "signed in as …, sign out" on the inner gates. */
   footer?: ReactNode;
   onTheme?: (theme: "light" | "dark") => void;
-  /** The ASCII ocean behind the gate. */
-  ocean?: boolean;
+  /** The ASCII ocean behind the gate, as this gate's place. */
+  ocean?: OceanPlace;
 }) {
   return (
     <div className="app-shell flex h-[100dvh] flex-col overflow-y-auto">
-      {ocean && <Ocean className="fixed inset-0 h-full w-full" />}
+      {ocean && <Ocean place={ocean} className="fixed inset-0 h-full w-full" />}
 
       <header
         className="dial-door-bar relative flex h-14 shrink-0 items-center justify-between px-4 sm:px-6"

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import EffortSlider, { EFFORT_DESCRIPTION, EFFORT_LABEL } from "./EffortSlider";
 import GlideMenu from "@/components/ui/GlideMenu";
 import { nextRecents } from "@/components/tuner/Palette";
@@ -26,6 +26,8 @@ const LATEST = [
   "~x-ai/grok-latest",
 ];
 const QUICK_ROWS = 5;
+/** Search results shown inline before the rest is the catalog's job. */
+const SEARCH_ROWS = 6;
 
 /** The current model, then recents, then the latest aliases — five at most. */
 function quickModels(
@@ -43,6 +45,32 @@ function quickModels(
   return out;
 }
 
+/**
+ * The whole catalog, searched the way the palette searches it — every word
+ * must appear in the id or the name — with names that start with the query
+ * first, since that is usually the one being typed.
+ */
+function searchModels(query: string, models: OpenRouterModel[]): string[] {
+  const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return [];
+  const head = tokens.join(" ");
+  const matched = models.filter((m) => {
+    const hay = `${m.id} ${m.name}`.toLowerCase();
+    return tokens.every((t) => hay.includes(t));
+  });
+  const leading = (m: OpenRouterModel) =>
+    displayName(m.id, models).toLowerCase().startsWith(head) ? 0 : 1;
+  return matched
+    .map((m, i) => ({ m, i }))
+    .sort((a, b) => leading(a.m) - leading(b.m) || a.i - b.i)
+    .map(({ m }) => m.id);
+}
+
+/** "google" from "google/gemini-2.5-flash", "anthropic" from "~anthropic/…". */
+function providerOf(id: string): string {
+  return id.split("/")[0].replace(/^~/, "");
+}
+
 const Sparkle = ({ className = "" }: { className?: string }) => (
   <svg viewBox="0 0 16 16" className={className} fill="currentColor" aria-hidden>
     <path d="M8 1.5 9.4 6.6 14.5 8 9.4 9.4 8 14.5 6.6 9.4 1.5 8 6.6 6.6Z" />
@@ -56,15 +84,21 @@ const Sparkle = ({ className = "" }: { className?: string }) => (
  * the effort in the muted ink when thinking is on. Open, it is a panel with
  * two views that trade places sideways. Reasoning comes first, because it is
  * what changes between turns: the model's name heads it and leads on to the
- * models, and under it the effort slider. Models is deliberately short —
- * the current one, recents, and the newest of the big families — because
- * the whole catalog is one keystroke away: typing anything there carries
- * what was typed into the palette, already searching, and its search field
- * says so. A model without a reasoning mode (or the image tool) opens
- * straight onto the models.
+ * models, and under it the effort slider. A model without a reasoning mode
+ * (or the image tool) opens straight onto the models.
  *
- * Height is measured and written to the panel, so changing views eases
- * rather than snaps (see `.dial-model-panel`).
+ * The models view is a search, not a menu. Its field has the focus, so
+ * typing filters the whole catalog in place — the list eases to the new
+ * height as it narrows — and with nothing typed it shows the short list:
+ * current, recents, the newest of the big families. Arrow keys move through
+ * the results and Enter takes one, so a model change never leaves the
+ * keyboard. The palette is the extended view, for comparing prices, context
+ * and capabilities: the expand button beside the field opens it, as does ⌘K
+ * from inside the dial and the "more" row under a long result — and all
+ * three carry what was typed, so the search goes on where it was.
+ *
+ * Height is measured and written to the panel, so changes ease rather than
+ * snap (see `.dial-model-panel`).
  */
 export default function ModelDial({
   settings,
@@ -88,10 +122,14 @@ export default function ModelDial({
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<"tune" | "models">("tune");
   const [direction, setDirection] = useState<"forward" | "back">("forward");
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
   const ref = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const innerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
 
   const caps = capabilitiesFor(settings.model, models);
   const efforts = effortOptions(caps);
@@ -99,7 +137,18 @@ export default function ModelDial({
   const shown = canTune ? view : "models";
   const name = displayName(settings.model, models);
   const thinking = canTune && settings.reasoning !== "off";
-  const quick = quickModels(settings.model, recentModels, models);
+
+  const searching = query.trim().length > 0;
+  const matches = useMemo(
+    () => (searching ? searchModels(query, models) : []),
+    [searching, query, models],
+  );
+  const rows = searching
+    ? matches.slice(0, SEARCH_ROWS)
+    : quickModels(settings.model, recentModels, models);
+  const more = searching ? matches.length - rows.length : 0;
+  // Clamped on read: a narrowing result must not leave the cursor past the end.
+  const cursor = Math.min(active, Math.max(rows.length - 1, 0));
 
   const close = (refocus = false) => {
     setOpen(false);
@@ -117,9 +166,14 @@ export default function ModelDial({
     close(true);
   };
 
-  const openCatalog = (query: string) => {
+  const openCatalog = () => {
     close();
-    onOpenCatalog(query);
+    onOpenCatalog(query.trim());
+  };
+
+  const search = (next: string) => {
+    setQuery(next);
+    setActive(0);
   };
 
   // Outside presses close it.
@@ -132,15 +186,22 @@ export default function ModelDial({
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
 
-  // Land where the keyboard is useful: the slider, or the current model.
+  // Land where the keyboard is useful: the slider, or the search field.
   useEffect(() => {
     if (!open) return;
     const target =
       shown === "tune"
         ? ref.current?.querySelector<HTMLElement>("[role=slider]")
-        : ref.current?.querySelector<HTMLElement>("[data-quick-row][aria-checked=true]");
+        : searchRef.current;
     target?.focus({ preventScroll: true });
   }, [open, shown]);
+
+  // Keep the keyboard's row in view in a long result.
+  useEffect(() => {
+    listRef.current
+      ?.querySelector<HTMLElement>(`[data-row="${cursor}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [cursor]);
 
   // The panel's height follows its content, eased (see `.dial-model-panel`).
   // Each view is its own element, so the observer moves with it; only the
@@ -173,11 +234,19 @@ export default function ModelDial({
       className="min-w-0"
       onKeyDown={(e) => {
         if (!open) return;
+        if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k" && !e.shiftKey) {
+          // The extended view, carrying the search — not the shell's toggle.
+          e.preventDefault();
+          e.stopPropagation();
+          openCatalog();
+          return;
+        }
         if (e.key === "Escape") {
           // Escape is also "stop generating" further up; this one is ours.
           e.preventDefault();
           e.stopPropagation();
-          close(true);
+          if (shown === "models" && query) search("");
+          else close(true);
           return;
         }
         if (
@@ -188,25 +257,6 @@ export default function ModelDial({
           e.preventDefault();
           e.stopPropagation();
           close(true);
-          return;
-        }
-        if (shown !== "models") return;
-        const inField = (e.target as HTMLElement).tagName === "INPUT";
-        if (!inField && e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey && e.key !== " ") {
-          // Typing in the short list means looking for something not in it.
-          e.preventDefault();
-          openCatalog(e.key);
-        } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-          e.preventDefault();
-          const rows = [
-            ...(ref.current?.querySelectorAll<HTMLElement>("[data-quick-row], [data-quick-search]") ?? []),
-          ];
-          const at = rows.indexOf(document.activeElement as HTMLElement);
-          const next = e.key === "ArrowDown" ? Math.min(rows.length - 1, at + 1) : Math.max(0, at - 1);
-          rows[next]?.focus();
-        } else if (e.key === "ArrowLeft" && canTune && !inField) {
-          e.preventDefault();
-          go("tune");
         }
       }}
     >
@@ -224,6 +274,7 @@ export default function ModelDial({
           }
           setView("tune");
           setDirection("forward");
+          search("");
           setOpen(true);
         }}
         className={`dial-squircle flex h-8 min-w-0 max-w-[min(16rem,48vw)] items-center gap-1.5 pl-2.5 pr-2 text-[12.5px] font-medium transition-[background-color,color,transform] duration-150 [--sq:10px] active:scale-[0.97] ${
@@ -254,7 +305,7 @@ export default function ModelDial({
         <div
           role="dialog"
           aria-label={shown === "tune" ? "Reasoning" : "Model"}
-          className="dial-squircle absolute bottom-full right-0 z-50 mb-2 w-[min(304px,calc(100vw-40px))] origin-bottom-right bg-panel shadow-overlay [--sq:14px]"
+          className="dial-squircle absolute bottom-full right-0 z-50 mb-2 w-[min(320px,calc(100vw-40px))] origin-bottom-right bg-panel shadow-overlay [--sq:14px]"
           style={{ animation: "dial-pop-in 170ms cubic-bezier(0.23,1,0.32,1) both" }}
         >
           <div ref={panelRef} className="dial-model-panel">
@@ -313,34 +364,100 @@ export default function ModelDial({
                 </>
               ) : (
                 <>
-                  <div className="flex h-8 items-center gap-0.5 px-1">
+                  <div className="flex items-center gap-1 pb-1">
                     {canTune && (
                       <button
                         type="button"
                         onClick={() => go("tune")}
                         aria-label="Back to reasoning"
-                        className="dial-squircle flex size-7 items-center justify-center text-muted transition-colors duration-150 [--sq:8px] hover:bg-hover hover:text-foreground"
+                        title="Back to reasoning"
+                        className="dial-squircle flex size-8 shrink-0 items-center justify-center text-muted transition-colors duration-150 [--sq:9px] hover:bg-hover hover:text-foreground"
                       >
                         <svg viewBox="0 0 12 12" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                           <path d="M7.5 2.75 4.25 6l3.25 3.25" />
                         </svg>
                       </button>
                     )}
-                    <span className="px-1.5 text-[12px] font-medium text-muted">Model</span>
+                    <label className="dial-squircle flex h-8 min-w-0 flex-1 cursor-text items-center gap-2 bg-field px-2.5 text-muted shadow-field [--sq:9px]">
+                      <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden>
+                        <circle cx="7" cy="7" r="4.25" />
+                        <path d="m10.25 10.25 3.25 3.25" />
+                      </svg>
+                      <input
+                        ref={searchRef}
+                        value={query}
+                        onChange={(e) => search(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                            e.preventDefault();
+                            setActive(
+                              e.key === "ArrowDown"
+                                ? Math.min(rows.length - 1, cursor + 1)
+                                : Math.max(0, cursor - 1),
+                            );
+                          } else if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                            e.preventDefault();
+                            const id = rows[cursor];
+                            if (id) choose(id);
+                          }
+                        }}
+                        placeholder={`Search ${models.length > 0 ? `${models.length} ` : ""}models`}
+                        aria-label="Search models"
+                        aria-controls="dial-model-list"
+                        aria-activedescendant={rows[cursor] ? `dial-model-${cursor}` : undefined}
+                        spellCheck={false}
+                        autoComplete="off"
+                        className="min-w-0 flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-muted"
+                      />
+                      {query && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            search("");
+                            searchRef.current?.focus();
+                          }}
+                          aria-label="Clear search"
+                          className="-mr-1 flex size-5 shrink-0 items-center justify-center rounded-[5px] text-muted transition-colors hover:text-foreground"
+                        >
+                          <svg viewBox="0 0 16 16" className="h-2.5 w-2.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+                            <path d="m4 4 8 8M12 4l-8 8" />
+                          </svg>
+                        </button>
+                      )}
+                    </label>
+                    <button
+                      type="button"
+                      onClick={openCatalog}
+                      aria-label="Open the full model catalog"
+                      title={query ? `All results for “${query.trim()}” (⌘K)` : "All models, with prices and capabilities (⌘K)"}
+                      className="dial-squircle group/expand flex size-8 shrink-0 items-center justify-center text-muted transition-[background-color,color] duration-150 [--sq:9px] hover:bg-hover hover:text-foreground"
+                    >
+                      <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 transition-transform duration-200 ease-out-strong group-hover/expand:scale-110" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                        <path d="M9.75 2.75h3.5v3.5M13.25 2.75 9.5 6.5M6.25 13.25h-3.5v-3.5M2.75 13.25 6.5 9.5" />
+                      </svg>
+                    </button>
                   </div>
 
-                  <GlideMenu highlightClassName="dial-squircle inset-x-0 bg-hover [--sq:9px]">
-                    <div role="radiogroup" aria-label="Model">
-                      {quick.map((id) => {
+                  <div ref={listRef} id="dial-model-list" role="listbox" aria-label="Models" className="dial-scroll-none max-h-[230px] overflow-y-auto">
+                    <GlideMenu
+                      mode="active"
+                      activeKey={rows.length > 0 ? `${cursor}-${query}` : null}
+                      highlightClassName="dial-squircle inset-x-0 bg-hover [--sq:9px]"
+                    >
+                      {rows.map((id, i) => {
                         const current = id === settings.model;
                         return (
                           <button
                             key={id}
+                            id={`dial-model-${i}`}
                             type="button"
-                            role="radio"
-                            aria-checked={current}
+                            role="option"
+                            aria-selected={current}
+                            tabIndex={-1}
+                            data-row={i}
                             data-glide-row
-                            data-quick-row
+                            data-glide-active={i === cursor}
+                            onMouseMove={() => i !== cursor && setActive(i)}
                             onClick={() => choose(id)}
                             title={id}
                             className="relative z-10 flex h-9 w-full items-center gap-2 px-2.5 text-left outline-none"
@@ -352,47 +469,41 @@ export default function ModelDial({
                             >
                               {displayName(id, models)}
                             </span>
-                            {current && (
+                            {current ? (
                               <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 shrink-0 text-foreground" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                                 <path d="m3.5 8.5 3 3 6-6.5" />
                               </svg>
+                            ) : (
+                              searching && (
+                                <span className="shrink-0 font-mono text-[10.5px] text-muted">
+                                  {providerOf(id)}
+                                </span>
+                              )
                             )}
                           </button>
                         );
                       })}
-                    </div>
-                  </GlideMenu>
+                    </GlideMenu>
 
-                  <label className="dial-squircle mt-1.5 flex h-9 cursor-text items-center gap-2 bg-field px-2.5 text-muted shadow-field [--sq:9px]">
-                    <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden>
-                      <circle cx="7" cy="7" r="4.25" />
-                      <path d="m10.25 10.25 3.25 3.25" />
-                    </svg>
-                    <input
-                      data-quick-search
-                      value=""
-                      onChange={(e) => {
-                        if (e.target.value) openCatalog(e.target.value);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault();
-                          openCatalog("");
-                        }
-                      }}
-                      placeholder={`All ${models.length > 0 ? `${models.length} ` : ""}models…`}
-                      aria-label="Search all models"
-                      className="min-w-0 flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-muted"
-                    />
+                    {searching && rows.length === 0 && (
+                      <p className="px-2.5 py-3 text-[12.5px] text-muted">
+                        Nothing matches “{query.trim()}”.
+                      </p>
+                    )}
+                  </div>
+
+                  {more > 0 && (
                     <button
                       type="button"
-                      onClick={() => openCatalog("")}
-                      title="Open the full model list"
-                      className="dial-kbd hidden shrink-0 transition-colors hover:text-foreground sm:inline-flex"
+                      onClick={openCatalog}
+                      className="dial-squircle mt-1 flex h-8 w-full items-center justify-between gap-2 px-2.5 text-[12px] text-muted transition-colors duration-150 [--sq:9px] hover:bg-hover hover:text-foreground"
                     >
-                      ⌘K
+                      <span>
+                        {more} more in the full catalog
+                      </span>
+                      <span className="dial-kbd hidden sm:inline-flex">⌘K</span>
                     </button>
-                  </label>
+                  )}
                 </>
               )}
             </div>

@@ -427,7 +427,7 @@ export default function Home() {
 
   if (!account.user) {
     return (
-      <FrontDoor ocean onTheme={(theme) => account.updateSettings({ theme })}>
+      <FrontDoor ocean="signin" onTheme={(theme) => account.updateSettings({ theme })}>
         <AuthPanel
           onSignIn={account.signIn}
           onSignUp={account.signUp}
@@ -457,7 +457,7 @@ export default function Home() {
        password. The theme is not persisted from here: the settings this
        device holds are placeholders until the real ones can be opened. */
     return (
-      <FrontDoor ocean footer={signedInAs}>
+      <FrontDoor ocean="unlock" footer={signedInAs}>
         <UnlockBar
           email={account.user.email}
           rememberDeviceKey={account.settings.rememberDeviceKey}
@@ -470,7 +470,7 @@ export default function Home() {
   if (!credential) {
     return (
       <FrontDoor
-        ocean
+        ocean="connect"
         footer={signedInAs}
         onTheme={(theme) => account.updateSettings({ theme })}
       >
@@ -610,6 +610,13 @@ export default function Home() {
             onSync={account.sync}
             usage={account.usage}
             onRefreshUsage={account.refreshUsage}
+            titles={Object.fromEntries(
+              conv.conversations.map((c) => [c.id, c.title]),
+            )}
+            onOpenConversation={(id) => {
+              setSettingsOpen(false);
+              selectConversation(id);
+            }}
             onClose={() => setSettingsOpen(false)}
             onSignInRequested={() => {
               setSettingsOpen(false);

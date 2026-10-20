@@ -1319,19 +1319,16 @@ export default function ChatView({
     // at -z under the transcript and the composer — above the window's
     // background, below everything drawn on it — without lifting either.
     <div className="relative isolate flex min-h-0 flex-1 flex-col">
-      <AnimatePresence>
-        {shown.length === 0 && (
-          <motion.div
-            key="ocean"
-            aria-hidden
-            className="pointer-events-none absolute inset-0 -z-10"
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.3, ease: "easeOut" }}
-          >
-            <Ocean className="h-full w-full" />
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {/* One ocean for the life of the conversation: behind the greeting
+          while it is empty, then — if the person has let it swim in
+          conversations — out to the margins as the first message lands. */}
+      <div
+        aria-hidden
+        className="dial-ocean-layer pointer-events-none absolute inset-0 -z-10"
+        data-margins={shown.length > 0 ? "" : undefined}
+      >
+        <Ocean place={shown.length === 0 ? "newchat" : "chat"} className="h-full w-full" />
+      </div>
 
       <div
         ref={regionRef}

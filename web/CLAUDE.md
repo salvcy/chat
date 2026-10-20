@@ -156,6 +156,13 @@ was derived with them, so they never change with the domain.
 - **Blobs are keyed by thread, not by message.** `<threadId>/<messageId>.…`
   makes deleting a conversation one R2 prefix delete. The old scheme fanned
   out one unbounded list/delete loop *per message* from a single request.
+- **`GET /v1/blobs` lists the account's files** for Settings → Privacy →
+  Files: ids, sizes and upload times, 500 per R2 list page with a cursor,
+  generated images (`.g.`) and attachments (`.f.`) only — spilled payloads
+  (`.p.`) are records, not files. Nothing in it is sealed or new to the
+  server; what a file *is* — its type, its pixels — the browser learns by
+  downloading and decrypting it (`readStoredFile`, type sniffed from the
+  bytes, because the media type lives in the sealed message).
 - **State is loaded per route, not up front.** Every request used to pay
   `getSession` + `loadState` before the router looked at the path, so a 404
   and a WebSocket upgrade cost the same D1 read as a write. Fetching an image
@@ -229,7 +236,21 @@ was derived with them, so they never change with the domain.
   this blob is never stored in the clear. `instructions` is the system
   prompt for every conversation; it replaced the per-conversation prompt.
 - `components/settings/` — `AuthPanel` (sign in / create / Google),
-  `SettingsPanel` (account · keys · appearance), `UnlockBar`.
+  `SettingsPanel`, `StorageBrowser`, `UnlockBar`. **Settings has four tabs,
+  each about one thing** (October 2026; the user called the old panel a
+  mess): **Account** — who you are, the OpenRouter key (it had a tab of its
+  own holding one field), the session, delete; **Instructions**;
+  **Privacy** — chat history and its encryption, this device's unlock, and
+  storage, with **Files**: every image and attachment in the account,
+  listed by the Worker and decrypted in this tab with the vault key as each
+  tile scrolls into view (three at a time, kept as small thumbnails, not the
+  files), filtered generated/uploaded, labelled by conversation, previewed
+  full size with Download and Open conversation; **Appearance** — a
+  different control for each kind of choice instead of five stacked
+  segmented bars: theme as miniature windows, typeface as "Aa" tiles, text
+  size and column width as `StepSlider`s, density as a `Switch`, and the
+  ASCII ocean with a live preview, a master switch and one switch per
+  place.
 - `components/sidebar/AccountButton.tsx` — the rail footer. `shrink-0`
   sibling of the scrolling list, same reason as the header.
 
@@ -416,16 +437,27 @@ invoking a Worker.
   search field ("All 470 models… ⌘K") is that same door, for whoever reaches
   for the mouse. A model with no reasoning mode, or the image tool, opens
   straight onto the models. Picking records a recent, like the palette.
+  **Since revised (October 2026): the models view is a search.** Its field
+  has the focus and filters the whole catalog in place (the palette's
+  every-word match, names that start with the query first, provider beside
+  each result, six rows); arrows move, Enter takes, Escape clears then
+  closes. The palette is the extended view — prices, context, capabilities
+  — opened by the expand button beside the field, ⌘K inside the dial, or
+  the "N more in the full catalog" row, all three carrying the query.
   Escape closes it without stopping a stream; the panel anchors to the
   composer's right group so its edge lines up with send's and a phone keeps
   a margin. It replaced `EffortControl` (a sparkle + word opening a
   segmented control, on the left) and the header's model readout.
-- `components/chat/EffortSlider.tsx` — exactly the model's efforts as a
-  stepped slider: a squircle track, a quiet fill up to the thumb, a 3px
-  square at every stop, and the thumb as the one inverted mark. It moves in
-  detents, not freely — nothing lies between levels, and each step is a
-  settings write to the account, so a drag across four levels makes four.
-  The thumb glides between them. `role="slider"`; arrows step, Home/End.
+- `components/ui/StepSlider.tsx` — a choice along a scale as a stepped
+  slider: a squircle track, a quiet fill up to the thumb, a 3px square at
+  every stop, and the thumb as the one inverted mark. It moves in detents,
+  not freely — nothing lies between options, and each step is usually a
+  settings write to the account, so a drag across four makes four. The
+  thumb glides between them. `role="slider"`; arrows step, Home/End.
+  `EffortSlider` (the model's efforts) is a thin wrapper; Appearance uses
+  it for text size and column width.
+- `components/ui/Switch.tsx` — on/off as a squircle switch; on is the
+  inverted track, the design system's "on".
 - `components/chat/Metrics.tsx` — the per-message flight recorder. Collapsed
   = tok/s · duration · cost; expanded = provider, ttft, token split.
 - `lib/timeline.ts` — `buildTimeline(message, { streaming, holdRemarks })`
@@ -1173,8 +1205,21 @@ comment.
   session-resolving screen (it is up for a moment on every load and the ocean
   would flash). In the chat it lives in ChatView's own stacking context
   (`isolate`, ocean at `-z-10`) so it sits on the window's background and
-  under the transcript and composer without lifting either; it fades out with
-  the first message. The greeting sits in a pool of clear water
+  under the transcript and composer without lifting either.
+  **Where it swims is the person's** (Settings → Appearance): a master
+  switch and five places — `newchat`, `chat`, `signin`, `unlock`, `connect`
+  (`OCEAN_PLACES`; all but `chat` on by default). They are appearance
+  fields (`ocean`, `oceanPlaces`), synced with the account and mirrored to
+  `dial:appearance`, because the sign-in screen has to know before anyone
+  has signed in; the boot script and `applyAppearance` write them to
+  `data-ocean` on the root, and every `<Ocean place=…>` watches that
+  attribute — a place that is off never loads the engine, one switched off
+  fades and frees its canvas. **In conversations** (`chat`) the ocean swims
+  in the margins: `.dial-ocean-layer[data-margins]` masks out the reading
+  column with a feathered edge (registered `@property` lengths, so the gap
+  opens from the centre as the first message lands), and a window no wider
+  than the column has no margins and so no ocean. One ocean per ChatView
+  moves from `newchat` to `chat` and keeps its engine when both are on. The greeting sits in a pool of clear water
   (`.dial-ocean-pool`, a `box-shadow` of `--background`) because a hunting
   shark crosses the centre and dark blocks under the question made it
   unreadable — a shadow and not a wider box, which overflowed the phone's
@@ -1214,7 +1259,8 @@ comment.
   an unauthenticated visitor has no app to show.
 - **The browser stores exactly three kinds of things, and none of them is a
   conversation.** One `localStorage` key (`dial:appearance` — appearance,
-  rail geometry, and the non-sensitive remember/lock preference), an optional
+  rail geometry, where the ocean swims, and the non-sensitive remember/lock
+  preference), an optional
   account-scoped IndexedDB record (the non-extractable vault key, because no
   other web storage can hold one safely), and the Cache API copy of
   OpenRouter's public model catalog. Adding a fourth
