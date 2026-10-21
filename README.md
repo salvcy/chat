@@ -35,3 +35,16 @@ npm run build   # Chat.app and a .dmg under src-tauri/target/release/bundle/
 ```
 
 More in [`Tauri/README.md`](Tauri/README.md).
+
+## Credits
+
+The ASCII ocean — the sharks and fish swimming behind the sign-in screen and
+the empty chat (`web/lib/ocean/`) — is from
+[ascii-sharks](https://github.com/stackedlol/ascii-sharks) by
+[stackedlol](https://github.com/stackedlol), adapted for this app's themes.
+All credit for the simulation and the shark drawings goes to them.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE). The files in `web/lib/ocean/` come from
+ascii-sharks and remain its author's; the MIT license does not cover them.
