@@ -1034,6 +1034,12 @@ origin.
   `finish` handler writes it, so `startedAt` without it means the stream was
   cut off. A *failed image* looks the same, which is why the truncation notice
   is scoped away from image turns.
+- **Navigation must not own a request's lifetime.** `ChatSessions` retains
+  keyed chats while they have a request, pending/failed save, or draft; idle
+  hidden histories are released. Hiding uses CSS, because suspending effects
+  would suspend checkpoints and live publishing too. A background save must
+  never select its thread; global Escape belongs only to the visible chat.
+  Retained sessions pin their blob URLs, and deletion/sign-out disposes them.
 - **An effect that reads `messages` is torn down on every token.** The
   mid-stream snapshot timer must depend only on `busy` and read the latest
   messages from a ref, or its cleanup cancels the pending save forever.
@@ -1329,7 +1335,8 @@ comment.
 - **Repealed (was the v3 law):** "Dexie remains the source of truth and cloud
   sync is a replica of it — never the other way round." The inversion is the
   whole of phase 13. **D1 is the source of truth**; the browser holds the open
-  thread and the sidebar in memory and nothing on disk. Reintroducing a local
+  thread, background requests or unsaved work, and the sidebar in memory
+  and nothing on disk. Reintroducing a local
   copy of conversations would reintroduce the reconciliation problem that
   caused three separate data-loss bugs, and it is a regression.
 - **Repealed (was a v3 non-goal):** "Cloud sync is optional and must stay

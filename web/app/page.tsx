@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import ChatView from "@/components/chat/ChatView";
+import ChatSessions from "@/components/chat/ChatSessions";
 import FrontDoor from "@/components/settings/FrontDoor";
 import Button from "@/components/ui/Button";
 import Loader from "@/components/ui/Loader";
@@ -33,9 +33,9 @@ const EMPTY_MESSAGES: DialMessage[] = [];
  * The shell. Owns the conversation list, the live catalog, and the active
  * thread's settings + messages.
  *
- * The chat renders in a keyed ChatView: remounting per conversation resets
- * useChat's session and its in-memory messages, so histories can never
- * interleave and there's no flash of the previous thread.
+ * Each conversation has its own keyed session. Running requests and unsaved
+ * work stay mounted when the reader opens another thread; idle histories
+ * are released and read from the server on the next visit.
  */
 export default function Home() {
   const credential = useCredential();
@@ -46,11 +46,13 @@ export default function Home() {
    * the sidebar. Neither can be declared after the other, so the two edges go
    * through refs — the same shape as the transport taking the settings ref.
    */
+  const [retiredIds, setRetiredIds] = useState<ReadonlySet<string>>(() => new Set());
   const openThreadRef = useRef<string | null>(null);
   const convRef = useRef<ReturnType<typeof useConversations> | null>(null);
   const applyDelta = useCallback(
     (threads: Parameters<NonNullable<Parameters<typeof useAccount>[0]["onThreads"]>>[0], removed: string[]) => {
       convRef.current?.applyDelta(threads, removed);
+      if (removed.length) setRetiredIds((current) => new Set([...current, ...removed]));
     },
     [],
   );
@@ -249,6 +251,7 @@ export default function Home() {
     if (id === conv.activeId) return;
     // Retire the draft id so the guard above can't mistake a stored thread
     // for the live one and skip loading it.
+    setLoaded(null);
     setDraftId(crypto.randomUUID());
     conv.setActiveId(id);
   };
@@ -266,6 +269,7 @@ export default function Home() {
     async (id: string) => {
       const wasActive = conv.activeId === id;
       await conv.remove(id);
+      setRetiredIds((current) => new Set([...current, id]));
       if (!wasActive) return;
       // The first saved thread shares the draft id it started with. Minting a
       // new one forces useChat to unmount, otherwise its in-memory transcript
@@ -591,48 +595,51 @@ export default function Home() {
           onTheme={(theme) => account.updateSettings({ theme })}
         />
 
-        {view ? (
-          <ChatView
-            key={view.key}
-            conversationId={view.key}
-            settings={effective}
-            onSettingsChange={changeSettings}
-            initialMessages={view.messages}
-            models={models}
-            recentModels={account.settings.recentModels}
-            onRecent={(recentModels) => account.updateSettings({ recentModels })}
-            userName={account.user.name}
-            onOpenSwitcher={(query = "") => {
+        <ChatSessions
+          activeId={conv.activeId ?? draftId}
+          retiredIds={retiredIds}
+          current={view ? {
+            conversationId: view.key,
+            settings: effective,
+            onSettingsChange: changeSettings,
+            initialMessages: view.messages,
+            models,
+            recentModels: account.settings.recentModels,
+            onRecent: (recentModels) => account.updateSettings({ recentModels }),
+            userName: account.user.name,
+            onOpenSwitcher: (query = "") => {
               setPaletteQuery(query);
               setPaletteOpen(true);
-            }}
-            onBranch={(messages, from) => void branch(messages, from)}
-            saveTurn={conv.saveTurn}
-            loadThread={conv.loadThread}
-            remoteVersion={account.pulled}
-            setActiveId={conv.setActiveId}
-            instructions={account.settings.instructions}
-          />
-        ) : loadFailed !== null && loadFailed === conv.activeId ? (
-          <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-            <p className="text-[13.5px] text-secondary">
-              Couldn’t open this conversation.
-            </p>
-            <Button
-              size="sm"
-              onClick={() => {
-                setLoadFailed(null);
-                setLoadAttempt((n) => n + 1);
-              }}
-            >
-              Try again
-            </Button>
-          </div>
-        ) : (
-          <div className="flex flex-1 items-center justify-center">
-            <Loader timer={false} className="opacity-70" />
-          </div>
-        )}
+            },
+            onBranch: (messages, from) => void branch(messages, from),
+            saveTurn: conv.saveTurn,
+            loadThread: conv.loadThread,
+            remoteVersion: account.pulled,
+            setActiveId: conv.setActiveId,
+            instructions: account.settings.instructions,
+          } : null}
+        >
+          {loadFailed !== null && loadFailed === conv.activeId ? (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+              <p className="text-[13.5px] text-secondary">
+                Couldn’t open this conversation.
+              </p>
+              <Button
+                size="sm"
+                onClick={() => {
+                  setLoadFailed(null);
+                  setLoadAttempt((n) => n + 1);
+                }}
+              >
+                Try again
+              </Button>
+            </div>
+          ) : (
+            <div className="flex flex-1 items-center justify-center">
+              <Loader timer={false} className="opacity-70" />
+            </div>
+          )}
+        </ChatSessions>
 
         {settingsOpen && (
           <SettingsPanel
