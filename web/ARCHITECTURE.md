@@ -89,8 +89,9 @@ instance per isolate was tried and did not move it.
 
 ## 3. One store, and it is not in the browser
 
-**D1 is the source of truth.** The browser holds the sidebar and the open
-thread in memory and nothing on disk. This is the inversion of phase 13, and
+**D1 is the source of truth.** The browser holds the sidebar, the open
+thread, and any background requests or unsaved work in memory and nothing
+on disk. This is the inversion of phase 13, and
 it is the single most important fact about the current design: there is no
 second copy, so there is nothing to reconcile.
 
@@ -335,6 +336,21 @@ skipped an edit that preserved it ("Hello there" → "Hello Peter") — but read
 only the *size* of attachments. Hashing megabytes of base64 every 1.2 s would
 cost more than the writes it saves, and reaching into those parts would pick
 up the very blob ids that must not count as a change.
+
+### 6.4a Navigating during a request
+
+`ChatSessions` keeps one keyed `ChatView` per conversation that still owns
+work: an active request (text or image), a pending or failed save, or a
+composer draft. Switching history hides that view without unmounting its
+stream, checkpoint timer, live publisher, or desktop page hold. Each session
+keeps its own settings and transcript. Background completion saves to its
+original thread without changing the visible conversation, and Escape only
+stops the visible chat. Idle hidden sessions are released; deleting a thread
+or leaving the account tears its session down. Retained sessions also pin
+their media so the display cache cannot revoke URLs they still need.
+
+This is session memory, not a second durable store. Refreshing or closing
+the browser still ends inference and restores the last cloud checkpoint.
 
 ### 6.5 Getting a remote change onto the screen
 

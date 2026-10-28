@@ -21,6 +21,7 @@ import Ocean from "@/components/ui/Ocean";
 import Activity from "./Activity";
 import type { DialMessage } from "@/lib/conversations";
 import { capabilitiesFor } from "@/lib/capabilities";
+import { retainBlobThread } from "@/lib/blob";
 import { currentKey } from "@/lib/credentials";
 import { generateImage } from "@/lib/image";
 import { promoteReasoningAnswer, reconcileFinishedResponse } from "@/lib/messages";
@@ -152,8 +153,9 @@ function fingerprint(messages: DialMessage[]): string {
 /**
  * The live chat.
  *
- * Remounted per conversation by the shell, so its useChat session is always
- * exactly one thread. Three behaviours worth knowing:
+ * Kept mounted while it owns work, even when another conversation is open,
+ * so its useChat session is always exactly one thread. Three behaviours
+ * worth knowing:
  *
  *  - The transcript is the only scrolling region, and follows the stream
  *    until you scroll up; a jump-to-bottom control appears when it stops.
@@ -164,6 +166,8 @@ function fingerprint(messages: DialMessage[]): string {
  */
 export default function ChatView({
   conversationId,
+  active,
+  onHoldChange,
   settings,
   onSettingsChange,
   initialMessages,
@@ -180,6 +184,9 @@ export default function ChatView({
   instructions,
 }: {
   conversationId: string;
+  /** Only the visible chat may handle global shortcuts or select itself. */
+  active: boolean;
+  onHoldChange: (id: string, holding: boolean) => void;
   settings: ChatSettings;
   onSettingsChange: (patch: Partial<ChatSettings>) => void;
   initialMessages: DialMessage[];
@@ -209,6 +216,21 @@ export default function ChatView({
   /** The account's standing instructions — the system prompt for every turn. */
   instructions: string;
 }) {
+  const mountedRef = useRef(true);
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+  const activeRef = useRef(active);
+  useLayoutEffect(() => {
+    activeRef.current = active;
+    return () => { activeRef.current = false; };
+  }, [active]);
+  const announce = useCallback((id: string) => {
+    // A save finishing in the background must never navigate away from the
+    // conversation the reader chose in the meantime.
+    if (activeRef.current) setActiveId(id);
+  }, [setActiveId]);
   const [input, setInput] = useState("");
   /** Bumped to hand the caret back to the composer (after quoting). */
   const [composerFocus, setComposerFocus] = useState(0);
@@ -247,6 +269,7 @@ export default function ChatView({
   // The shell mints the id, including for unsaved threads, so this stays
   // stable across the moment the conversation first becomes "active".
   const threadId = conversationId;
+  useEffect(() => retainBlobThread(threadId), [threadId]);
 
   // Read settings through a ref inside callbacks — otherwise onFinish, which
   // useChat captures once, would persist against a stale copy after a
@@ -291,6 +314,7 @@ export default function ChatView({
       // time and each was its own render of the whole view.
       throttle: 33,
       onFinish: ({ message, messages: finished, isAbort }) => {
+        if (!mountedRef.current) return;
         streamSettledRef.current = true;
         const reconciled = reconcileFinishedResponse(
           message,
@@ -336,7 +360,7 @@ export default function ChatView({
             settings: settingsRef.current,
             messages: settled,
           },
-          () => setActiveId(threadId),
+          () => announce(threadId),
         );
       },
     });
@@ -399,7 +423,12 @@ export default function ChatView({
   const busy = chatBusy || imageBusy;
   // What closing the desktop app's window for a while must not throw away
   // (lib/release.ts). Typed text is checked there, from the page.
-  useHoldPage(busy || pendingWrites > 0 || saveError !== null || attachments.length > 0);
+  const holding = busy || pendingWrites > 0 || saveError !== null ||
+    attachments.length > 0 || input.length > 0;
+  useHoldPage(holding);
+  useLayoutEffect(() => {
+    onHoldChange(threadId, holding);
+  }, [onHoldChange, threadId, holding]);
   const canSeeImages = selectedCapabilities.vision;
   const selectedImageModel = selectedCapabilities.imageGeneration
     ? settings.model
@@ -461,7 +490,7 @@ export default function ChatView({
   /** Asks for a read outside the realtime signal — a live stream went quiet. */
   const [readNonce, setReadNonce] = useState(0);
   useEffect(() => {
-    if (remoteVersion === 0 && readNonce === 0) return;
+    if (!active || (remoteVersion === 0 && readNonce === 0)) return;
     if (busy || pendingWrites > 0 || saveError) return;
     const version = `${remoteVersion}:${readNonce}`;
     if (version === appliedRemoteRef.current) return;
@@ -499,7 +528,7 @@ export default function ChatView({
     return () => {
       cancelled = true;
     };
-  }, [remoteVersion, readNonce, busy, pendingWrites, saveError, loadThread, threadId, setMessages]);
+  }, [active, remoteVersion, readNonce, busy, pendingWrites, saveError, loadThread, threadId, setMessages]);
 
   /* ----------------------------- live mirror ---------------------------- */
 
@@ -848,7 +877,7 @@ export default function ChatView({
   useLayoutEffect(() => {
     // An empty workspace has nothing to follow. Scrolling it to its own
     // bottom hid the top half of the welcome state on shorter viewports.
-    if (shown.length === 0) return;
+    if (!active || shown.length === 0) return;
     followLatest();
 
     // The SDK's finished state and the message's final UI do not always land
@@ -859,7 +888,7 @@ export default function ChatView({
       measureAtBottom();
     });
     return () => cancelAnimationFrame(frame);
-  }, [shown, status, followLatest, measureAtBottom]);
+  }, [active, shown, status, followLatest, measureAtBottom]);
 
   useEffect(() => {
     const transcript = transcriptRef.current;
@@ -1066,6 +1095,7 @@ export default function ChatView({
         setImageMode(false);
       }
 
+      if (!mountedRef.current) return;
       const finalMessages = pendingMessages.map((message) =>
         message.id === assistantId
           ? {
@@ -1089,7 +1119,7 @@ export default function ChatView({
           settings: settingsRef.current,
           messages: finalMessages,
         },
-        () => setActiveId(threadId),
+        () => announce(threadId),
       );
     },
     [
@@ -1100,7 +1130,7 @@ export default function ChatView({
       clearError,
       messages,
       selectedImageModel,
-      setActiveId,
+      announce,
       setMessages,
       threadId,
     ],
@@ -1287,7 +1317,7 @@ export default function ChatView({
 
   /** Esc stops a run — matches the composer's placeholder hint. */
   useEffect(() => {
-    if (!occupied) return;
+    if (!active || !occupied) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -1296,13 +1326,14 @@ export default function ChatView({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [occupied, stopAny]);
+  }, [active, occupied, stopAny]);
 
   useEffect(
     () => () => {
       imageAbortRef.current?.abort();
+      void stop().catch(() => undefined);
     },
-    [],
+    [stop],
   );
 
   const lastAssistant = useMemo(() => {
@@ -1330,7 +1361,7 @@ export default function ChatView({
         className="dial-ocean-layer pointer-events-none absolute inset-0 -z-10"
         data-margins={shown.length > 0 ? "" : undefined}
       >
-        <Ocean place={shown.length === 0 ? "newchat" : "chat"} className="h-full w-full" />
+        {active && <Ocean place={shown.length === 0 ? "newchat" : "chat"} className="h-full w-full" />}
       </div>
 
       <div

@@ -281,6 +281,7 @@ const held = new Map<string, Held>();
 const downloading = new Map<string, Promise<string | null>>();
 let heldBytes = 0;
 let pinnedThread: string | null = null;
+const retainedThreads = new Map<string, number>();
 
 /**
  * How much of other threads' media to keep for an instant reopen: 64MB on a
@@ -298,7 +299,7 @@ function trimHeld(): void {
   const oldest = [...held.entries()].sort((a, b) => a[1].used - b[1].used);
   for (const [key, entry] of oldest) {
     if (heldBytes <= budget) break;
-    if (entry.thread === pinnedThread) continue;
+    if (entry.thread === pinnedThread || retainedThreads.has(entry.thread)) continue;
     URL.revokeObjectURL(entry.url);
     held.delete(key);
     heldBytes -= entry.bytes;
@@ -309,6 +310,17 @@ function trimHeld(): void {
 export function pinBlobThread(thread: string | null): void {
   pinnedThread = thread;
   trimHeld();
+}
+
+/** A mounted chat may still need its media for a request, save, or draft. */
+export function retainBlobThread(thread: string): () => void {
+  retainedThreads.set(thread, (retainedThreads.get(thread) ?? 0) + 1);
+  return () => {
+    const count = (retainedThreads.get(thread) ?? 1) - 1;
+    if (count > 0) retainedThreads.set(thread, count);
+    else retainedThreads.delete(thread);
+    trimHeld();
+  };
 }
 
 /** Revoke everything — signing out. */
